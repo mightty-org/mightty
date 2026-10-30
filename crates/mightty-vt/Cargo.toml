@@ -1,0 +1,9 @@
+[package]
+name = "mightty-vt"
+description = "VT escape sequence parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

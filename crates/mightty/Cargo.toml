@@ -1,0 +1,19 @@
+[package]
+name = "mightty"
+description = "A fast, lean, GPU-rendered terminal built for the agent era"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mightty-term.workspace = true
+mightty-pty.workspace = true
+mightty-json.workspace = true
+mightty-mux.workspace = true
+mightty-mcp.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mightty-macos.workspace = true

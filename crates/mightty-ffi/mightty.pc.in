@@ -1,0 +1,9 @@
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: mightty
+Description: Terminal emulator core: VT parser and screen state
+Version: @VERSION@
+Libs: -L${libdir} -lmightty
+Cflags: -I${includedir}

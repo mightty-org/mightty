@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Policy: zero third-party crates. Only std and OS-provided APIs.
+# Enforced by scripts/check-no-deps.sh.
+[workspace.dependencies]
+mightty-vt = { path = "crates/mightty-vt" }
+mightty-term = { path = "crates/mightty-term" }
+mightty-pty = { path = "crates/mightty-pty" }
+mightty-render = { path = "crates/mightty-render" }
+mightty-ffi = { path = "crates/mightty-ffi" }
+mightty-json = { path = "crates/mightty-json" }
+mightty-mux = { path = "crates/mightty-mux" }
+mightty-mcp = { path = "crates/mightty-mcp" }
+mightty-macos = { path = "crates/mightty-macos" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1

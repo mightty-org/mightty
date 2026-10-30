@@ -1,0 +1,9 @@
+[package]
+name = "mightty-render"
+description = "Platform-independent rendering pieces: palette, procedural glyphs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,332 @@
+//! Hand-written bindings to the Objective-C runtime and the Apple frameworks
+//! we use. Messages go through `objc_msgSend`, cast to the exact signature
+//! of each method (required on arm64, where it is not variadic).
+
+#![allow(non_upper_case_globals)]
+
+use std::borrow::Cow;
+use std::ffi::{CStr, c_char, c_void};
+use std::ptr;
+
+pub type Id = *mut c_void;
+pub type Sel = *const c_void;
+pub type Bool = i8;
+pub const NIL: Id = ptr::null_mut();
+pub const YES: Bool = 1;
+pub const NO: Bool = 0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGSize {
+    pub width: f64,
+    pub height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGRect {
+    pub origin: CGPoint,
+    pub size: CGSize,
+}
+
+#[repr(C)]
+pub struct CFRange {
+    pub location: isize,
+    pub length: isize,
+}
+
+#[repr(C)]
+pub struct MTLOrigin {
+    pub x: usize,
+    pub y: usize,
+    pub z: usize,
+}
+
+#[repr(C)]
+pub struct MTLSize {
+    pub width: usize,
+    pub height: usize,
+    pub depth: usize,
+}
+
+#[repr(C)]
+pub struct MTLRegion {
+    pub origin: MTLOrigin,
+    pub size: MTLSize,
+}
+
+#[repr(C)]
+pub struct MTLClearColor {
+    pub red: f64,
+    pub green: f64,
+    pub blue: f64,
+    pub alpha: f64,
+}
+
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_getClass(name: *const c_char) -> Id;
+    fn sel_registerName(name: *const c_char) -> Sel;
+    fn objc_msgSend();
+    #[cfg(target_arch = "x86_64")]
+    fn objc_msgSend_stret();
+    pub fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra_bytes: usize) -> Id;
+    pub fn objc_registerClassPair(cls: Id);
+    pub fn class_addMethod(cls: Id, name: Sel, imp: *const c_void, types: *const c_char) -> Bool;
+    pub fn objc_autoreleasePoolPush() -> *mut c_void;
+    pub fn objc_autoreleasePoolPop(pool: *mut c_void);
+}
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    pub static NSPasteboardTypeString: Id;
+    pub fn NSBeep();
+}
+
+#[link(name = "QuartzCore", kind = "framework")]
+unsafe extern "C" {
+    pub static kCAGravityTopLeft: Id;
+}
+
+#[link(name = "Metal", kind = "framework")]
+unsafe extern "C" {
+    pub fn MTLCreateSystemDefaultDevice() -> Id;
+}
+
+pub type CFTypeRef = *const c_void;
+pub type CFStringRef = *const c_void;
+pub type CTFontRef = *const c_void;
+pub type CGContextRef = *mut c_void;
+pub type CGColorSpaceRef = *mut c_void;
+
+pub const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+pub const kCTFontTraitItalic: u32 = 1 << 0;
+pub const kCTFontTraitBold: u32 = 1 << 1;
+pub const kCTFontTraitColorGlyphs: u32 = 1 << 13;
+pub const kCGImageAlphaPremultipliedFirst: u32 = 2;
+pub const kCGBitmapByteOrder32Little: u32 = 2 << 12;
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    pub fn CFStringCreateWithBytes(
+        alloc: *const c_void,
+        bytes: *const u8,
+        len: isize,
+        encoding: u32,
+        is_external: bool,
+    ) -> CFStringRef;
+    pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+    pub fn CFRelease(cf: CFTypeRef);
+}
+
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    pub fn CTFontCreateWithName(name: CFStringRef, size: f64, matrix: *const c_void) -> CTFontRef;
+    pub fn CTFontCreateCopyWithSymbolicTraits(
+        font: CTFontRef,
+        size: f64,
+        matrix: *const c_void,
+        value: u32,
+        mask: u32,
+    ) -> CTFontRef;
+    pub fn CTFontCreateForString(current: CTFontRef, string: CFStringRef, range: CFRange) -> CTFontRef;
+    pub fn CTFontGetAscent(font: CTFontRef) -> f64;
+    pub fn CTFontGetDescent(font: CTFontRef) -> f64;
+    pub fn CTFontGetLeading(font: CTFontRef) -> f64;
+    pub fn CTFontGetSymbolicTraits(font: CTFontRef) -> u32;
+    pub fn CTFontGetGlyphsForCharacters(font: CTFontRef, chars: *const u16, glyphs: *mut u16, count: isize) -> bool;
+    pub fn CTFontGetAdvancesForGlyphs(
+        font: CTFontRef,
+        orientation: u32,
+        glyphs: *const u16,
+        advances: *mut CGSize,
+        count: isize,
+    ) -> f64;
+    pub fn CTFontDrawGlyphs(font: CTFontRef, glyphs: *const u16, positions: *const CGPoint, count: usize, ctx: CGContextRef);
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
+    pub fn CGColorSpaceRelease(space: CGColorSpaceRef);
+    pub fn CGBitmapContextCreate(
+        data: *mut c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: CGColorSpaceRef,
+        bitmap_info: u32,
+    ) -> CGContextRef;
+    pub fn CGContextRelease(ctx: CGContextRef);
+    pub fn CGContextSetRGBFillColor(ctx: CGContextRef, r: f64, g: f64, b: f64, a: f64);
+    pub fn CGContextSetAllowsFontSmoothing(ctx: CGContextRef, allows: bool);
+    pub fn CGContextSetShouldSmoothFonts(ctx: CGContextRef, should: bool);
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGBitmapContextCreateImage(ctx: CGContextRef) -> CFTypeRef;
+    pub fn CFURLCreateFromFileSystemRepresentation(
+        alloc: *const c_void,
+        path: *const u8,
+        len: isize,
+        is_directory: bool,
+    ) -> CFTypeRef;
+}
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGImageDestinationCreateWithURL(url: CFTypeRef, kind: CFStringRef, count: usize, options: CFTypeRef) -> CFTypeRef;
+    pub fn CGImageDestinationAddImage(dest: CFTypeRef, image: CFTypeRef, properties: CFTypeRef);
+    pub fn CGImageDestinationFinalize(dest: CFTypeRef) -> bool;
+}
+
+// libdispatch lives in libSystem.
+unsafe extern "C" {
+    static _dispatch_main_q: u8;
+    fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+}
+
+/// Schedules `work` on the main thread's run loop.
+pub fn run_on_main(work: extern "C" fn(*mut c_void)) {
+    run_on_main_with(0, work);
+}
+
+/// Like `run_on_main`, passing `context` (an integer, not a pointer) to `work`.
+pub fn run_on_main_with(context: usize, work: extern "C" fn(*mut c_void)) {
+    // SAFETY: the main queue is a static object that lives for the whole
+    // process, and the context is only ever read back as an integer.
+    unsafe { dispatch_async_f((&raw const _dispatch_main_q).cast(), context as *mut c_void, work) }
+}
+
+pub fn class(name: &CStr) -> Id {
+    // SAFETY: valid C string; returns null for unknown classes.
+    unsafe { objc_getClass(name.as_ptr()) }
+}
+
+pub fn sel(name: &CStr) -> Sel {
+    // SAFETY: valid C string.
+    unsafe { sel_registerName(name.as_ptr()) }
+}
+
+/// Argument tuples that can be passed through `objc_msgSend`.
+pub trait MessageArgs {
+    /// # Safety
+    /// `imp` must be a messenger and the method's real signature must match `(Self) -> R`.
+    unsafe fn invoke<R>(self, imp: *const (), obj: Id, sel: Sel) -> R;
+}
+
+macro_rules! impl_message_args {
+    ($($t:ident),*) => {
+        impl<$($t),*> MessageArgs for ($($t,)*) {
+            #[allow(non_snake_case)]
+            unsafe fn invoke<R>(self, imp: *const (), obj: Id, sel: Sel) -> R {
+                let ($($t,)*) = self;
+                // SAFETY: upheld by the caller.
+                unsafe {
+                    let f: unsafe extern "C" fn(Id, Sel $(, $t)*) -> R = std::mem::transmute(imp);
+                    f(obj, sel $(, $t)*)
+                }
+            }
+        }
+    };
+}
+
+impl_message_args!();
+impl_message_args!(A);
+impl_message_args!(A, B);
+impl_message_args!(A, B, C);
+impl_message_args!(A, B, C, D);
+
+/// Sends `sel` to `obj`.
+///
+/// # Safety
+/// The receiver must respond to `sel` with exactly the signature `(args) -> R`.
+pub unsafe fn send<A: MessageArgs, R>(obj: Id, sel_name: &CStr, args: A) -> R {
+    unsafe { args.invoke(objc_msgSend as *const (), obj, sel(sel_name)) }
+}
+
+/// Sends a message returning a `CGRect` (needs `objc_msgSend_stret` on x86_64).
+///
+/// # Safety
+/// The receiver must respond to `sel` with signature `() -> CGRect`.
+pub unsafe fn send_rect(obj: Id, sel_name: &CStr) -> CGRect {
+    #[cfg(target_arch = "x86_64")]
+    let imp = objc_msgSend_stret as *const ();
+    #[cfg(not(target_arch = "x86_64"))]
+    let imp = objc_msgSend as *const ();
+    unsafe { ().invoke(imp, obj, sel(sel_name)) }
+}
+
+/// `msg!(obj, c"selector:with:", a, b)`; the return type is inferred.
+macro_rules! msg {
+    ($obj:expr, $sel:expr $(, $arg:expr)* $(,)?) => {
+        $crate::ffi::send($obj, $sel, ($($arg,)*))
+    };
+}
+
+/// Like `msg!` for methods returning `void`.
+macro_rules! call {
+    ($($t:tt)*) => {{
+        let (): () = msg!($($t)*);
+    }};
+}
+
+pub(crate) use {call, msg};
+
+/// `[[cls alloc] init]`.
+pub unsafe fn new_object(cls: &CStr) -> Id {
+    unsafe { msg!(msg!(class(cls), c"alloc"), c"init") }
+}
+
+/// An autoreleased `NSString`.
+pub fn nsstring(s: &str) -> Id {
+    // SAFETY: bytes/len describe a valid UTF-8 buffer; the result is +1 and
+    // handed to the current autorelease pool.
+    unsafe {
+        let cf = CFStringCreateWithBytes(ptr::null(), s.as_ptr(), s.len() as isize, kCFStringEncodingUTF8, false);
+        msg!(cf as Id, c"autorelease")
+    }
+}
+
+/// Copies an `NSString` into Rust; null becomes "".
+pub unsafe fn string_from_ns(s: Id) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    let p: *const c_char = unsafe { msg!(s, c"UTF8String") };
+    if p.is_null() {
+        return String::new();
+    }
+    match unsafe { CStr::from_ptr(p) }.to_string_lossy() {
+        Cow::Borrowed(s) => s.to_owned(),
+        Cow::Owned(s) => s,
+    }
+}
+
+/// A `CFString` the caller must `CFRelease`.
+pub fn cfstring(s: &str) -> CFStringRef {
+    // SAFETY: valid UTF-8 buffer.
+    unsafe { CFStringCreateWithBytes(ptr::null(), s.as_ptr(), s.len() as isize, kCFStringEncodingUTF8, false) }
+}
+
+/// Registers a new Objective-C class with the given methods.
+pub unsafe fn register_class(name: &CStr, superclass: &CStr, methods: &[(&CStr, *const c_void, &CStr)]) -> Id {
+    unsafe {
+        let cls = objc_allocateClassPair(class(superclass), name.as_ptr(), 0);
+        assert!(!cls.is_null(), "class {name:?} already registered");
+        for &(selector, imp, types) in methods {
+            class_addMethod(cls, sel(selector), imp, types.as_ptr());
+        }
+        objc_registerClassPair(cls);
+        cls
+    }
+}

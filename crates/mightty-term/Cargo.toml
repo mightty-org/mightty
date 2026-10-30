@@ -1,0 +1,13 @@
+[package]
+name = "mightty-term"
+description = "Terminal state: grids, scrollback, cursor and modes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mightty-vt.workspace = true
+
+[lints]
+workspace = true
+

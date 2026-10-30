@@ -1,0 +1,17 @@
+[package]
+name = "mightty-mux"
+description = "Pane multiplexer and JSON-RPC control socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mightty-term.workspace = true
+mightty-pty.workspace = true
+mightty-json.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+mightty-pty.workspace = true
