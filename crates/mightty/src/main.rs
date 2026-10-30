@@ -8,10 +8,10 @@ use mightty_pty::{Pty, WindowSize};
 use mightty_term::Term;
 
 const USAGE: &str = "\
-usage: mightty                 open a terminal window
-       mightty -e <program> [args...]
-                              open a window running <program> in the current
-                              directory; it closes when the program exits
+usage: mightty [--setting=value...] [-e <program> [args...]]
+                              open a terminal window; with -e it runs
+                              <program> in the current directory and closes
+                              when the program exits (see `mightty --help`)
        mightty ctl <command>   control a running mightty (see `mightty ctl`)
        mightty mcp             MCP server for AI agents (stdio)
        mightty run [--cols N] [--rows N] [--screen] [--] <program> [args...]
@@ -24,17 +24,6 @@ Add mightty to an agent, e.g. Claude Code:  claude mcp add mightty -- mightty mc
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        #[cfg(target_os = "macos")]
-        None => mightty_macos::run(mightty_macos::Config::from_env()).map(|()| ExitCode::SUCCESS),
-        #[cfg(target_os = "macos")]
-        Some("-e") if args.len() > 1 => {
-            let config = mightty_macos::Config {
-                command: Some(format!("exec {}", args[1..].iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" "))),
-                cwd: env::current_dir().ok(),
-                ..mightty_macos::Config::from_env()
-            };
-            mightty_macos::run(config).map(|()| ExitCode::SUCCESS)
-        }
         Some("run") => run(&args[1..]),
         Some("ctl") => ctl::main(&args[1..]).map_err(io::Error::other),
         Some("mcp") => mightty_mcp::serve(mightty_mcp::Backend::connect(), io::stdin().lock(), io::stdout().lock())
@@ -42,6 +31,23 @@ fn main() -> ExitCode {
         Some("--version" | "-V") => {
             println!("mightty {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
+        }
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            #[cfg(target_os = "macos")]
+            println!("\nsettings [default]:\n{}", mightty_macos::Config::default().help().trim_end());
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(target_os = "macos")]
+        _ if args.first().is_none_or(|a| a.starts_with('-')) => {
+            let mut config = mightty_macos::Config::default();
+            match config.apply_args(&args) {
+                Ok(()) => mightty_macos::run(config).map(|()| ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("mightty: {e}");
+                    return ExitCode::from(2);
+                }
+            }
         }
         _ => {
             eprintln!("{USAGE}");
@@ -52,15 +58,6 @@ fn main() -> ExitCode {
         eprintln!("mightty: {e}");
         ExitCode::FAILURE
     })
-}
-
-/// `arg` as one word for `sh -c`.
-fn shell_quote(arg: &str) -> String {
-    if !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&b)) {
-        arg.to_owned()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
-    }
 }
 
 fn run(args: &[String]) -> io::Result<ExitCode> {

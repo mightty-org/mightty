@@ -7,49 +7,19 @@
 //! AI agents can open, drive and read panes; panes they open get windows.
 
 use std::cell::RefCell;
-use std::env;
 use std::ffi::{CStr, c_void};
 use std::fs;
 use std::io;
 use std::mem;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use mightty_mux::{Host, Mux, Pane, PaneId, SpawnOptions};
 use mightty_term::{MouseMode, Term};
 
+use crate::config::Config;
 use crate::ffi::*;
 use crate::keys::{self, Mods, MouseAction};
 use crate::renderer::{self, Renderer, Snapshot};
-
-pub struct Config {
-    pub font: String,
-    /// Points.
-    pub font_size: f64,
-    pub cols: u16,
-    pub rows: u16,
-    /// Shell command line for the first window instead of a login shell;
-    /// the window closes when it exits.
-    pub command: Option<String>,
-    /// Working directory for the first window; defaults to `$HOME`.
-    pub cwd: Option<PathBuf>,
-}
-
-impl Config {
-    /// Defaults, overridable with `MIGHTTY_FONT`, `MIGHTTY_FONT_SIZE`,
-    /// `MIGHTTY_COLS` and `MIGHTTY_ROWS` until a config file exists.
-    pub fn from_env() -> Self {
-        let number = |name: &str| env::var(name).ok().and_then(|s| s.parse().ok());
-        Self {
-            font: env::var("MIGHTTY_FONT").unwrap_or_else(|_| "Menlo".into()),
-            font_size: number("MIGHTTY_FONT_SIZE").unwrap_or(14.0),
-            cols: number("MIGHTTY_COLS").unwrap_or(100.0) as u16,
-            rows: number("MIGHTTY_ROWS").unwrap_or(30.0) as u16,
-            command: None,
-            cwd: None,
-        }
-    }
-}
 
 struct App {
     mux: Arc<Mux>,

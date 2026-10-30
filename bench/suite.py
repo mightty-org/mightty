@@ -30,8 +30,9 @@ PROBE = os.path.join(ROOT, "bench", "probe.py")
 
 TERMINALS = {
     "mightty": (
-        [os.path.join(ROOT, "target", "release", "mightty"), "-e"],
-        {"MIGHTTY_COLS": "120", "MIGHTTY_ROWS": "40", "MIGHTTY_FONT": "Menlo", "MIGHTTY_FONT_SIZE": "14"},
+        [os.path.join(ROOT, "target", "release", "mightty"), "--window-width=120", "--window-height=40",
+         "--font-family=Menlo", "--font-size=14", "-e"],
+        {},
     ),
     "ghostty": (
         ["/Applications/Ghostty.app/Contents/MacOS/ghostty", "--config-default-files=false",

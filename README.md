@@ -39,14 +39,24 @@ cargo run --release -- run -- ls -la    # headless: run, print the final screen
 cargo test
 ```
 
-Environment knobs until a config file exists:
+Settings are command line flags written `--name=value`; names follow
+Ghostty's where the meaning is the same, and the same names will work in a
+config file. `mightty --help` lists them with their defaults.
 
-| Variable | Default | |
+| Setting | Default | |
 |---|---|---|
-| `MIGHTTY_FONT` | `Menlo` | Font family |
-| `MIGHTTY_FONT_SIZE` | `14` | Points |
-| `MIGHTTY_COLS`, `MIGHTTY_ROWS` | `100`, `30` | First window's grid |
-| `MIGHTTY_SNAPSHOT` | unset | Write every rendered frame to this PNG (debugging, visual tests) |
+| `--font-family` | `Menlo` | Font family |
+| `--font-size` | `14` | Points |
+| `--window-width`, `--window-height` | `100`, `30` | Size of new windows, in cells |
+| `--command` | login shell | Shell command line for the first window |
+| `--working-directory` | home | Working directory of the first window |
+
+```sh
+mightty --window-width=120 --window-height=40 -e htop
+```
+
+`MIGHTTY_SNAPSHOT=path` writes every rendered frame to a PNG, for debugging
+and visual tests.
 
 ## Agents and scripting
 
