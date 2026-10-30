@@ -61,7 +61,7 @@ and visual tests.
 ## Agents and scripting
 
 Every mightty serves a JSON-RPC control socket (per-user directory, mode
-0700). Panes are owned by the mux, not the windows, so anything that speaks
+0700; mightty refuses a directory someone else owns or a symlink). Panes are owned by the mux, not the windows, so anything that speaks
 the protocol can open, drive and read them.
 
 ```sh
@@ -87,8 +87,10 @@ appear as windows and stay open after they exit. With no mightty running,
 **Shell integration** (zsh) loads automatically in every pane, with no
 dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
 OSC 633;E, OSC 7). That's what lets `run`, `commands` and `run_command`
-return exact output and exit codes. To use it in another terminal, source
-`crates/mightty-mux/shell/mightty.zsh`.
+return exact output and exit codes. Marks carry a random per-shell nonce
+that child processes never see, and mightty ignores marks without it, so a
+program's output can't fake a finished command. To use it in another
+terminal, source `crates/mightty-mux/shell/mightty.zsh`.
 
 ## Performance
 

@@ -18,6 +18,8 @@ pub use width::char_width;
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
 const MAX_MARKS: usize = 10_000;
+/// Longer command lines (OSC 633;E) are cut, so the kept ones stay small.
+const MAX_COMMAND_LEN: usize = 4096;
 /// Style tables smaller than this are never garbage-collected.
 const MIN_STYLE_GC: usize = 4096;
 /// Characters that end a word for double-click selection. `/ . : - _ ~ = @`
@@ -161,6 +163,9 @@ pub struct Term {
     commands: Vec<(u64, String)>,
     /// Command line received but not yet attached to an output-start mark.
     pending_command: Option<String>,
+    /// When set, shell-integration marks count only if they carry
+    /// `nonce=<this>`, so programs can't fake a finished command.
+    mark_nonce: Option<Box<[u8]>>,
     responses: Vec<u8>,
     bell: bool,
     styles: Styles,
@@ -203,6 +208,7 @@ impl Term {
             marks: Vec::new(),
             commands: Vec::new(),
             pending_command: None,
+            mark_nonce: None,
             responses: Vec::new(),
             bell: false,
             styles: Styles::new(),
@@ -257,6 +263,17 @@ impl Term {
 
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// Accept shell-integration marks (OSC 133, 633;E) only when they carry
+    /// `nonce=<nonce>`. For shells whose integration we started: the nonce
+    /// is kept from their child processes, so output can't spoof marks.
+    pub fn set_mark_nonce(&mut self, nonce: &str) {
+        self.mark_nonce = Some(format!("nonce={nonce}").into_bytes().into());
+    }
+
+    fn mark_trusted(&self, params: &[&[u8]]) -> bool {
+        self.mark_nonce.as_deref().is_none_or(|nonce| params.contains(&nonce))
     }
 
     pub fn marks(&self) -> &[Mark] {
@@ -1038,7 +1055,9 @@ impl Term {
         let scrollback = mem::take(&mut self.scrollback);
         let styles = mem::replace(&mut self.styles, Styles::new());
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
+        let mark_nonce = self.mark_nonce.take();
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
+        self.mark_nonce = mark_nonce;
         // Scrollback keeps its style ids, so it keeps their table too.
         self.scrollback = scrollback;
         self.styles = styles;
@@ -1157,7 +1176,7 @@ impl Term {
                 self.respond(reply.as_bytes());
                 self.respond(terminator);
             }
-            [b"133", kind, rest @ ..] => {
+            [b"133", kind, rest @ ..] if self.mark_trusted(rest) => {
                 let kind = match kind.first() {
                     Some(b'A') => MarkKind::PromptStart,
                     Some(b'B') => MarkKind::CommandStart,
@@ -1177,12 +1196,25 @@ impl Term {
                 if kind == MarkKind::OutputStart
                     && let Some(command) = self.pending_command.take()
                 {
+                    // Marks on one line all survive pruning by line, so the
+                    // commands need their own cap.
+                    if self.commands.len() >= MAX_MARKS {
+                        self.commands.drain(..MAX_MARKS / 2);
+                    }
                     self.commands.push((line, command));
                 }
             }
             // VS Code's command-line report; `\\` and `\xNN` escapes.
-            [b"633", b"E", command, ..] => {
-                self.pending_command = Some(unescape_command(command));
+            [b"633", b"E", command, rest @ ..] if self.mark_trusted(rest) => {
+                let mut command = unescape_command(command);
+                if command.len() > MAX_COMMAND_LEN {
+                    let mut end = MAX_COMMAND_LEN;
+                    while !command.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    command.truncate(end);
+                }
+                self.pending_command = Some(command);
             }
             _ => {}
         }

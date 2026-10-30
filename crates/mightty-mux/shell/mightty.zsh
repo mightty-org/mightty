@@ -8,23 +8,26 @@
 (( ${+functions[_mightty_precmd]} )) && return
 
 typeset -g _mightty_running=0
+# Set by mightty's bootstrap; marks carry it so mightty can tell them from
+# output that imitates them. Empty when sourced by hand.
+typeset -g _mightty_mark=${_mightty_nonce:+;nonce=$_mightty_nonce}
 
 _mightty_precmd() {
   local ret=$?
   if (( _mightty_running )); then
-    printf '\e]133;D;%d\a' "$ret"
+    printf '\e]133;D;%d%s\a' "$ret" "$_mightty_mark"
     _mightty_running=0
   fi
   printf '\e]7;file://%s%s\a' "${HOST}" "${PWD// /%20}"
-  printf '\e]133;A\a'
+  printf '\e]133;A%s\a' "$_mightty_mark"
 }
 
 _mightty_preexec() {
   local cmd=${1//\\/\\\\}
   cmd=${cmd//;/\\x3b}
   cmd=${cmd//$'\n'/\\x0a}
-  printf '\e]633;E;%s\a' "$cmd"
-  printf '\e]133;C\a'
+  printf '\e]633;E;%s%s\a' "$cmd" "$_mightty_mark"
+  printf '\e]133;C%s\a' "$_mightty_mark"
   _mightty_running=1
 }
 

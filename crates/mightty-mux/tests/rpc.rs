@@ -61,8 +61,15 @@ fn run_uses_shell_integration() {
     assert_eq!(out["command"].as_str(), Some("echo one; echo two; false"));
     assert_eq!(out["timed_out"].as_bool(), Some(false));
 
+    // Output imitating a finished command doesn't end the run early, and
+    // the nonce that real marks carry isn't visible to the command.
+    let spoof = r#"printf '\\e]133;D;0\\a'; sleep 0.3; echo ${MIGHTTY_NONCE:-hidden}; exit_with_7() { return 7 }; exit_with_7"#;
+    let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "{spoof}"}}"#));
+    assert_eq!(out["output"].as_str(), Some("hidden"), "{out}");
+    assert_eq!(out["exit_code"].as_i64(), Some(7));
+
     let commands = call(&mux, "pane.commands", &format!(r#"{{"pane": {id}}}"#));
-    assert_eq!(commands.as_array().unwrap().len(), 1);
+    assert_eq!(commands.as_array().unwrap().len(), 2);
     mux.close(id);
     let _ = std::fs::remove_dir_all(home);
 }

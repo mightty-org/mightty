@@ -198,6 +198,36 @@ fn command_blocks_from_shell_integration() {
 }
 
 #[test]
+fn shell_command_history_is_bounded() {
+    // A program can spam marks without newlines, so they all share a line.
+    let mut t = Term::new(40, 10);
+    let long = "x".repeat(MAX_COMMAND_LEN + 10);
+    for _ in 0..MAX_MARKS + 10 {
+        t.feed(format!("\x1b]633;E;{long}\x07\x1b]133;C\x07").as_bytes());
+    }
+    assert!(t.commands.len() < MAX_MARKS && t.marks.len() < MAX_MARKS);
+    assert!(t.commands.iter().all(|(_, c)| c.len() == MAX_COMMAND_LEN));
+}
+
+#[test]
+fn marks_without_the_nonce_are_ignored() {
+    let mut t = Term::new(40, 10);
+    t.set_mark_nonce("k3y");
+    t.feed(b"\x1b]133;A;nonce=k3y\x07$ make\r\n\x1b]633;E;make;nonce=k3y\x07\x1b]133;C;nonce=k3y\x07");
+    // A program's output pretending the command finished.
+    t.feed(b"\x1b]133;D;0\x07\x1b]133;D;0;nonce=guess\x07\x1b]633;E;rm\x07\x1b]133;C\x07");
+    let blocks = t.command_blocks();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].command.as_deref(), Some("make"));
+    assert_eq!(blocks[0].end_line, None);
+
+    t.feed(b"\x1bc\x1b]133;D;0\x07"); // RIS keeps the nonce
+    t.feed(b"\x1b]133;D;2;nonce=k3y\x07");
+    assert_eq!(t.marks().len(), 1);
+    assert_eq!(t.marks()[0].kind, MarkKind::CommandEnd { exit_code: Some(2) });
+}
+
+#[test]
 fn bulk_text_matches_char_by_char() {
     use mightty_vt::Perform;
     // The bulk path (runs via print_str) must match per-char `print` exactly,

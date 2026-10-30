@@ -6,7 +6,7 @@
 use std::env;
 use std::fs::{self, DirBuilder};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,11 +27,30 @@ pub fn runtime_dir() -> PathBuf {
     PathBuf::from(base).join(format!("mightty-{}", unsafe { getuid() }))
 }
 
-fn private_dir() -> io::Result<PathBuf> {
+/// [`runtime_dir`], created if missing, once it checks out as a real
+/// directory (not a symlink) owned by this user. With a shared base like
+/// `/tmp`, someone else could create it first and plant files or sockets.
+pub(crate) fn private_dir() -> io::Result<PathBuf> {
     let dir = runtime_dir();
-    DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    ensure_private(&dir)?;
     Ok(dir)
+}
+
+fn ensure_private(dir: &Path) -> io::Result<()> {
+    match DirBuilder::new().mode(0o700).create(dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    let meta = fs::symlink_metadata(dir)?;
+    // SAFETY: getuid cannot fail.
+    if !meta.is_dir() || meta.uid() != unsafe { getuid() } {
+        let message = format!("{} is not a directory owned by you; refusing to use it", dir.display());
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
+    }
+    if meta.mode() & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// Binds `<runtime_dir>/<pid>.sock` and serves `mux` on it from background
@@ -131,7 +150,7 @@ impl Client {
         if let Some(path) = env::var_os("MIGHTTY_SOCKET") {
             return Self::connect(Path::new(&path));
         }
-        let mut sockets: Vec<_> = fs::read_dir(runtime_dir())?
+        let mut sockets: Vec<_> = fs::read_dir(private_dir()?)?
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "sock"))
@@ -170,5 +189,36 @@ impl Client {
             Some(error) => Err(CallError::Rpc(error["message"].as_str().unwrap_or("unknown error").to_owned())),
             None => Ok(reply["result"].clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_dir_is_checked() {
+        let base = env::temp_dir().join(format!("mightty-test-{}", process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+
+        let fresh = base.join("fresh");
+        ensure_private(&fresh).unwrap();
+        assert_eq!(fs::metadata(&fresh).unwrap().mode() & 0o777, 0o700);
+
+        let loose = base.join("loose");
+        fs::create_dir(&loose).unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o777)).unwrap();
+        ensure_private(&loose).unwrap();
+        assert_eq!(fs::metadata(&loose).unwrap().mode() & 0o777, 0o700);
+
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert_eq!(ensure_private(&link).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let file = base.join("file");
+        fs::write(&file, "").unwrap();
+        assert!(ensure_private(&file).is_err());
+
+        fs::remove_dir_all(&base).unwrap();
     }
 }

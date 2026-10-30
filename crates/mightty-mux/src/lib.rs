@@ -180,13 +180,17 @@ impl Mux {
         if let Some(socket) = self.socket_path() {
             cmd.env("MIGHTTY_SOCKET", socket);
         }
-        shell::integrate(&mut cmd, &shell);
+        let nonce = shell::integrate(&mut cmd, &shell);
 
         let pty = Pty::spawn(cmd, WindowSize { cols: opts.cols, rows: opts.rows, ..Default::default() })?;
         let reader = pty.reader()?;
+        let mut term = Term::new(opts.cols.into(), opts.rows.into());
+        if let Some(nonce) = &nonce {
+            term.set_mark_nonce(nonce);
+        }
         let pane = Arc::new(Pane {
             id,
-            term: Arc::new(Mutex::new(Term::new(opts.cols.into(), opts.rows.into()))),
+            term: Arc::new(Mutex::new(term)),
             command: label,
             writer: Mutex::new(pty.writer()?),
             pty: Mutex::new(pty),

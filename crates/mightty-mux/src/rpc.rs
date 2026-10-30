@@ -284,7 +284,14 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
             pane.id
         )));
     }
-    let baseline = finished_commands(&pane.term.lock().unwrap());
+    let baseline = {
+        let term = pane.term.lock().unwrap();
+        // Typing into a running program would hand it the command instead.
+        if term.marks().last().is_some_and(|m| m.kind == MarkKind::OutputStart) {
+            return Err(RpcError::failed(format!("pane {} is still running a command", pane.id)));
+        }
+        finished_commands(&term)
+    };
     write(&pane, format!("{command}\r").as_bytes())?;
     let max_output = max_output(params);
     let finished = wait_until(&pane, timeout(params, DEFAULT_RUN_WAIT), |pane| {
