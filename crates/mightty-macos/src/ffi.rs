@@ -193,6 +193,8 @@ unsafe extern "C" {
 unsafe extern "C" {
     static _dispatch_main_q: u8;
     fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn dispatch_after_f(when: u64, queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn dispatch_time(when: u64, delta: i64) -> u64;
 }
 
 /// Schedules `work` on the main thread's run loop.
@@ -205,6 +207,15 @@ pub fn run_on_main_with(context: usize, work: extern "C" fn(*mut c_void)) {
     // SAFETY: the main queue is a static object that lives for the whole
     // process, and the context is only ever read back as an integer.
     unsafe { dispatch_async_f((&raw const _dispatch_main_q).cast(), context as *mut c_void, work) }
+}
+
+/// Like `run_on_main`, but no sooner than `delay` from now.
+pub fn run_on_main_after(delay: std::time::Duration, work: extern "C" fn(*mut c_void)) {
+    // SAFETY: as in `run_on_main_with`; `dispatch_time(DISPATCH_TIME_NOW, ns)`.
+    unsafe {
+        let when = dispatch_time(0, delay.as_nanos().min(i64::MAX as u128) as i64);
+        dispatch_after_f(when, (&raw const _dispatch_main_q).cast(), std::ptr::null_mut(), work)
+    }
 }
 
 pub fn class(name: &CStr) -> Id {

@@ -207,10 +207,10 @@ turns round by round: 10 startups and 3 sessions each, M2, macOS 15.
 
 Absolute throughput moves with machine load from run to run (this run's
 ASCII medians are lower for all three than the previous one); compare
-across a row of one run. mightty's one loss is CPU at a steady 250
-lines/s (kitty won it in two of the last three runs). Not yet profiled;
-the likely cause is frame pacing, since kitty waits a few milliseconds
-for more output before repainting (`repaint_delay`, `input_delay`).
+across a row of one run. The steady 250 lines/s row above predates frame
+pacing (below), when it was mightty's one loss; in a later mightty–kitty
+run it was 4.9 % against kitty's 8.5 %. That kitty figure differs a lot
+from the 4.5 % above, so treat this row as noisy.
 
 ```sh
 python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]  # full suite above; launches each terminal itself
@@ -254,8 +254,14 @@ What made the difference, measured along the way:
   are reused across frames, and the style table is compacted in place
   through a bitmap of live ids and sized exactly, where a doubling `Vec`
   plus a rebuilt copy briefly needed several times the live styles.
+- **Frame pacing**: output redraws wait for the display's next refresh on
+  a timer instead of in `nextDrawable`. Before, the main thread spent ~99 %
+  of a steady 250 lines/s stream blocked there, so keystrokes queued behind
+  it; now it is idle ~98 % of the time, and CPU fell from ~4.4 % to ~3.4 %
+  in an A/B run. Output after a pause (such as a typed key's echo) is
+  drawn at once; during a stream it waits at most one refresh.
 
-Next: frame pacing for steady output, keypress-to-screen latency, and SIMD (NEON) for the SGR-heavy path.
+Next: keypress-to-screen latency, and SIMD (NEON) for the SGR-heavy path.
 
 ## libmightty (C ABI)
 

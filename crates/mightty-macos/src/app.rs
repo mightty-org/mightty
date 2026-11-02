@@ -12,6 +12,7 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Mux, Pane, PaneId, SpawnOptions};
 use mightty_term::{MouseMode, Term};
@@ -50,6 +51,8 @@ struct Window {
     scroll_remainder: f64,
     title: String,
     selection: Option<Selection>,
+    /// Output redraws wait until then: one frame per display refresh.
+    next_frame: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,13 +152,41 @@ impl Host for GuiHost {
     }
 }
 
+/// Draws panes with new output, at most once per display refresh each.
+///
+/// Waiting for the refresh here, rather than in `nextDrawable`, keeps the
+/// main thread free for input while output streams in. Output after a pause
+/// is drawn at once. Invariant: while `pending` isn't empty, a call to this
+/// is scheduled.
 extern "C" fn on_redraw(_: *mut c_void) {
-    let ids = HOST.get().map(|h| mem::take(&mut *h.pending.lock().unwrap())).unwrap_or_default();
+    let Some(host) = HOST.get() else { return };
+    let ids = mem::take(&mut *host.pending.lock().unwrap());
+    let now = Instant::now();
+    let mut wait: Option<(Duration, Vec<PaneId>)> = None;
     with_app(|app| {
         for window in app.windows.iter_mut().filter(|w| ids.contains(&w.pane.id)) {
-            window.render();
+            if window.next_frame <= now {
+                window.render();
+            } else {
+                let (delay, deferred) = wait.get_or_insert((Duration::MAX, Vec::new()));
+                *delay = (*delay).min(window.next_frame - now);
+                deferred.push(window.pane.id);
+            }
         }
     });
+    if let Some((delay, deferred)) = wait {
+        let mut pending = host.pending.lock().unwrap();
+        // Not empty: output arrived meanwhile and another call is on its way.
+        let schedule = pending.is_empty();
+        for id in deferred {
+            if !pending.contains(&id) {
+                pending.push(id);
+            }
+        }
+        if schedule {
+            run_on_main_after(delay, on_redraw);
+        }
+    }
 }
 
 extern "C" fn on_pane_exited(context: *mut c_void) {
@@ -296,6 +327,7 @@ impl App {
                 scroll_remainder: 0.0,
                 title: String::new(),
                 selection: None,
+                next_frame: Instant::now(),
             };
             window.resize();
             self.windows.push(window);
@@ -351,6 +383,9 @@ impl Window {
             if let Some(selection) = frame {
                 let frame = self.renderer.prepare(&self.snapshot, selection);
                 self.renderer.present(frame);
+                let screen: Id = msg!(self.window, c"screen");
+                let fps: isize = if screen.is_null() { 0 } else { msg!(screen, c"maximumFramesPerSecond") };
+                self.next_frame = Instant::now() + Duration::from_secs(1) / fps.clamp(30, 240) as u32;
             }
             objc_autoreleasePoolPop(pool);
         }
