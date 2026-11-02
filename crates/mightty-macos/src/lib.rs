@@ -10,6 +10,8 @@ mod findbar;
 mod font;
 mod keys;
 mod latency;
+mod linkhint;
+mod open;
 mod renderer;
 mod snapshot;
 

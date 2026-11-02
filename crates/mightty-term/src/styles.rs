@@ -55,11 +55,21 @@ impl Styles {
             return StyleId::DEFAULT;
         }
         let slot = &mut self.recent[(key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 52) as usize % RECENT];
-        if slot.0 != key {
+        // A linked style's key isn't exact (see `Style::key`); links are rare.
+        if slot.0 != key || (style.link != 0 && self.list[slot.1 as usize] != style) {
             *slot = (key, self.list.len() as u32);
             self.list.push(style);
         }
         StyleId(slot.1)
+    }
+
+    /// Whether any style in the table refers to hyperlink `n`, for each `n`.
+    pub(crate) fn links(&self) -> Vec<bool> {
+        let mut used = vec![false; u16::MAX as usize + 1];
+        for style in &self.list {
+            used[style.link as usize] = true;
+        }
+        used
     }
 
     /// Marks the styles `rows` use; the default style is always kept.

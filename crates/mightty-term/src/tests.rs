@@ -434,3 +434,47 @@ fn search_from_covers_new_output() {
     assert_eq!(all, t.search("needle"));
     assert_eq!(all.len(), 3);
 }
+
+#[test]
+fn osc8_links_cells_and_survives_sgr() {
+    let t = term(40, 2, "a \x1b]8;;https://example.com/x;y\x07li\x1b[1;31mnk\x1b[0m!\x1b]8;;\x07 b");
+    let id = t.link_at(0, 2).expect("linked");
+    assert_eq!(t.link(id), Some("https://example.com/x;y"));
+    // SGR changes and resets in the middle don't end the link.
+    assert_eq!(t.link_at(0, 4), Some(id));
+    assert_eq!(t.link_at(0, 6), Some(id));
+    assert_eq!(t.link_at(0, 0), None);
+    assert_eq!(t.link_at(0, 8), None);
+    // Same id and target: one link, even split across lines; other ids differ.
+    let t = term(40, 3, "\x1b]8;id=a;https://x\x1b\\one\x1b]8;;\x1b\\\r\n\x1b]8;id=a;https://x\x1b\\two\x1b]8;id=b;https://x\x1b\\3");
+    assert_eq!(t.link_at(0, 0), t.link_at(1, 0));
+    assert_ne!(t.link_at(1, 0), t.link_at(1, 3));
+    // Too long a target is ignored.
+    let long = format!("\x1b]8;;https://{}\x07x", "a".repeat(5000));
+    assert_eq!(term(10, 1, &long).link_at(0, 0), None);
+}
+
+#[test]
+fn link_ids_are_reclaimed() {
+    let mut t = Term::with_scrollback(10, 1, 0);
+    for i in 0..70_000 {
+        t.feed(format!("\r\x1b]8;;https://x/{i}\x07a\x1b]8;;\x07").as_bytes());
+    }
+    let id = t.link_at(0, 0).expect("still linking");
+    assert_eq!(t.link(id), Some("https://x/69999"));
+}
+
+#[test]
+fn urls_are_found_in_plain_text() {
+    let t = term(40, 4, "see (https://example.com/a_(b)).\r\nmail me: mailto:me@x.org, ok\r\nxxxxxxxxxxxxhttps://wrap.example/long/path");
+    let (range, url) = t.url_at(0, 10).unwrap();
+    assert_eq!(url, "https://example.com/a_(b)");
+    assert_eq!(range, ((0, 5), (0, 29)));
+    assert_eq!(t.url_at(0, 1), None);
+    assert_eq!(t.url_at(1, 12).unwrap().1, "mailto:me@x.org");
+    // Across a soft wrap, from either row.
+    assert_eq!(t.url_at(3, 1).unwrap().1, "https://wrap.example/long/path");
+    assert_eq!(t.url_at(2, 13).unwrap().0, ((2, 12), (3, 1)));
+    // A scheme alone isn't a URL.
+    assert_eq!(term(20, 1, "go to https:// now").url_at(0, 8), None);
+}

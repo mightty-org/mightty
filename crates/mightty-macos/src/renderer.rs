@@ -106,6 +106,16 @@ pub struct Highlights<'a> {
     /// In order, start first; only those on screen matter.
     pub matches: &'a [Selection],
     pub current: Option<Selection>,
+    /// The link under the pointer while Cmd is held, underlined.
+    pub link: Option<HoveredLink>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HoveredLink {
+    /// An OSC 8 hyperlink: every cell carrying it.
+    Id(u16),
+    /// A URL found in the text.
+    Range(Selection),
 }
 
 /// What a glyph draws: a character, or a grapheme cluster of several.
@@ -439,7 +449,7 @@ impl Renderer {
     }
 
     fn build_quads(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Vec<Quad> {
-        let Highlights { selection, matches, current } = highlights;
+        let Highlights { selection, matches, current, link } = highlights;
         let within = |(start, end): Selection, at| start <= at && at <= end;
         // Cells go in order, so matches ending before the current cell are
         // skipped once: `matches[next..]` is what's left.
@@ -520,7 +530,12 @@ impl Renderer {
                 if cell.flags.contains(Flags::DIM) {
                     fg[3] = 0.5;
                 }
-                if cell.flags.contains(Flags::UNDERLINE) {
+                let hovered = match link {
+                    Some(HoveredLink::Id(id)) => cell.link == id,
+                    Some(HoveredLink::Range(range)) => within(range, at),
+                    None => false,
+                };
+                if cell.flags.contains(Flags::UNDERLINE) || hovered {
                     front.push(Quad::solid(x, y + baseline + thickness, w, thickness, fg));
                 }
                 if cell.flags.contains(Flags::STRIKE) {

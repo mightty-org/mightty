@@ -67,6 +67,9 @@ pub struct Style {
     pub bg: Color,
     /// Attributes only (`BOLD` ..= `STRIKE`); layout flags live on the cell.
     pub flags: Flags,
+    /// OSC 8 hyperlink, 0 for none: look it up with
+    /// [`Term::link`](crate::Term::link).
+    pub link: u16,
 }
 
 impl Style {
@@ -75,7 +78,9 @@ impl Style {
         Self { bg: self.bg, ..Self::default() }
     }
 
-    /// All fields in one integer: the style table's hash key.
+    /// The style table's hash key: every field but `link` exactly, which
+    /// is only mixed in, so a linked style's key must be checked against
+    /// the style itself.
     pub(crate) fn key(self) -> u64 {
         fn color(c: Color) -> u64 {
             match c {
@@ -84,7 +89,8 @@ impl Style {
                 Color::Rgb(r, g, b) => 2 << 24 | (r as u64) << 16 | (g as u64) << 8 | b as u64,
             }
         }
-        color(self.fg) | color(self.bg) << 26 | (self.flags.bits() as u64 & 0xff) << 52
+        let key = color(self.fg) | color(self.bg) << 26 | (self.flags.bits() as u64 & 0xff) << 52;
+        if self.link == 0 { key } else { key ^ (self.link as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 << 63 }
     }
 }
 
@@ -158,10 +164,13 @@ pub struct StyledCell {
     pub bg: Color,
     /// Attributes and layout flags together.
     pub flags: Flags,
+    /// OSC 8 hyperlink, 0 for none.
+    pub link: u16,
 }
 
 impl StyledCell {
-    pub const BLANK: StyledCell = StyledCell { c: ' ', fg: Color::Default, bg: Color::Default, flags: Flags::empty() };
+    pub const BLANK: StyledCell =
+        StyledCell { c: ' ', fg: Color::Default, bg: Color::Default, flags: Flags::empty(), link: 0 };
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

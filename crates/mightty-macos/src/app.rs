@@ -22,7 +22,9 @@ use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
 use crate::latency;
-use crate::renderer::{self, Highlights, Renderer, Snapshot};
+use crate::open;
+use crate::linkhint::LinkHint;
+use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
 
 struct App {
     mux: Arc<Mux>,
@@ -64,6 +66,10 @@ struct Window {
     /// The input method used the key being handled (inserted or composed text).
     ime_used_key: bool,
     search: Option<Search>,
+    /// The link under the pointer while Cmd is held, and where it goes.
+    hover: Option<(HoveredLink, String)>,
+    /// Shows `hover`'s target; made on first use.
+    hint: Option<LinkHint>,
 }
 
 /// An open search bar and what it found.
@@ -175,6 +181,9 @@ fn us_keyboard_layout() -> bool {
         matches!(id.as_str(), "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
     }
 }
+
+/// NSEventModifierFlagCommand.
+const CMD: usize = 1 << 20;
 
 fn modifiers(flags: usize) -> Mods {
     Mods { shift: flags & (1 << 17) != 0, ctrl: flags & (1 << 18) != 0, alt: flags & (1 << 19) != 0 }
@@ -396,6 +405,18 @@ impl App {
             let container: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", content);
             call!(container, c"setWantsLayer:", YES);
             call!(view, c"setAutoresizingMask:", 18usize); // width and height sizable
+            // Mouse moves (for Cmd-hovering links) while the window is key.
+            let options = 0x01usize | 0x02 | 0x20 | 0x200; // entered/exited, moved, active in key window, visible rect
+            let area: Id = msg!(
+                msg!(class(c"NSTrackingArea"), c"alloc"),
+                c"initWithRect:options:owner:userInfo:",
+                CGRect::default(),
+                options,
+                view,
+                NIL
+            );
+            call!(view, c"addTrackingArea:", area);
+            call!(area, c"release");
             call!(container, c"addSubview:", view);
             call!(window, c"setContentView:", container);
             call!(container, c"release");
@@ -427,6 +448,8 @@ impl App {
                 preedit: String::new(),
                 ime_used_key: false,
                 search: None,
+                hover: None,
+                hint: None,
             };
             window.resize();
             self.windows.push(window);
@@ -490,9 +513,10 @@ impl Window {
                 if let Some(search) = &mut self.search {
                     search.update_count();
                 }
+                let link = self.hover.as_ref().map(|h| h.0);
                 let highlights = match &self.search {
-                    Some(search) => Highlights { selection, matches: &search.matches, current: search.current },
-                    None => Highlights { selection, ..Highlights::default() },
+                    Some(search) => Highlights { selection, matches: &search.matches, current: search.current, link },
+                    None => Highlights { selection, link, ..Highlights::default() },
                 };
                 let frame = self.renderer.prepare(&self.snapshot, highlights);
                 let presented = latency::frame(self.window, &self.snapshot);
@@ -612,10 +636,7 @@ impl Window {
                 call!(search.bar.field, c"selectText:", NIL);
                 return;
             }
-            let (r, g, b) = self.renderer.theme().background;
-            let luma = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
-            let dark = luma < 128.0;
-            let bar = FindBar::open(msg!(self.window, c"contentView"), self.view, dark);
+            let bar = FindBar::open(msg!(self.window, c"contentView"), self.view, self.dark());
             call!(self.window, c"makeFirstResponder:", bar.field);
             self.search = Some(Search { bar, query: String::new(), matches: Vec::new(), current: None, searched_to: 0, alt: false });
         }
@@ -711,6 +732,50 @@ impl Window {
             self.scroll_offset = offset;
             self.render();
         }
+    }
+
+    /// A dark terminal theme, for the overlays to match.
+    fn dark(&self) -> bool {
+        let (r, g, b) = self.renderer.theme().background;
+        let luma = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
+        luma < 128.0
+    }
+
+    /// Finds the link under the pointer while Cmd is held (`cmd`): an OSC 8
+    /// hyperlink or a URL in the text. Underlines it, shows where it goes
+    /// and turns the pointer into a hand.
+    fn update_hover(&mut self, cmd: bool) {
+        // SAFETY: main thread; documented signatures.
+        let location: CGPoint = unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") };
+        let bounds = unsafe { send_rect(self.view, c"bounds") };
+        let inside = (0.0..bounds.size.width).contains(&location.x) && (0.0..bounds.size.height).contains(&location.y);
+        let hover = (cmd && inside)
+            .then(|| {
+                let (col, row) = self.cell_at(location);
+                let term = self.pane.term.lock().unwrap();
+                let line = term.lines_scrolled() - self.scroll_offset as u64 + row as u64;
+                match term.link_at(line, col) {
+                    Some(id) => Some((HoveredLink::Id(id), term.link(id)?.to_owned())),
+                    None => term.url_at(line, col).map(|(range, url)| (HoveredLink::Range(range), url)),
+                }
+            })
+            .flatten();
+        if hover == self.hover {
+            return;
+        }
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let cursor: Id = msg!(class(c"NSCursor"), if hover.is_some() { c"pointingHandCursor" } else { c"arrowCursor" });
+            call!(cursor, c"set");
+            if hover.is_some() && self.hint.is_none() {
+                self.hint = Some(LinkHint::new(msg!(self.window, c"contentView"), self.dark()));
+            }
+        }
+        if let Some(hint) = &self.hint {
+            hint.show(hover.as_ref().map(|h| h.1.as_str()));
+        }
+        self.hover = hover;
+        self.render();
     }
 
     fn set_focused(&mut self, focused: bool) {
@@ -946,7 +1011,34 @@ unsafe fn register_view_class() -> Id {
         }
     }
     extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
+        // SAFETY: `event` is an NSEvent.
+        let flags: usize = unsafe { msg!(event, c"modifierFlags") };
+        if flags & CMD != 0 {
+            // Cmd-click opens the link under the pointer; it never starts a selection.
+            let link = with_window(view, |w| {
+                w.update_hover(true);
+                w.hover.as_ref().map(|h| h.1.clone())
+            });
+            if let Some(uri) = link.flatten() {
+                open::open(&uri);
+            }
+            return;
+        }
         mouse_event(view, event, MouseAction::Press);
+    }
+    extern "C" fn mouse_moved(view: Id, _: Sel, event: Id) {
+        // SAFETY: `event` is an NSEvent.
+        let flags: usize = unsafe { msg!(event, c"modifierFlags") };
+        with_window(view, |w| w.update_hover(flags & CMD != 0));
+    }
+    extern "C" fn mouse_exited(view: Id, _: Sel, _event: Id) {
+        with_window(view, |w| w.update_hover(false));
+    }
+    /// Cmd pressed or released without the mouse moving.
+    extern "C" fn flags_changed(view: Id, _: Sel, event: Id) {
+        // SAFETY: `event` is an NSEvent.
+        let flags: usize = unsafe { msg!(event, c"modifierFlags") };
+        with_window(view, |w| w.update_hover(flags & CMD != 0));
     }
     extern "C" fn mouse_dragged(view: Id, _: Sel, event: Id) {
         mouse_event(view, event, MouseAction::Motion);
@@ -971,6 +1063,9 @@ unsafe fn register_view_class() -> Id {
             (c"mouseDown:", action(mouse_down), c"v@:@"),
             (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
             (c"mouseUp:", action(mouse_up), c"v@:@"),
+            (c"mouseMoved:", action(mouse_moved), c"v@:@"),
+            (c"mouseExited:", action(mouse_exited), c"v@:@"),
+            (c"flagsChanged:", action(flags_changed), c"v@:@"),
             (c"insertText:replacementRange:", insert_text as *const c_void, c"v@:@{_NSRange=QQ}"),
             (
                 c"setMarkedText:selectedRange:replacementRange:",

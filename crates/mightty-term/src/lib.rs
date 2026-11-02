@@ -5,6 +5,7 @@
 
 mod cell;
 mod graphemes;
+mod links;
 mod styles;
 mod width;
 
@@ -14,6 +15,7 @@ use std::{mem, slice};
 use mightty_vt::{Params, Parser, Perform};
 
 use graphemes::Graphemes;
+use links::Links;
 
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
 pub use styles::Styles;
@@ -200,6 +202,10 @@ pub struct Term {
     /// Style-table size that triggers the next garbage collection.
     gc_at: usize,
     graphemes: Graphemes,
+    links: Links,
+    /// The OSC 8 hyperlink being written, 0 for none. Not part of the pen:
+    /// SGR resets leave it.
+    link: u16,
     /// The last character joined a cluster with U+200D (zero-width
     /// joiner), so the next one joins it too.
     joining: bool,
@@ -251,6 +257,8 @@ impl Term {
             erased_id: None,
             gc_at: MIN_STYLE_GC,
             graphemes: Graphemes::default(),
+            links: Links::default(),
+            link: 0,
             joining: false,
         }
     }
@@ -377,7 +385,95 @@ impl Term {
     pub fn resolve(&self, cell: Cell) -> StyledCell {
         let style = self.style(cell);
         let c = if cell.flags().contains(Flags::GRAPHEME) { self.graphemes.base(cell) } else { cell.c };
-        StyledCell { c, fg: style.fg, bg: style.bg, flags: style.flags | cell.flags() }
+        StyledCell { c, fg: style.fg, bg: style.bg, flags: style.flags | cell.flags(), link: style.link }
+    }
+
+    /// The target of OSC 8 hyperlink `id` ([`Style::link`]).
+    pub fn link(&self, id: u16) -> Option<&str> {
+        self.links.get(id)
+    }
+
+    /// The OSC 8 hyperlink at `(line, col)`, if any.
+    pub fn link_at(&self, line: u64, col: usize) -> Option<u16> {
+        let cells = &self.line(line)?.cells;
+        let col = if col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) { col - 1 } else { col };
+        let link = self.style(*cells.get(col)?).link;
+        (link != 0).then_some(link)
+    }
+
+    /// A URL written as plain text around `(line, col)` (`https://…`,
+    /// `file://…`, `mailto:…` and the like), across soft wraps: its range
+    /// and text. Trailing punctuation and unbalanced closing brackets are
+    /// left out, as in `(see https://example.com/a).`
+    pub fn url_at(&self, line: u64, col: usize) -> Option<(TextRange, String)> {
+        // The logical line around `line`: its characters and their cells.
+        let mut first = line;
+        while first > 0 && self.line(first - 1).is_some_and(|row| row.wrapped) {
+            first -= 1;
+        }
+        let (mut text, mut at) = (Vec::new(), Vec::new());
+        let mut cluster = String::new();
+        let mut here = None;
+        let mut l = first;
+        while let Some(row) = self.line(l) {
+            for (c, &cell) in row.cells.iter().enumerate() {
+                if cell.flags().contains(Flags::WIDE_SPACER) || cell.flags().contains(Flags::WRAP_SPACER) {
+                    continue;
+                }
+                let last = if cell.flags().contains(Flags::WIDE) { c + 1 } else { c };
+                if l == line && (c..=last).contains(&col) {
+                    here = Some(text.len());
+                }
+                cluster.clear();
+                self.push_cell(&mut cluster, cell);
+                for ch in cluster.chars() {
+                    text.push(ch);
+                    at.push(((l, c), (l, last)));
+                }
+            }
+            if !row.wrapped || text.len() > 4 * links::MAX_URI {
+                break;
+            }
+            l += 1;
+        }
+        let here = here?;
+        let in_url = |c: char| !c.is_whitespace() && !c.is_control() && !"<>\"`{}|^".contains(c);
+        if !in_url(text[here]) {
+            return None;
+        }
+        let mut start = here;
+        while start > 0 && in_url(text[start - 1]) {
+            start -= 1;
+        }
+        let mut end = here + 1;
+        while end < text.len() && in_url(text[end]) {
+            end += 1;
+        }
+        // The last scheme starting at or before the cell, inside this run.
+        let token: String = text[start..end].iter().collect();
+        let offsets: Vec<usize> = token.char_indices().map(|(i, _)| i).collect();
+        let scheme = URL_SCHEMES
+            .iter()
+            .flat_map(|s| token.match_indices(s).map(|(i, _)| i))
+            .map(|i| start + offsets.partition_point(|&o| o < i))
+            .filter(|&i| i <= here)
+            .max()?;
+        let mut url: Vec<char> = text[scheme..end].to_vec();
+        // Trailing punctuation, and closing brackets without an opening one.
+        while let Some(&last) = url.last() {
+            let unbalanced = |open, close| last == close && url.iter().filter(|&&c| c == open).count() < url.iter().filter(|&&c| c == close).count();
+            if ".,:;!?'\"".contains(last) || unbalanced('(', ')') || unbalanced('[', ']') {
+                url.pop();
+            } else {
+                break;
+            }
+        }
+        let text: String = url.iter().collect();
+        let body = URL_SCHEMES.iter().find(|s| text.starts_with(**s)).map_or(0, |s| s.len());
+        if text.len() <= body || scheme + url.len() <= here {
+            return None;
+        }
+        Some(((at[scheme].0, at[scheme + url.len() - 1].1), text))
     }
 
     /// The grapheme cluster in `cell`, when it holds more than one
@@ -646,7 +742,7 @@ impl Term {
     fn pen(&mut self) -> StyleId {
         match self.pen_id {
             Some(id) => id,
-            None => *self.pen_id.insert(self.styles.intern(self.cursor.pen)),
+            None => *self.pen_id.insert(self.styles.intern(Style { link: self.link, ..self.cursor.pen })),
         }
     }
 
@@ -1262,6 +1358,7 @@ impl Term {
         let scrollback = mem::take(&mut self.scrollback);
         let styles = mem::replace(&mut self.styles, Styles::new());
         let graphemes = mem::take(&mut self.graphemes);
+        let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
         let (mark_nonce, colors) = (self.mark_nonce.take(), self.colors);
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
@@ -1270,6 +1367,7 @@ impl Term {
         self.scrollback = scrollback;
         self.styles = styles;
         self.graphemes = graphemes;
+        self.links = links;
         self.lines_scrolled = lines_scrolled;
         self.gc_at = gc_at;
     }
@@ -1374,6 +1472,29 @@ impl Term {
     fn osc(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         match params {
+            // OSC 8 ; params ; URI: following text links to URI (none if empty).
+            [b"8", options, uri @ ..] => {
+                let uri = uri.join(&b';');
+                let id = options
+                    .split(|&b| b == b':')
+                    .find_map(|kv| kv.strip_prefix(b"id="))
+                    .unwrap_or_default();
+                let link = match (std::str::from_utf8(&uri), std::str::from_utf8(id)) {
+                    (Ok(uri), Ok(id)) if !uri.is_empty() => {
+                        if self.links.is_full() {
+                            self.collect_styles();
+                            let used = self.styles.links();
+                            self.links.collect(|n| used[usize::from(n)]);
+                        }
+                        self.links.intern(id, uri).unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                if link != self.link {
+                    self.link = link;
+                    self.pen_changed();
+                }
+            }
             [b"0" | b"2", rest @ ..] => {
                 self.title = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
             }
@@ -1720,6 +1841,9 @@ fn fill_cells(cells: &mut [Cell], value: Cell) {
 /// tones is 41 bytes. With every id in use the table then holds at most a
 /// few MiB.
 const MAX_CLUSTER_BYTES: usize = 64;
+
+/// What a plain-text URL starts with, for [`Term::url_at`].
+const URL_SCHEMES: &[&str] = &["https://", "http://", "file://", "ftp://", "ssh://", "git://", "mailto:"];
 
 /// A regional indicator: flags are pairs of them.
 fn is_regional(c: char) -> bool {
