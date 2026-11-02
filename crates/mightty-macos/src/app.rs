@@ -11,6 +11,7 @@ use std::ffi::{CStr, c_void};
 use std::fs;
 use std::io;
 use std::mem;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -60,6 +61,8 @@ struct Window {
     /// After a key press, the next output redraw comes this early instead,
     /// so the echo doesn't wait out the refresh.
     echo_frame: Option<Instant>,
+    /// Where the pane's shell started, for new tabs until it reports one (OSC 7).
+    start_dir: Option<PathBuf>,
     /// Text an input method is composing (marked text), drawn at the
     /// cursor until it's committed.
     preedit: String,
@@ -182,8 +185,9 @@ fn us_keyboard_layout() -> bool {
     }
 }
 
-/// NSEventModifierFlagCommand.
+/// NSEventModifierFlagCommand and NSEventModifierFlagShift.
 const CMD: usize = 1 << 20;
+const SHIFT: usize = 1 << 17;
 
 fn modifiers(flags: usize) -> Mods {
     Mods { shift: flags & (1 << 17) != 0, ctrl: flags & (1 << 18) != 0, alt: flags & (1 << 19) != 0 }
@@ -364,6 +368,11 @@ pub fn run(config: Config) -> io::Result<()> {
 
 impl App {
     fn open_window(&mut self, pane: Arc<Pane>, hold: bool) {
+        self.open_window_in(pane, hold, NIL);
+    }
+
+    /// Opens a window for `pane`, as a new tab of `tab_of` unless that's nil.
+    fn open_window_in(&mut self, pane: Arc<Pane>, hold: bool, tab_of: Id) {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
@@ -396,6 +405,8 @@ impl App {
             call!(window, c"setTitle:", nsstring("mightty"));
             call!(window, c"setDelegate:", self.delegate);
             call!(window, c"setReleasedWhenClosed:", NO);
+            // Native tabs: windows with one identifier can be tabs of each other.
+            call!(window, c"setTabbingIdentifier:", nsstring("mightty"));
 
             let view: Id = msg!(msg!(self.view_class, c"alloc"), c"initWithFrame:", content);
             // Layer-hosting view: set the layer before enabling it.
@@ -426,8 +437,12 @@ impl App {
                 call!(window, c"center");
                 latency::start(window);
             }
-            // With (0,0) this leaves the window in place and returns the next spot.
-            self.cascade = msg!(window, c"cascadeTopLeftFromPoint:", self.cascade);
+            if tab_of.is_null() {
+                // With (0,0) this leaves the window in place and returns the next spot.
+                self.cascade = msg!(window, c"cascadeTopLeftFromPoint:", self.cascade);
+            } else {
+                call!(tab_of, c"addTabbedWindow:ordered:", window, 1isize); // above: just after it
+            }
             call!(window, c"makeKeyAndOrderFront:", NIL);
 
             pane.set_visible(true);
@@ -445,6 +460,7 @@ impl App {
                 selection: None,
                 next_frame: Instant::now(),
                 echo_frame: None,
+                start_dir: None,
                 preedit: String::new(),
                 ime_used_key: false,
                 search: None,
@@ -456,10 +472,25 @@ impl App {
         }
     }
 
-    fn new_shell_window(&mut self) {
-        let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, ..Default::default() };
+    /// A shell in a new window, or with `tab` in a new tab of the key window.
+    /// It starts where the key window's shell is (OSC 7), as in Ghostty.
+    fn new_shell_window(&mut self, tab: bool) {
+        // SAFETY: main thread; documented signature.
+        let key: Id = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow") };
+        let current = self.windows.iter().find(|w| w.window == key);
+        // Any program can report a directory; use it only if it is one.
+        let cwd = current
+            .and_then(|w| w.pane.term.lock().unwrap().cwd().map(PathBuf::from).or_else(|| w.start_dir.clone()))
+            .filter(|dir| dir.is_dir());
+        let tab_of = if tab { current.map_or(NIL, |w| w.window) } else { NIL };
+        let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd: cwd.clone(), ..Default::default() };
         match self.mux.spawn(opts) {
-            Ok(pane) => self.open_window(pane, false),
+            Ok(pane) => {
+                self.open_window_in(pane, false, tab_of);
+                if let Some(window) = self.windows.last_mut() {
+                    window.start_dir = cwd;
+                }
+            }
             Err(e) => eprintln!("mightty: could not start a shell: {e}"),
         }
     }
@@ -1136,7 +1167,29 @@ unsafe fn register_delegate_class() -> Id {
         with_app(|app| app.window_closed(window));
     }
     extern "C" fn new_window(_: Id, _: Sel, _sender: Id) {
-        with_app(App::new_shell_window);
+        with_app(|app| app.new_shell_window(false));
+    }
+    /// ⌘T, and the tab bar's + button (`newWindowForTab:`).
+    extern "C" fn new_tab(_: Id, _: Sel, _sender: Id) {
+        with_app(|app| app.new_shell_window(true));
+    }
+    /// ⌘1…⌘8 pick that tab, ⌘9 the last (the menu item's tag is the digit).
+    extern "C" fn select_tab(_: Id, _: Sel, sender: Id) {
+        // SAFETY: main thread; `sender` is the menu item; documented signatures.
+        unsafe {
+            let digit: isize = msg!(sender, c"tag");
+            let key: Id = msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow");
+            if key.is_null() {
+                return;
+            }
+            let tabs: Id = msg!(key, c"tabbedWindows");
+            let count: usize = if tabs.is_null() { 1 } else { msg!(tabs, c"count") };
+            let index = if digit == 9 { count - 1 } else { digit as usize - 1 };
+            if !tabs.is_null() && index < count {
+                let window: Id = msg!(tabs, c"objectAtIndex:", index);
+                call!(window, c"makeKeyAndOrderFront:", NIL);
+            }
+        }
     }
 
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
@@ -1154,12 +1207,15 @@ unsafe fn register_delegate_class() -> Id {
             (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
             (c"windowWillClose:", action(will_close), c"v@:@"),
             (c"newWindow:", action(new_window), c"v@:@"),
+            (c"newTab:", action(new_tab), c"v@:@"),
+            (c"newWindowForTab:", action(new_tab), c"v@:@"),
+            (c"selectTabByDigit:", action(select_tab), c"v@:@"),
         ])
     }
 }
 
 unsafe fn install_menu(ns_app: Id) {
-    unsafe fn add_item(menu: Id, title: &str, action: &CStr, key: &str) {
+    unsafe fn add_item(menu: Id, title: &str, action: &CStr, key: &str) -> Id {
         unsafe {
             let item: Id = msg!(
                 msg!(class(c"NSMenuItem"), c"alloc"),
@@ -1169,6 +1225,7 @@ unsafe fn install_menu(ns_app: Id) {
                 nsstring(key)
             );
             call!(menu, c"addItem:", item);
+            item
         }
     }
 
@@ -1188,6 +1245,7 @@ unsafe fn install_menu(ns_app: Id) {
         add_item(app_menu, "Quit mightty", c"terminate:", "q");
         let shell_menu = submenu(bar, "Shell");
         add_item(shell_menu, "New Window", c"newWindow:", "n");
+        add_item(shell_menu, "New Tab", c"newTab:", "t");
         add_item(shell_menu, "Close Window", c"performClose:", "w");
         let edit_menu = submenu(bar, "Edit");
         add_item(edit_menu, "Copy", c"copy:", "c");
@@ -1195,6 +1253,21 @@ unsafe fn install_menu(ns_app: Id) {
         add_item(edit_menu, "Find…", c"performFind:", "f");
         add_item(edit_menu, "Find Next", c"findNext:", "g");
         add_item(edit_menu, "Find Previous", c"findPrevious:", "G");
+        // AppKit adds the tab items (Show Tab Bar, Move Tab to New Window, …) here.
+        let window_menu = submenu(bar, "Window");
+        add_item(window_menu, "Minimize", c"performMiniaturize:", "m");
+        // ⌘⇧[ and ⌘⇧]: the unshifted key with Shift in the mask, since with
+        // Cmd held the key may report "[" rather than "{".
+        for (title, action, key) in [("Show Previous Tab", c"selectPreviousTab:", "["), ("Show Next Tab", c"selectNextTab:", "]")] {
+            let item = add_item(window_menu, title, action, key);
+            call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
+        }
+        for digit in 1..=9isize {
+            let title = if digit == 9 { "Select Last Tab".to_owned() } else { format!("Select Tab {digit}") };
+            let item = add_item(window_menu, &title, c"selectTabByDigit:", &digit.to_string());
+            call!(item, c"setTag:", digit);
+        }
+        call!(ns_app, c"setWindowsMenu:", window_menu);
         call!(ns_app, c"setMainMenu:", bar);
     }
 }

@@ -325,5 +325,5 @@ checks the header compiles as C++.
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. Agent status detection (working / waiting for you), attention queue, notifications
-6. Tabs/splits, bash/fish integration (config file ✅)
+6. Splits, bash/fish integration (config file ✅, native tabs ✅: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; new tabs and windows start in the current directory)
 7. Linux (raw Wayland protocol), own font rasterizer, Windows
