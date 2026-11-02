@@ -203,7 +203,8 @@ pub struct Renderer {
 
 impl Renderer {
     /// `layer` must be a `CAMetalLayer`. `font_size` is in points.
-    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme) -> Self {
+    /// Without `vsync`, frames show as soon as they're ready, possibly torn.
+    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme, vsync: bool) -> Self {
         // SAFETY: Metal calls with the documented signatures.
         unsafe {
             let device = MTLCreateSystemDefaultDevice();
@@ -217,6 +218,7 @@ impl Renderer {
             // Each drawable is a full window image (~11 MiB at 120x40 on
             // Retina); frames are paced by the display, so two are enough.
             call!(layer, c"setMaximumDrawableCount:", 2usize);
+            call!(layer, c"setDisplaySyncEnabled:", if vsync { YES } else { NO });
             // Keep content pinned during live resize instead of stretching it.
             call!(layer, c"setContentsGravity:", kCAGravityTopLeft);
 

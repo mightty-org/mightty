@@ -60,6 +60,7 @@ cursor-color = #ff79c6
 | `font-family`, `font-size` | `Menlo`, `14` | Font and size in points |
 | `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
 | `scrollback-lines` | `10000` | Lines kept above the screen |
+| `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
@@ -268,21 +269,29 @@ see the keyboard or the window server before the event reaches the app,
 and it can't run in other terminals; comparing those needs a camera or a
 tool like [Typometer](https://github.com/pavelfatin/typometer).
 
-| | to frame, median | to screen, median | to screen, P95 |
-|---|---|---|---|
-| idle | 0.40 ms | 24.9 ms | 32.8 ms |
-| while streaming 250 lines/s | 9.17 ms | 34.2 ms | 47.6 ms |
-| while flooded | 9.16 ms | 32.8 ms | 45.1 ms |
+Median time to screen, with the echo's frame built ~3 ms after the key
+while busy, ~0.3 ms when idle:
+
+| | `window-vsync=true` (default) | `window-vsync=false` |
+|---|---|---|
+| idle | 24.9 ms | 8.0 ms |
+| while streaming 250 lines/s | 33–37 ms | 11–13 ms |
+| while flooded | 36.1 ms | 8.9 ms |
 
 ```sh
 MIGHTTY_KEY_LATENCY=keys.tsv target/release/mightty -e python3 -I bench/keys.py [idle|stream|flood]
 ```
 
-Idle, the echo is in a frame within half a millisecond; the rest is the
-wait for the display and the compositor. Busy, frame pacing holds the
-echo for the rest of the current refresh (~9 ms on average).
+After a key press the window draws ~2 ms later, once the echo is in,
+instead of at the next refresh. With vsync on that barely shows: each
+frame still queues for a refresh, behind any frame already waiting (idle
+that is ~1.5 refreshes). With it off, macOS takes the newest frame, so the
+queue goes away, at the risk of tearing (mostly fullscreen; untested).
+The default follows kitty (`sync_to_monitor`) and Ghostty (`window-vsync`),
+which moved to on after macOS bugs with it off. These are Metal's
+presented times; a camera should confirm them.
 
-Next: draw a key's echo at once even while output streams, and SIMD (NEON) for the SGR-heavy path.
+Next: SIMD (NEON) for the SGR-heavy path.
 
 ## libmightty (C ABI)
 

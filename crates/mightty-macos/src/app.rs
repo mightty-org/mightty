@@ -54,6 +54,9 @@ struct Window {
     selection: Option<Selection>,
     /// Output redraws wait until then: one frame per display refresh.
     next_frame: Instant,
+    /// After a key press, the next output redraw comes this early instead,
+    /// so the echo doesn't wait out the refresh.
+    echo_frame: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,11 +156,15 @@ impl Host for GuiHost {
     }
 }
 
+/// How long after a key press output is gathered before drawing it: enough
+/// for a shell's echo (under a millisecond), far less than a refresh.
+const ECHO_WAIT: Duration = Duration::from_millis(2);
+
 /// Draws panes with new output, at most once per display refresh each.
 ///
 /// Waiting for the refresh here, rather than in `nextDrawable`, keeps the
 /// main thread free for input while output streams in. Output after a pause
-/// is drawn at once. Invariant: while `pending` isn't empty, a call to this
+/// is drawn at once, and so is a typed key's echo (see `ECHO_WAIT`). Invariant: while `pending` isn't empty, a call to this
 /// is scheduled.
 extern "C" fn on_redraw(_: *mut c_void) {
     let Some(host) = HOST.get() else { return };
@@ -166,11 +173,12 @@ extern "C" fn on_redraw(_: *mut c_void) {
     let mut wait: Option<(Duration, Vec<PaneId>)> = None;
     with_app(|app| {
         for window in app.windows.iter_mut().filter(|w| ids.contains(&w.pane.id)) {
-            if window.next_frame <= now {
+            let due = window.echo_frame.map_or(window.next_frame, |at| at.min(window.next_frame));
+            if due <= now {
                 window.render();
             } else {
                 let (delay, deferred) = wait.get_or_insert((Duration::MAX, Vec::new()));
-                *delay = (*delay).min(window.next_frame - now);
+                *delay = (*delay).min(due - now);
                 deferred.push(window.pane.id);
             }
         }
@@ -274,7 +282,7 @@ impl App {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
             let scale: f64 = if screen.is_null() { 2.0 } else { msg!(screen, c"backingScaleFactor") };
             let layer: Id = msg!(msg!(class(c"CAMetalLayer"), c"layer"), c"retain");
-            let renderer = Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone());
+            let renderer = Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone(), self.config.vsync);
 
             let (cols, rows) = {
                 let term = pane.term.lock().unwrap();
@@ -330,6 +338,7 @@ impl App {
                 title: String::new(),
                 selection: None,
                 next_frame: Instant::now(),
+                echo_frame: None,
             };
             window.resize();
             self.windows.push(window);
@@ -389,6 +398,7 @@ impl Window {
                 let screen: Id = msg!(self.window, c"screen");
                 let fps: isize = if screen.is_null() { 0 } else { msg!(screen, c"maximumFramesPerSecond") };
                 self.next_frame = Instant::now() + Duration::from_secs(1) / fps.clamp(30, 240) as u32;
+                self.echo_frame = None;
             }
             objc_autoreleasePoolPop(pool);
         }
@@ -552,6 +562,11 @@ unsafe fn register_view_class() -> Id {
                 let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
                 if let Some(bytes) = keys::encode(code, &chars, &base, mods, app_cursor) {
                     w.write(&bytes);
+                    if w.echo_frame.is_none() {
+                        w.echo_frame = Some(Instant::now() + ECHO_WAIT);
+                        // A redraw already waiting for the refresh would come too late.
+                        run_on_main_after(ECHO_WAIT, on_redraw);
+                    }
                 }
             });
         }

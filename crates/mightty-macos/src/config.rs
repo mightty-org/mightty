@@ -27,6 +27,9 @@ pub struct Config {
     pub cwd: Option<PathBuf>,
     pub theme: Theme,
     pub scrollback_lines: usize,
+    /// Show frames only at a display refresh: no tearing, but up to a
+    /// refresh or two more latency.
+    pub vsync: bool,
 }
 
 impl Default for Config {
@@ -40,6 +43,7 @@ impl Default for Config {
             cwd: None,
             theme: Theme::default(),
             scrollback_lines: DEFAULT_SCROLLBACK,
+            vsync: true,
         }
     }
 }
@@ -113,6 +117,17 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.scrollback_lines.to_string()),
+    },
+    Setting {
+        name: "window-vsync",
+        value: "BOOL",
+        help: "show frames only at a display refresh; false is lower latency but may tear",
+        color: false,
+        set: |c, v| {
+            c.vsync = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.vsync.to_string()),
     },
     Setting {
         name: "theme",
@@ -436,9 +451,9 @@ mod tests {
     #[test]
     fn flags_set_settings() {
         let mut c = Config::default();
-        c.apply_args(&args(&["--window-width=120", "--window-height=40", "--font-family=SF Mono", "--font-size=13.5"]))
+        c.apply_args(&args(&["--window-width=120", "--window-height=40", "--font-family=SF Mono", "--font-size=13.5", "--window-vsync=false"]))
             .unwrap();
-        assert_eq!((c.cols, c.rows, c.font.as_str(), c.font_size), (120, 40, "SF Mono", 13.5));
+        assert_eq!((c.cols, c.rows, c.font.as_str(), c.font_size, c.vsync), (120, 40, "SF Mono", 13.5, false));
     }
 
     #[test]
@@ -447,6 +462,7 @@ mod tests {
             "--window-width=0",
             "--window-width=x",
             "--font-size=-1",
+            "--window-vsync=no",
             "--nope=1",
             "--window-width",
             "stray",
