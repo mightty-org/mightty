@@ -19,9 +19,10 @@ use mightty_term::{MouseMode, Term};
 
 use crate::config::{Config, OptionAsAlt};
 use crate::ffi::*;
+use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
 use crate::latency;
-use crate::renderer::{self, Renderer, Snapshot};
+use crate::renderer::{self, Highlights, Renderer, Snapshot};
 
 struct App {
     mux: Arc<Mux>,
@@ -62,6 +63,63 @@ struct Window {
     preedit: String,
     /// The input method used the key being handled (inserted or composed text).
     ime_used_key: bool,
+    search: Option<Search>,
+}
+
+/// An open search bar and what it found.
+struct Search {
+    bar: FindBar,
+    query: String,
+    /// Oldest first, from `Term::search`; kept up to date as output arrives.
+    matches: Vec<renderer::Selection>,
+    /// The selected match. By value, so it stays put as matches before it
+    /// come and go.
+    current: Option<renderer::Selection>,
+    /// `lines_scrolled()` and alternate screen at the last search: lines
+    /// before that were in scrollback, which doesn't change.
+    searched_to: u64,
+    alt: bool,
+}
+
+impl Search {
+    /// Brings `matches` up to date: everything for a new `query`, else
+    /// only what output may have changed since the last time.
+    fn refresh(&mut self, term: &Term, query: Option<String>) {
+        let mut full = term.is_alt_screen() != self.alt;
+        if let Some(query) = query.filter(|q| *q != self.query) {
+            self.query = query;
+            full = true;
+        }
+        let (start, found) = term.search_from(&self.query, if full { 0 } else { self.searched_to });
+        // Rows that left scrollback take their matches with them.
+        let first = if term.is_alt_screen() { term.lines_scrolled() } else { term.first_line() };
+        self.matches.retain(|m| !full && m.0.0 < start && m.0.0 >= first);
+        self.matches.extend(found);
+        (self.searched_to, self.alt) = (term.lines_scrolled(), term.is_alt_screen());
+        self.current = if full {
+            self.matches.last().copied()
+        } else {
+            // Still there, or else the next one that is.
+            self.current.and_then(|c| {
+                let at = self.matches.partition_point(|m| *m < c);
+                self.matches.get(at).or(self.matches.last()).copied()
+            })
+        };
+    }
+
+    /// Selects the match `step` away from the current one, wrapping around.
+    fn step(&mut self, step: isize) {
+        let n = self.matches.len() as isize;
+        let Some(current) = self.current.filter(|_| n > 0) else { return };
+        let at = self.matches.partition_point(|m| *m < current) as isize;
+        self.current = Some(self.matches[(at + step).rem_euclid(n) as usize]);
+    }
+
+    /// Shows "3 of 17", counting from the oldest.
+    fn update_count(&mut self) {
+        let position = self.current.map(|c| (self.matches.partition_point(|m| *m < c) + 1, self.matches.len()));
+        self.bar.show_count(position, !self.query.is_empty());
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +392,14 @@ impl App {
             // Layer-hosting view: set the layer before enabling it.
             call!(view, c"setLayer:", layer);
             call!(view, c"setWantsLayer:", YES);
-            call!(window, c"setContentView:", view);
+            // The terminal fills a container, which also holds the search bar above it.
+            let container: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", content);
+            call!(container, c"setWantsLayer:", YES);
+            call!(view, c"setAutoresizingMask:", 18usize); // width and height sizable
+            call!(container, c"addSubview:", view);
+            call!(window, c"setContentView:", container);
+            call!(container, c"release");
+            call!(view, c"release");
             call!(window, c"makeFirstResponder:", view);
             if self.windows.is_empty() {
                 call!(window, c"center");
@@ -361,6 +426,7 @@ impl App {
                 echo_frame: None,
                 preedit: String::new(),
                 ime_used_key: false,
+                search: None,
             };
             window.resize();
             self.windows.push(window);
@@ -408,6 +474,10 @@ impl Window {
                 if term.modes().sync_output {
                     None
                 } else {
+                    // Output may have added or changed matches.
+                    if let Some(search) = self.search.as_mut().filter(|s| !s.query.is_empty()) {
+                        search.refresh(&term, None);
+                    }
                     self.snapshot.capture(&term, self.scroll_offset);
                     if !self.preedit.is_empty() {
                         self.snapshot.overlay(&self.preedit, term.cursor());
@@ -417,7 +487,14 @@ impl Window {
             };
             // The terminal is unlocked again: build and draw the frame.
             if let Some(selection) = frame {
-                let frame = self.renderer.prepare(&self.snapshot, selection);
+                if let Some(search) = &mut self.search {
+                    search.update_count();
+                }
+                let highlights = match &self.search {
+                    Some(search) => Highlights { selection, matches: &search.matches, current: search.current },
+                    None => Highlights { selection, ..Highlights::default() },
+                };
+                let frame = self.renderer.prepare(&self.snapshot, highlights);
                 let presented = latency::frame(self.window, &self.snapshot);
                 self.renderer.present(frame, presented);
                 let screen: Id = msg!(self.window, c"screen");
@@ -524,6 +601,67 @@ impl Window {
             MouseAction::Release => return,
         }
         self.render();
+    }
+
+    /// Opens the find bar, or focuses it with its text selected.
+    fn open_search(&mut self) {
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            if let Some(search) = &self.search {
+                call!(self.window, c"makeFirstResponder:", search.bar.field);
+                call!(search.bar.field, c"selectText:", NIL);
+                return;
+            }
+            let (r, g, b) = self.renderer.theme().background;
+            let luma = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
+            let dark = luma < 128.0;
+            let bar = FindBar::open(msg!(self.window, c"contentView"), self.view, dark);
+            call!(self.window, c"makeFirstResponder:", bar.field);
+            self.search = Some(Search { bar, query: String::new(), matches: Vec::new(), current: None, searched_to: 0, alt: false });
+        }
+    }
+
+    fn close_search(&mut self) {
+        if self.search.take().is_none() {
+            return;
+        }
+        // SAFETY: main thread; documented signature.
+        unsafe { call!(self.window, c"makeFirstResponder:", self.view) };
+        self.render();
+    }
+
+    /// Searches for the bar's text: from the newest match when it changed,
+    /// else moving `step` matches from the selected one (-1: older).
+    fn search(&mut self, step: Option<isize>) {
+        let Some(search) = &mut self.search else { return };
+        // SAFETY: main thread; documented signature.
+        let query = unsafe { string_from_ns(msg!(search.bar.field, c"stringValue")) };
+        let changed = query != search.query;
+        search.refresh(&self.pane.term.lock().unwrap(), Some(query));
+        if let Some(step) = step.filter(|_| !changed) {
+            if search.matches.is_empty() {
+                // SAFETY: plain AppKit call.
+                unsafe { NSBeep() };
+            }
+            search.step(step);
+        }
+        if let Some(current) = search.current {
+            self.reveal(current.0.0);
+        }
+        self.render();
+    }
+
+    /// Scrolls so `line` (absolute) is on screen, centred if it wasn't.
+    fn reveal(&mut self, line: u64) {
+        let term = self.pane.term.lock().unwrap();
+        if term.is_alt_screen() {
+            return;
+        }
+        let (scrolled, rows, history) = (term.lines_scrolled(), term.rows() as u64, term.scrollback().len());
+        let top = scrolled - self.scroll_offset as u64;
+        if !(top..top + rows).contains(&line) {
+            self.scroll_offset = ((scrolled + rows / 2).saturating_sub(line) as usize).min(history);
+        }
     }
 
     fn copy(&mut self) {
@@ -645,6 +783,50 @@ unsafe fn register_view_class() -> Id {
                 }
             });
         }
+    }
+
+    // ---- Search ----
+
+    extern "C" fn find(view: Id, _: Sel, _sender: Id) {
+        with_window(view, Window::open_search);
+    }
+
+    fn find_step(view: Id, step: isize) {
+        with_window(view, |w| if w.search.is_some() { w.search(Some(step)) } else { w.open_search() });
+    }
+    extern "C" fn find_next(view: Id, _: Sel, _sender: Id) {
+        find_step(view, -1);
+    }
+    extern "C" fn find_previous(view: Id, _: Sel, _sender: Id) {
+        find_step(view, 1);
+    }
+    extern "C" fn close_search(view: Id, _: Sel, _sender: Id) {
+        with_window(view, Window::close_search);
+    }
+
+    /// The search bar's text changed (the view is its delegate).
+    extern "C" fn search_changed(view: Id, _: Sel, _notification: Id) {
+        with_window(view, |w| w.search(None));
+    }
+
+    /// Keys in the search bar: Return steps to older matches (with Shift,
+    /// newer), Escape closes it.
+    extern "C" fn search_command(view: Id, _: Sel, _control: Id, _text_view: Id, command: Sel) -> Bool {
+        if command == sel(c"insertNewline:") {
+            // SAFETY: documented signatures.
+            let shift = unsafe {
+                let app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+                let event: Id = msg!(app, c"currentEvent");
+                let flags: usize = if event.is_null() { 0 } else { msg!(event, c"modifierFlags") };
+                flags & (1 << 17) != 0
+            };
+            find_step(view, if shift { 1 } else { -1 });
+        } else if command == sel(c"cancelOperation:") {
+            with_window(view, Window::close_search);
+        } else {
+            return NO;
+        }
+        YES
     }
 
     // ---- NSTextInputClient: what input methods call ----
@@ -812,6 +994,14 @@ unsafe fn register_view_class() -> Id {
                 c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}",
             ),
             (c"doCommandBySelector:", do_command as *const c_void, c"v@::"),
+            (c"performFind:", action(find), c"v@:@"),
+            (c"findNext:", action(find_next), c"v@:@"),
+            (c"findPrevious:", action(find_previous), c"v@:@"),
+            (c"searchOlder:", action(find_next), c"v@:@"),
+            (c"searchNewer:", action(find_previous), c"v@:@"),
+            (c"closeSearch:", action(close_search), c"v@:@"),
+            (c"controlTextDidChange:", action(search_changed), c"v@:@"),
+            (c"control:textView:doCommandBySelector:", search_command as *const c_void, c"c@:@@:"),
         ])
     }
 }
@@ -904,6 +1094,9 @@ unsafe fn install_menu(ns_app: Id) {
         let edit_menu = submenu(bar, "Edit");
         add_item(edit_menu, "Copy", c"copy:", "c");
         add_item(edit_menu, "Paste", c"paste:", "v");
+        add_item(edit_menu, "Find…", c"performFind:", "f");
+        add_item(edit_menu, "Find Next", c"findNext:", "g");
+        add_item(edit_menu, "Find Previous", c"findPrevious:", "G");
         call!(ns_app, c"setMainMenu:", bar);
     }
 }

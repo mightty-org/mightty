@@ -6,6 +6,7 @@
 mod app;
 mod config;
 mod ffi;
+mod findbar;
 mod font;
 mod keys;
 mod latency;

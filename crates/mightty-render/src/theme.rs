@@ -15,6 +15,11 @@ pub struct Theme {
     pub selection_background: Rgb,
     /// `None`: selected text keeps its colour.
     pub selection_foreground: Option<Rgb>,
+    /// Search matches, and the selected one (the match the search is on).
+    pub search_foreground: Rgb,
+    pub search_background: Rgb,
+    pub search_selected_foreground: Rgb,
+    pub search_selected_background: Rgb,
     pub palette: [Rgb; 256],
 }
 
@@ -27,6 +32,10 @@ impl Default for Theme {
             cursor_text: None,
             selection_background: (0x3e, 0x44, 0x51),
             selection_foreground: None,
+            search_foreground: (0x1e, 0x1e, 0x1e),
+            search_background: (0xe5, 0xc0, 0x7b),
+            search_selected_foreground: (0x1e, 0x1e, 0x1e),
+            search_selected_background: (0xff, 0x8c, 0x32),
             palette: std::array::from_fn(|i| default_palette(i as u8)),
         }
     }

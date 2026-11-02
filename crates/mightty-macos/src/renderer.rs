@@ -98,6 +98,16 @@ impl Quad {
 /// Inclusive `(line, column)` range in absolute lines (see `Term::line`), start first.
 pub type Selection = ((u64, usize), (u64, usize));
 
+/// Ranges drawn highlighted: the selection, and search matches with the
+/// current one picked out.
+#[derive(Clone, Copy, Default)]
+pub struct Highlights<'a> {
+    pub selection: Option<Selection>,
+    /// In order, start first; only those on screen matter.
+    pub matches: &'a [Selection],
+    pub current: Option<Selection>,
+}
+
 /// What a glyph draws: a character, or a grapheme cluster of several.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum GlyphKey {
@@ -295,6 +305,10 @@ impl Renderer {
         self.scale
     }
 
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
     /// Rebuilds the font for a new backing scale (moving between displays).
     pub fn set_scale(&mut self, scale: f64) {
         self.scale = scale;
@@ -321,15 +335,15 @@ impl Renderer {
     }
 
     /// Builds a frame from a snapshot; needs no terminal lock.
-    pub fn prepare(&mut self, snapshot: &Snapshot, selection: Option<Selection>) -> Frame {
-        let mut quads = self.build_quads(snapshot, selection);
+    pub fn prepare(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Frame {
+        let mut quads = self.build_quads(snapshot, highlights);
         // The atlas grew or was cleared mid-frame, dropping glyphs already placed.
         for _ in 0..3 {
             if !mem::take(&mut self.atlas_reset) {
                 break;
             }
             self.spare = quads;
-            quads = self.build_quads(snapshot, selection);
+            quads = self.build_quads(snapshot, highlights);
         }
         Frame(quads)
     }
@@ -424,7 +438,12 @@ impl Renderer {
         }
     }
 
-    fn build_quads(&mut self, snapshot: &Snapshot, selection: Option<Selection>) -> Vec<Quad> {
+    fn build_quads(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Vec<Quad> {
+        let Highlights { selection, matches, current } = highlights;
+        let within = |(start, end): Selection, at| start <= at && at <= end;
+        // Cells go in order, so matches ending before the current cell are
+        // skipped once: `matches[next..]` is what's left.
+        let mut next = matches.partition_point(|m| m.1.0 < snapshot.first_line);
         let (cw, ch) = (self.font.cell_width as f32, self.font.cell_height as f32);
         let pad = self.padding_px() as f32;
         let thickness = (self.scale as f32).round().max(1.0);
@@ -452,14 +471,25 @@ impl Renderer {
                 if inverse {
                     mem::swap(&mut fg, &mut bg);
                 }
-                let selected = selection.is_some_and(|(start, end)| start <= (line, c) && (line, c) <= end);
+                let at = (line, c);
+                let selected = selection.is_some_and(|s| within(s, at));
+                while matches.get(next).is_some_and(|m| m.1 < at) {
+                    next += 1;
+                }
+                let found = !selected && matches[next..].iter().take_while(|m| m.0 <= at).any(|&m| within(m, at));
                 if selected {
                     bg = rgba(theme.selection_background);
                     if let Some(color) = theme.selection_foreground {
                         fg = rgba(color);
                     }
+                } else if found {
+                    if current.is_some_and(|m| within(m, at)) {
+                        (fg, bg) = (rgba(theme.search_selected_foreground), rgba(theme.search_selected_background));
+                    } else {
+                        (fg, bg) = (rgba(theme.search_foreground), rgba(theme.search_background));
+                    }
                 }
-                if selected || inverse || cell.bg != Color::Default {
+                if selected || found || inverse || cell.bg != Color::Default {
                     back.push(Quad::solid(x, y, w, ch, bg));
                 }
 

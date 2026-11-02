@@ -264,6 +264,50 @@ const SETTINGS: &[Setting] = &[
         get: |c| c.theme.selection_foreground.map(hex),
     },
     Setting {
+        name: "search-foreground",
+        value: "COLOR",
+        help: "text of search matches",
+        color: true,
+        set: |c, v| {
+            c.theme.search_foreground = color(v)?;
+            Ok(())
+        },
+        get: |c| Some(hex(c.theme.search_foreground)),
+    },
+    Setting {
+        name: "search-background",
+        value: "COLOR",
+        help: "background of search matches",
+        color: true,
+        set: |c, v| {
+            c.theme.search_background = color(v)?;
+            Ok(())
+        },
+        get: |c| Some(hex(c.theme.search_background)),
+    },
+    Setting {
+        name: "search-selected-foreground",
+        value: "COLOR",
+        help: "text of the selected search match",
+        color: true,
+        set: |c, v| {
+            c.theme.search_selected_foreground = color(v)?;
+            Ok(())
+        },
+        get: |c| Some(hex(c.theme.search_selected_foreground)),
+    },
+    Setting {
+        name: "search-selected-background",
+        value: "COLOR",
+        help: "background of the selected search match",
+        color: true,
+        set: |c, v| {
+            c.theme.search_selected_background = color(v)?;
+            Ok(())
+        },
+        get: |c| Some(hex(c.theme.search_selected_background)),
+    },
+    Setting {
         name: "palette",
         value: "N=COLOR",
         help: "palette entry N (0-255); repeat for more entries",
@@ -602,7 +646,7 @@ mod tests {
             &theme,
             "palette = 0=#1d1f21\npalette = 15=#ffffff\nbackground = #1d1f21\nforeground = #c5c8c6\n\
              cursor-color = #c5c8c6\ncursor-text = #1d1f21\nselection-background = #373b41\n\
-             selection-foreground = #c5c8c6\n",
+             selection-foreground = #c5c8c6\nsearch-background = #f0c674\nsearch-selected-background = #de935f\n",
         )
         .unwrap();
         let mut c = Config::default();
@@ -613,6 +657,7 @@ mod tests {
         assert_eq!(c.theme.palette[15], (0xff, 0xff, 0xff));
         assert_eq!(c.theme.cursor, Some((0xc5, 0xc8, 0xc6)));
         assert_eq!(c.theme.selection_foreground, Some((0xc5, 0xc8, 0xc6)));
+        assert_eq!((c.theme.search_background, c.theme.search_selected_background), ((0xf0, 0xc6, 0x74), (0xde, 0x93, 0x5f)));
 
         let sneaky = dir.join("sneaky");
         fs::write(&sneaky, "background = #000000\ncommand = rm -rf ~\n").unwrap();

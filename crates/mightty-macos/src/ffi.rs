@@ -87,6 +87,10 @@ unsafe extern "C" {
     fn objc_msgSend();
     #[cfg(target_arch = "x86_64")]
     fn objc_msgSend_stret();
+    fn objc_msgSendSuper();
+    #[cfg(target_arch = "x86_64")]
+    fn objc_msgSendSuper_stret();
+    pub fn object_getClass(obj: Id) -> Id;
     pub fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra_bytes: usize) -> Id;
     pub fn objc_registerClassPair(cls: Id);
     pub fn class_addMethod(cls: Id, name: Sel, imp: *const c_void, types: *const c_char) -> Bool;
@@ -346,6 +350,29 @@ pub unsafe fn send<A: MessageArgs, R>(obj: Id, sel_name: &CStr, args: A) -> R {
 /// The receiver must respond to `sel` with signature `() -> CGRect`.
 pub unsafe fn send_rect(obj: Id, sel_name: &CStr) -> CGRect {
     unsafe { send_rect_with(obj, sel_name, ()) }
+}
+
+/// `objc_super`: a receiver and the class to start the method lookup at.
+#[repr(C)]
+pub struct ObjcSuper {
+    pub receiver: Id,
+    pub superclass: Id,
+}
+
+/// Calls the `superclass` implementation of a method returning a `CGRect`,
+/// from an override in a subclass.
+///
+/// # Safety
+/// `obj` must be an instance of a subclass of `superclass`, which must
+/// respond to `sel` with signature `(args) -> CGRect`.
+pub unsafe fn send_super_rect<A: MessageArgs>(obj: Id, superclass: Id, sel_name: &CStr, args: A) -> CGRect {
+    #[cfg(target_arch = "x86_64")]
+    let imp = objc_msgSendSuper_stret as *const ();
+    #[cfg(not(target_arch = "x86_64"))]
+    let imp = objc_msgSendSuper as *const ();
+    let sup = ObjcSuper { receiver: obj, superclass };
+    // The receiver argument is a pointer to `objc_super`.
+    unsafe { args.invoke(imp, (&raw const sup).cast_mut().cast(), sel(sel_name)) }
 }
 
 /// `send_rect` for a method taking `args`.

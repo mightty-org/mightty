@@ -66,6 +66,8 @@ cursor-color = #ff79c6
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
 | `selection-background`, `selection-foreground` | `#3e4451`, unchanged | Selected text |
+| `search-background`, `search-foreground` | `#e5c07b`, `#1e1e1e` | Search matches |
+| `search-selected-background`, `search-selected-foreground` | `#ff8c32`, `#1e1e1e` | The match the search is on |
 | `palette` | xterm | `palette = N=#rrggbb`, one line per entry |
 | `command`, `working-directory` | login shell, home | First window only |
 
@@ -318,7 +320,8 @@ checks the header compiles as C++.
    - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line) + copy, mouse reporting
    - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters
    - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor
-   - Next: URL hints, search
+   - ✅ Search (Cmd-F): scrollback and screen, across wrapped lines, smart case, a match count, kept up to date as output arrives; Return/Cmd-G for older matches, Shift-Return/Cmd-Shift-G for newer, Esc to close; colours from the theme (`search-*`)
+   - Next: URL hints
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. Agent status detection (working / waiting for you), attention queue, notifications

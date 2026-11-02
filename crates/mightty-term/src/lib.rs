@@ -17,6 +17,9 @@ use graphemes::Graphemes;
 
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
 pub use styles::Styles;
+/// Inclusive `(line, column)` start and end of some text, start first.
+pub type TextRange = ((u64, usize), (u64, usize));
+
 pub use width::char_width;
 use width::width_class;
 
@@ -473,6 +476,69 @@ impl Term {
             }
         }
         out
+    }
+
+    /// Where `query` occurs in scrollback and on screen (only on screen
+    /// while the alternate screen is active), oldest first, as inclusive
+    /// `(line, column)` ranges like [`Term::text_range`] takes. A match may
+    /// span soft-wrapped rows. Case is ignored unless `query` has a capital.
+    pub fn search(&self, query: &str) -> Vec<TextRange> {
+        self.search_from(query, 0).1
+    }
+
+    /// [`Term::search`] from `line` on, to update earlier results as output
+    /// arrives: rows in scrollback don't change, so after searching once,
+    /// search from the old `lines_scrolled()`. Starts at the beginning of
+    /// the logical line holding `line` and returns where that is; matches
+    /// starting before it are unaffected.
+    pub fn search_from(&self, query: &str, line: u64) -> (u64, Vec<TextRange>) {
+        let first = if self.alt_active { self.lines_scrolled } else { self.first_line() };
+        let mut first = line.max(first);
+        while first > 0 && self.line(first - 1).is_some_and(|row| row.wrapped) {
+            first -= 1;
+        }
+        (first, self.search_lines(query, first))
+    }
+
+    fn search_lines(&self, query: &str, first: u64) -> Vec<TextRange> {
+        let ignore_case = !query.chars().any(char::is_uppercase);
+        let fold = |c: char| if ignore_case { c.to_lowercase().next().unwrap_or(c) } else { c };
+        let needle: Vec<char> = query.chars().map(fold).collect();
+        let mut found = Vec::new();
+        if needle.is_empty() {
+            return found;
+        }
+        let end = self.lines_scrolled + self.rows as u64;
+        // One logical line (soft-wrapped rows joined) at a time: its
+        // characters, and the cell each came from.
+        let (mut text, mut at) = (Vec::new(), Vec::new());
+        let mut cluster = String::new();
+        for line in first..end {
+            let Some(row) = self.line(line) else { continue };
+            for (col, &cell) in row.cells.iter().enumerate() {
+                if cell.flags().contains(Flags::WIDE_SPACER) || cell.flags().contains(Flags::WRAP_SPACER) {
+                    continue;
+                }
+                cluster.clear();
+                self.push_cell(&mut cluster, cell);
+                for c in cluster.chars() {
+                    text.push(fold(c));
+                    at.push((line, col, if cell.flags().contains(Flags::WIDE) { col + 1 } else { col }));
+                }
+            }
+            if row.wrapped && line + 1 < end {
+                continue;
+            }
+            for start in 0..text.len().saturating_sub(needle.len() - 1) {
+                if text[start..start + needle.len()] == needle[..] {
+                    let (first, last) = (at[start], at[start + needle.len() - 1]);
+                    found.push(((first.0, first.1), (last.0, last.2)));
+                }
+            }
+            text.clear();
+            at.clear();
+        }
+        found
     }
 
     /// Column range `(start, end)`, inclusive, of the word at `(line, col)`.

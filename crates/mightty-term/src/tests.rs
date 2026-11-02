@@ -406,3 +406,31 @@ fn clusters_are_capped() {
     assert!(text.len() <= MAX_CLUSTER_BYTES + 1 && text.starts_with("e\u{301}") && text.ends_with('x'), "{}", text.len());
     assert_eq!(t.cursor(), (0, 2));
 }
+
+#[test]
+fn search_finds_matches_across_scrollback_and_wraps() {
+    // Lines 0-1 end up in scrollback; "needle" on line 2 soft-wraps onto line 3.
+    let t = term(10, 3, "a needle\r\nold\r\nxxxxxxneedle Needle\r\n\u{6f22}needle");
+    let found = t.search("needle");
+    assert_eq!(found, vec![((0, 2), (0, 7)), ((2, 6), (3, 1)), ((3, 3), (3, 8)), ((4, 2), (4, 7))]);
+    // A capital makes the search case-sensitive.
+    assert_eq!(t.search("Needle"), vec![((3, 3), (3, 8))]);
+    assert!(t.search("").is_empty() && t.search("absent").is_empty());
+    // A wide character's match covers its second cell.
+    assert_eq!(t.search("\u{6f22}"), vec![((4, 0), (4, 1))]);
+    assert_eq!(t.text_range(found[1].0, found[1].1), "needle");
+}
+
+#[test]
+fn search_from_covers_new_output() {
+    let mut t = term(10, 3, "needle\r\n");
+    let found = t.search("needle");
+    let scrolled = t.lines_scrolled();
+    // A match that wraps from scrollback onto the screen, and one in new output.
+    t.feed(b"1\r\n2\r\nxxxxxxneedle\r\nneedle");
+    let (start, new) = t.search_from("needle", scrolled);
+    let mut all: Vec<_> = found.into_iter().filter(|m| m.0.0 < start).collect();
+    all.extend(new);
+    assert_eq!(all, t.search("needle"));
+    assert_eq!(all.len(), 3);
+}
