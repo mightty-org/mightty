@@ -394,3 +394,15 @@ fn cluster_ids_are_reclaimed() {
     t.feed("\re\u{301}".as_bytes());
     assert_eq!(t.screen_text(), "e\u{301}");
 }
+
+#[test]
+fn clusters_are_capped() {
+    let family = "\u{1F468}\u{1F3FD}\u{200D}\u{1F469}\u{1F3FD}\u{200D}\u{1F467}\u{1F3FD}\u{200D}\u{1F466}\u{1F3FD}";
+    let t = term(10, 1, family);
+    assert_eq!(t.screen_text(), family);
+    // A flood of marks stops growing the cell at the cap.
+    let t = term(10, 1, &format!("e{}x", "\u{301}".repeat(100_000)));
+    let text = t.screen_text();
+    assert!(text.len() <= MAX_CLUSTER_BYTES + 1 && text.starts_with("e\u{301}") && text.ends_with('x'), "{}", text.len());
+    assert_eq!(t.cursor(), (0, 2));
+}

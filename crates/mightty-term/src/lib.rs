@@ -712,6 +712,9 @@ impl Term {
         if !joins {
             return false;
         }
+        if text.len() + c.len_utf8() > MAX_CLUSTER_BYTES {
+            return true; // dropped: see MAX_CLUSTER_BYTES
+        }
         text.push(c);
         self.joining = c == '\u{200D}';
         if self.graphemes.is_full() {
@@ -1644,6 +1647,13 @@ fn fill_cells(cells: &mut [Cell], value: Cell) {
         filled += n;
     }
 }
+
+/// Longest grapheme cluster kept, in UTF-8 bytes; what follows is dropped.
+/// Without a cap, a stream of combining marks on one cell would copy an
+/// ever longer cluster per mark. Real ones fit: a family of four with skin
+/// tones is 41 bytes. With every id in use the table then holds at most a
+/// few MiB.
+const MAX_CLUSTER_BYTES: usize = 64;
 
 /// A regional indicator: flags are pairs of them.
 fn is_regional(c: char) -> bool {
