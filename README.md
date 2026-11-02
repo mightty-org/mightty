@@ -162,51 +162,58 @@ turns round by round: 10 startups and 3 sessions each, M2, macOS 15.
 | | mightty | ghostty | kitty |
 |---|---|---|---|
 | **Startup** | | | |
-| launch → command running (median) | **51 ms** | 129 ms | 383 ms |
+| launch → command running (median) | **67 ms** | 139 ms | 394 ms |
 | **Idle (10 s)** | | | |
-| CPU, avg | **0.1 %** | 0.5 % | 0.5 % |
-| RSS, median | **57 MiB** | 95 MiB | 99 MiB |
-| footprint (≈PSS), median | **56 MiB** | 74 MiB | 102 MiB |
+| CPU, avg | **0.0 %** | **0.0 %** | **0.0 %** |
+| RSS, median | **51 MiB** | 89 MiB | 94 MiB |
+| footprint (≈PSS), median | **28 MiB** | 65 MiB | 68 MiB |
 | **Under load (throughput runs)** | | | |
-| CPU, avg | **88.2 %** | 230.0 % | 119.5 % |
-| RSS, median | 106 MiB | 155 MiB | **90 MiB** |
-| footprint (≈PSS), median | **101 MiB** | 133 MiB | 115 MiB |
+| CPU, avg | **85.1 %** | 230.7 % | 113.1 % |
+| RSS, median | **80 MiB** | 151 MiB | 83 MiB |
+| footprint (≈PSS), median | **71 MiB** | 129 MiB | 79 MiB |
 | **Distribution under load** | | | |
-| CPU avg | **88 %** | 230 % | 120 % |
-| CPU P50 | **88 %** | 230 % | 121 % |
-| CPU P75 | **90 %** | 238 % | 125 % |
-| CPU P90 | **96 %** | 245 % | 128 % |
-| CPU P95 | **98 %** | 248 % | 130 % |
-| RSS avg | 95 MiB | 164 MiB | **92 MiB** |
-| RSS P50 | 106 MiB | 155 MiB | **90 MiB** |
-| RSS P75 | 114 MiB | 171 MiB | **97 MiB** |
-| RSS P90 | 117 MiB | 197 MiB | **97 MiB** |
-| RSS P95 | 118 MiB | 208 MiB | **98 MiB** |
-| footprint avg | **96 MiB** | 141 MiB | 115 MiB |
-| footprint P50 | **101 MiB** | 133 MiB | 115 MiB |
-| footprint P75 | **104 MiB** | 149 MiB | 116 MiB |
-| footprint P90 | **104 MiB** | 174 MiB | 117 MiB |
-| footprint P95 | **104 MiB** | 181 MiB | 117 MiB |
+| CPU avg | **85 %** | 231 % | 113 % |
+| CPU P50 | **86 %** | 230 % | 116 % |
+| CPU P75 | **89 %** | 243 % | 123 % |
+| CPU P90 | **91 %** | 250 % | 128 % |
+| CPU P95 | **93 %** | 254 % | 131 % |
+| RSS avg | **76 MiB** | 156 MiB | 90 MiB |
+| RSS P50 | **80 MiB** | 151 MiB | 83 MiB |
+| RSS P75 | **88 MiB** | 162 MiB | 104 MiB |
+| RSS P90 | **88 MiB** | 189 MiB | 109 MiB |
+| RSS P95 | **88 MiB** | 200 MiB | 109 MiB |
+| footprint avg | **67 MiB** | 136 MiB | 79 MiB |
+| footprint P50 | **71 MiB** | 129 MiB | 79 MiB |
+| footprint P75 | **75 MiB** | 146 MiB | 79 MiB |
+| footprint P90 | **76 MiB** | 169 MiB | 79 MiB |
+| footprint P95 | **76 MiB** | 178 MiB | 79 MiB |
 | **Memory after output** | | | |
-| RSS after ~140 MB | **68 MiB** | 149 MiB | 109 MiB |
-| footprint after ~140 MB | 83 MiB | **81 MiB** | 112 MiB |
-| RSS after ~260 MB | **68 MiB** | 148 MiB | 88 MiB |
-| footprint after ~260 MB | 84 MiB | **83 MiB** | 113 MiB |
+| RSS after ~140 MB | **61 MiB** | 141 MiB | 95 MiB |
+| footprint after ~140 MB | **56 MiB** | 77 MiB | 79 MiB |
+| RSS after ~260 MB | **61 MiB** | 141 MiB | 91 MiB |
+| footprint after ~260 MB | **56 MiB** | 78 MiB | 79 MiB |
 | **Throughput** (median) | | | |
-| plain ASCII | **261 MiB/s** | 239 MiB/s | 102 MiB/s |
-| SGR-colour heavy | **200 MiB/s** | 169 MiB/s | 121 MiB/s |
-| CJK / Unicode | **164 MiB/s** | 157 MiB/s | 89 MiB/s |
-| random cursor addressing (4 MB) | **175 MiB/s** | 168 MiB/s | 95 MiB/s |
+| plain ASCII | **213 MiB/s** | 200 MiB/s | 99 MiB/s |
+| SGR-colour heavy | **169 MiB/s** | 158 MiB/s | 83 MiB/s |
+| CJK / Unicode | **158 MiB/s** | 152 MiB/s | 86 MiB/s |
+| random cursor addressing (4 MB) | **169 MiB/s** | 156 MiB/s | 40 MiB/s |
 | **Response latency** (DSR round trip) | | | |
-| idle, median | **0.099 ms** | 0.162 ms | 0.170 ms |
-| idle, P95 | **0.205 ms** | 0.340 ms | 0.300 ms |
-| under flood, median | **0.037 ms** | 0.204 ms | 4.410 ms |
-| under flood, P95 | **0.064 ms** | 0.373 ms | 6.809 ms |
+| idle, median | **0.218 ms** | 0.297 ms | 0.329 ms |
+| idle, P95 | **0.440 ms** | 0.590 ms | 0.714 ms |
+| under flood, median | **0.040 ms** | 0.200 ms | 4.035 ms |
+| under flood, P95 | **0.077 ms** | 0.400 ms | 6.878 ms |
 | **Steady 250 lines/s** | | | |
-| CPU, avg | **7.2 %** | 31.9 % | 10.9 % |
+| CPU, avg | 7.9 % | 45.0 % | **4.5 %** |
+
+Absolute throughput moves with machine load from run to run (this run's
+ASCII medians are lower for all three than the previous one); compare
+across a row of one run. mightty's one loss is CPU at a steady 250
+lines/s (kitty won it in two of the last three runs). Not yet profiled;
+the likely cause is frame pacing, since kitty waits a few milliseconds
+for more output before repainting (`repaint_delay`, `input_delay`).
 
 ```sh
-python3 -I bench/suite.py [ROUNDS] [STARTUPS]          # full suite below; launches each terminal itself
+python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]  # full suite above; launches each terminal itself
 bench/compare.sh                                       # throughput only; needs a running mightty; uses Ghostty and kitty if installed
 cargo run --release -p mightty-term --example feed -- bench/data/*.txt     # core only, no PTY
 cargo run --release -p mightty-mux --example pipeline -- $PWD/bench/data/*.txt
@@ -231,8 +238,8 @@ What made the difference, measured along the way:
 - **8-byte cells**: a character plus a packed style id and layout flags;
   colours and attributes live once in a per-terminal style table. Styles
   are interned through a small cache of recent ones (a fresh colour per
-  cell, as in truecolor art, never touches a big index) and the table is
-  garbage-collected from live cells when it doubles.
+  cell, as in truecolor art, never touches a big index) and unused styles
+  are dropped when the table doubles.
 - **No branches on character width or UTF-8 length**: CJK and emoji text
   mixes them unpredictably, and a mispredict per character cost more than
   the work. Character starts are found 64 bytes at a time, sequences are
@@ -240,8 +247,15 @@ What made the difference, measured along the way:
   spacer cell instead of branching on whether it is wide.
 - **The renderer snapshots** the visible cells under the terminal lock and
   builds the frame after releasing it, so drawing never stalls the reader.
+- **Memory** (footprint under load 101 → 71 MiB, idle 56 → 28 MiB): the
+  glyph atlas starts at 512² and doubles only when full (it was a fixed
+  2048², 16 MiB), the window keeps two drawables instead of three (each is
+  a full window image, ~11 MiB on Retina), vertex buffers and quad lists
+  are reused across frames, and the style table is compacted in place
+  through a bitmap of live ids and sized exactly, where a doubling `Vec`
+  plus a rebuilt copy briefly needed several times the live styles.
 
-Next: keypress-to-screen latency, and SIMD (NEON) for the SGR-heavy path.
+Next: frame pacing for steady output, keypress-to-screen latency, and SIMD (NEON) for the SGR-heavy path.
 
 ## libmightty (C ABI)
 

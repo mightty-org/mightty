@@ -15,7 +15,11 @@ use crate::ffi::*;
 use crate::font::{Font, RasterGlyph, Style};
 use crate::snapshot;
 
-const ATLAS_SIZE: u32 = 2048;
+/// The glyph atlas starts small and doubles when full, up to the maximum;
+/// a full maximum-size atlas is cleared instead. At 4 bytes a pixel, the
+/// largest is 16 MiB, while plain text fits in the first 1 MiB.
+const ATLAS_MIN: u32 = 512;
+const ATLAS_MAX: u32 = 2048;
 const PIXEL_FORMAT_BGRA8: usize = 80;
 /// Padding around the grid, in points.
 const PADDING: f64 = 6.0;
@@ -145,9 +149,23 @@ struct Glyph {
 /// Shelf packer over the atlas texture.
 struct Atlas {
     texture: Id,
+    size: u32,
     x: u32,
     y: u32,
     row_height: u32,
+}
+
+/// Vertex buffers reused round-robin. A buffer is refilled only once the
+/// GPU has finished the frame that last read it; creating one per frame
+/// instead leaves the driver holding tens of MiB of released buffers.
+const VERTEX_BUFFERS: usize = 3;
+
+#[derive(Clone, Copy)]
+struct VertexBuffer {
+    buffer: Id,
+    bytes: usize,
+    /// The command buffer that last read `buffer` (retained), or NIL.
+    commands: Id,
 }
 
 pub struct Renderer {
@@ -164,6 +182,11 @@ pub struct Renderer {
     font_size: f64,
     scale: f64,
     theme: Theme,
+    /// Quad lists kept between frames, so drawing doesn't allocate.
+    spare: Vec<Quad>,
+    front: Vec<Quad>,
+    vertices: [VertexBuffer; VERTEX_BUFFERS],
+    next_vertices: usize,
     pub focused: bool,
     /// `MIGHTTY_SNAPSHOT`: every frame is also written to this PNG.
     snapshot: Option<PathBuf>,
@@ -182,6 +205,9 @@ impl Renderer {
             // Snapshots read the drawable back, which framebuffer-only textures forbid.
             call!(layer, c"setFramebufferOnly:", if snapshot.is_some() { NO } else { YES });
             call!(layer, c"setOpaque:", YES);
+            // Each drawable is a full window image (~11 MiB at 120x40 on
+            // Retina); frames are paced by the display, so two are enough.
+            call!(layer, c"setMaximumDrawableCount:", 2usize);
             // Keep content pinned during live resize instead of stretching it.
             call!(layer, c"setContentsGravity:", kCAGravityTopLeft);
 
@@ -190,7 +216,7 @@ impl Renderer {
                 queue: msg!(device, c"newCommandQueue"),
                 pipeline: create_pipeline(device),
                 layer,
-                atlas: Atlas { texture: create_atlas(device), x: 0, y: 0, row_height: 0 },
+                atlas: Atlas { texture: create_atlas(device, ATLAS_MIN), size: ATLAS_MIN, x: 0, y: 0, row_height: 0 },
                 glyphs: HashMap::new(),
                 atlas_reset: false,
                 font: Font::new(font_name, font_size * scale),
@@ -198,6 +224,10 @@ impl Renderer {
                 font_size,
                 scale,
                 theme,
+                spare: Vec::new(),
+                front: Vec::new(),
+                vertices: [VertexBuffer { buffer: NIL, bytes: 0, commands: NIL }; VERTEX_BUFFERS],
+                next_vertices: 0,
                 focused: true,
                 snapshot,
             }
@@ -236,13 +266,18 @@ impl Renderer {
     /// Builds a frame from a snapshot; needs no terminal lock.
     pub fn prepare(&mut self, snapshot: &Snapshot, selection: Option<Selection>) -> Frame {
         let mut quads = self.build_quads(snapshot, selection);
-        if mem::take(&mut self.atlas_reset) {
+        // The atlas grew or was cleared mid-frame, dropping glyphs already placed.
+        for _ in 0..3 {
+            if !mem::take(&mut self.atlas_reset) {
+                break;
+            }
+            self.spare = quads;
             quads = self.build_quads(snapshot, selection);
         }
         Frame(quads)
     }
 
-    pub fn present(&mut self, Frame(quads): Frame) {
+    pub fn present(&mut self, Frame(mut quads): Frame) {
         // SAFETY: Metal calls with the documented signatures; objects created
         // with `new...` are released, the rest are autoreleased.
         unsafe {
@@ -267,10 +302,13 @@ impl Renderer {
 
             let commands: Id = msg!(self.queue, c"commandBuffer");
             let encoder: Id = msg!(commands, c"renderCommandEncoderWithDescriptor:", pass);
-            let mut buffer = NIL;
+            let slot = self.next_vertices;
             if !quads.is_empty() {
+                self.next_vertices = (slot + 1) % VERTEX_BUFFERS;
                 let bytes = quads.len() * mem::size_of::<Quad>();
-                buffer = msg!(self.device, c"newBufferWithBytes:length:options:", quads.as_ptr() as *const c_void, bytes, 0usize);
+                let buffer = self.vertex_buffer(slot, bytes);
+                let contents: *mut c_void = msg!(buffer, c"contents");
+                std::ptr::copy_nonoverlapping(quads.as_ptr() as *const u8, contents as *mut u8, bytes);
                 let viewport = [size.width as f32, size.height as f32];
                 call!(encoder, c"setRenderPipelineState:", self.pipeline);
                 call!(encoder, c"setVertexBuffer:offset:atIndex:", buffer, 0usize, 0usize);
@@ -286,9 +324,41 @@ impl Renderer {
                 call!(commands, c"waitUntilCompleted");
                 snapshot::save_texture(texture, path);
             }
-            if !buffer.is_null() {
-                call!(buffer, c"release"); // the command buffer holds its own reference
+            if !quads.is_empty() {
+                self.vertices[slot].commands = msg!(commands, c"retain");
             }
+        }
+        quads.clear();
+        self.spare = quads;
+    }
+
+    /// Vertex buffer `slot`, holding at least `bytes`, once the GPU is done with it.
+    ///
+    /// # Safety
+    /// Main thread, with `self.device` valid.
+    unsafe fn vertex_buffer(&mut self, slot: usize, bytes: usize) -> Id {
+        let vb = &mut self.vertices[slot];
+        // SAFETY: Metal calls with the documented signatures; `commands`
+        // and `buffer` are objects this renderer retained.
+        unsafe {
+            if !vb.commands.is_null() {
+                const COMPLETED: usize = 4; // MTLCommandBufferStatusCompleted
+                let status: usize = msg!(vb.commands, c"status");
+                if status < COMPLETED {
+                    call!(vb.commands, c"waitUntilCompleted");
+                }
+                call!(vb.commands, c"release");
+                vb.commands = NIL;
+            }
+            if vb.bytes < bytes {
+                if !vb.buffer.is_null() {
+                    call!(vb.buffer, c"release");
+                }
+                vb.bytes = bytes.next_power_of_two();
+                // Shared storage: written by the CPU, read by the GPU.
+                vb.buffer = msg!(self.device, c"newBufferWithLength:options:", vb.bytes, 0usize);
+            }
+            vb.buffer
         }
     }
 
@@ -300,8 +370,10 @@ impl Renderer {
 
         let (cols, rows) = (snapshot.cols, snapshot.rows);
 
-        let mut back = Vec::new();
-        let mut front = Vec::new();
+        let mut back = mem::take(&mut self.spare);
+        let mut front = mem::take(&mut self.front);
+        back.clear();
+        front.clear();
         for r in 0..rows {
             let y = pad + r as f32 * ch;
             let line = snapshot.first_line + r as u64;
@@ -385,6 +457,7 @@ impl Renderer {
             }
         }
         back.append(&mut front);
+        self.front = front;
         back
     }
 
@@ -415,12 +488,20 @@ impl Renderer {
     /// Copies a tile into the atlas. On overflow the atlas is recycled and `None` returned.
     fn upload(&mut self, raster: &RasterGlyph) -> Option<Glyph> {
         let atlas = &mut self.atlas;
-        if atlas.x + raster.width > ATLAS_SIZE {
+        if atlas.x + raster.width > atlas.size {
             atlas.x = 0;
             atlas.y += atlas.row_height;
             atlas.row_height = 0;
         }
-        if atlas.y + raster.height > ATLAS_SIZE {
+        if atlas.y + raster.height > atlas.size {
+            if atlas.size < ATLAS_MAX {
+                atlas.size *= 2;
+                // SAFETY: command buffers in flight keep their own reference.
+                unsafe {
+                    call!(atlas.texture, c"release");
+                    atlas.texture = create_atlas(self.device, atlas.size);
+                }
+            }
             self.reset_atlas();
             self.atlas_reset = true;
             return None;
@@ -491,18 +572,37 @@ unsafe fn create_pipeline(device: Id) -> Id {
     }
 }
 
-unsafe fn create_atlas(device: Id) -> Id {
+unsafe fn create_atlas(device: Id, size: u32) -> Id {
     unsafe {
         let desc: Id = msg!(
             class(c"MTLTextureDescriptor"),
             c"texture2DDescriptorWithPixelFormat:width:height:mipmapped:",
             PIXEL_FORMAT_BGRA8,
-            ATLAS_SIZE as usize,
-            ATLAS_SIZE as usize,
+            size as usize,
+            size as usize,
             NO
         );
         call!(desc, c"setUsage:", 1usize); // shader read
         msg!(device, c"newTextureWithDescriptor:", desc)
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        // SAFETY: objects this renderer created or retained, released once;
+        // command buffers still in flight keep their own references.
+        unsafe {
+            for vb in self.vertices {
+                for object in [vb.commands, vb.buffer] {
+                    if !object.is_null() {
+                        call!(object, c"release");
+                    }
+                }
+            }
+            for object in [self.atlas.texture, self.pipeline, self.queue, self.device] {
+                call!(object, c"release");
+            }
+        }
     }
 }
 

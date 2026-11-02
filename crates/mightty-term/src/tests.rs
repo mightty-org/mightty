@@ -294,6 +294,20 @@ fn style_table_is_collected() {
 }
 
 #[test]
+fn style_table_stays_near_live_styles() {
+    // A fresh colour per line: one live style per line kept.
+    let mut t = Term::with_scrollback(10, 2, 5000);
+    for i in 0..60_000u32 {
+        t.feed(format!("\x1b[38;2;{};{};{}mx\r\n", (i >> 16) as u8, (i >> 8) as u8, i as u8).as_bytes());
+    }
+    // Collected at 2x the ~5000 live styles, with room reserved exactly; a
+    // table left to double as it grows would reach 16384.
+    assert!(t.styles().capacity() <= 5003 * 2 + 64, "{}", t.styles().capacity());
+    let last = t.resolve(t.scrollback()[4999].cells[0]).fg;
+    assert_eq!(last, Color::Rgb(0, 234, 94)); // line 59998
+}
+
+#[test]
 fn reset_keeps_scrollback_styles() {
     let mut t = Term::with_scrollback(10, 1, 10);
     t.feed(b"\x1b[31ma\r\n\x1bc");

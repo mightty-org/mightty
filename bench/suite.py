@@ -1,6 +1,9 @@
 """Full terminal comparison: startup, memory, CPU, throughput, latency.
 
-usage: python3 -I bench/suite.py [ROUNDS] [STARTUPS]
+usage: python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]
+
+TERMINALS is a comma-separated subset (e.g. `mightty`); its results go to
+bench/results/suite-<names> so the full comparison is kept.
 
 Every terminal runs with its shipped defaults apart from a 120x40 grid and
 Menlo 14 (kitty with --config NONE, Ghostty with --config-default-files=false),
@@ -264,9 +267,13 @@ def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     starts = int(sys.argv[2]) if len(sys.argv) > 2 else 10
     names = [n for n, (argv, _) in TERMINALS.items() if os.path.exists(argv[0])]
+    out = OUT
+    if len(sys.argv) > 3:  # a subset, e.g. `mightty` or `mightty,kitty`
+        names = [n for n in names if n in sys.argv[3].split(",")]
+        out = f"{OUT}-{'-'.join(names)}"
     prepare_data()
-    os.makedirs(OUT, exist_ok=True)
-    scratch = os.path.join(OUT, "tmp")
+    os.makedirs(out, exist_ok=True)
+    scratch = os.path.join(out, "tmp")
     os.makedirs(scratch, exist_ok=True)
 
     startups = {n: [] for n in names}
@@ -279,11 +286,11 @@ def main():
     for r in range(rounds):
         for n in names:
             t = time.time()
-            sessions[n].append(session(n, os.path.join(OUT, "raw", f"round{r + 1}")))
+            sessions[n].append(session(n, os.path.join(out, "raw", f"round{r + 1}")))
             print(f"round {r + 1}/{rounds}: {n} session done in {time.time() - t:.0f} s", flush=True)
 
     summary = table(names, summarize(names, startups, sessions))
-    with open(os.path.join(OUT, "summary.md"), "w") as f:
+    with open(os.path.join(out, "summary.md"), "w") as f:
         f.write(summary + "\n")
     print(summary)
 

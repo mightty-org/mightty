@@ -550,13 +550,18 @@ impl Term {
         }
     }
 
-    /// Drops styles no cell uses any more and merges duplicates. The next
-    /// run waits until the table has doubled, so scans amortise to O(1)
-    /// per new style.
+    /// Drops styles no cell uses any more. The next run waits until the
+    /// table has doubled, so scans amortise to O(1) per new style. The
+    /// table is sized to reach that point without reallocating: with a
+    /// fresh colour per cell it holds a style per live cell, and a doubling
+    /// `Vec` (plus a copy while collecting) would need several times that.
     fn collect_styles(&mut self) {
         let Self { styles, primary, alternate, scrollback, .. } = self;
-        styles.collect(primary.iter_mut().chain(alternate.iter_mut()).chain(scrollback.iter_mut()));
-        self.gc_at = (self.styles.len() * 2).max(MIN_STYLE_GC);
+        let live = styles.live(primary.iter().chain(alternate.iter()).chain(scrollback.iter()));
+        let next = (live.len() * 2).max(MIN_STYLE_GC);
+        // Room past `next` for the few styles interned before the check runs.
+        styles.compact(&live, primary.iter_mut().chain(alternate.iter_mut()).chain(scrollback.iter_mut()), next + 64);
+        self.gc_at = next;
     }
 
     /// Before writing `[from, to)` on `row`: blanks the far halves of wide

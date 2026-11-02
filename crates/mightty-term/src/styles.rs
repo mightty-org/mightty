@@ -11,9 +11,10 @@ const EMPTY: u64 = u64::MAX; // no style has this key (keys use 60 bits)
 /// than a full index: output with a fresh colour per cell (truecolor
 /// gradients, images as half blocks) would otherwise grow an index to a
 /// million entries and miss cache on every insert. A style that fell out
-/// of the cache gets a second id; the table is rebuilt from the cells
-/// still alive when it grows (see `Term::collect_styles`), which merges
-/// such duplicates and drops styles no cell uses.
+/// of the cache gets a second id. When the table grows, styles no cell
+/// uses are dropped and the rest renumbered in place (see
+/// `Term::collect_styles`); duplicates stay, bounded by the cells holding
+/// them.
 #[derive(Clone)]
 pub struct Styles {
     list: Vec<Style>,
@@ -37,6 +38,11 @@ impl Styles {
         self.list.len()
     }
 
+    /// Entries the table has room for before it reallocates.
+    pub fn capacity(&self) -> usize {
+        self.list.capacity()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -56,22 +62,76 @@ impl Styles {
         StyleId(slot.1)
     }
 
-    /// Rebuilds the table from the styles `rows` use, renumbering their
-    /// cells: drops unused styles and merges duplicates.
-    pub(crate) fn collect<'a>(&mut self, rows: impl Iterator<Item = &'a mut Row>) {
-        let old = std::mem::replace(self, Self::new());
-        let mut remap = vec![u32::MAX; old.list.len()];
-        remap[0] = 0;
+    /// Marks the styles `rows` use; the default style is always kept.
+    pub(crate) fn live<'a>(&self, rows: impl Iterator<Item = &'a Row>) -> Live {
+        let mut bits = vec![0u64; self.list.len().div_ceil(64)];
+        bits[0] = 1;
+        for row in rows {
+            for cell in &row.cells {
+                let id = cell.style().0 as usize;
+                bits[id / 64] |= 1 << (id % 64);
+            }
+        }
+        let mut ranks = Vec::with_capacity(bits.len());
+        let mut n = 0;
+        for word in &bits {
+            ranks.push(n);
+            n += word.count_ones();
+        }
+        Live { bits, ranks, len: n as usize }
+    }
+
+    /// Drops styles `live` doesn't hold and renumbers `rows` (the same rows
+    /// `live` came from). Order is kept, so the table compacts in place
+    /// without a second copy. Leaves room for at least `capacity` styles,
+    /// so the table won't reallocate before it is next collected.
+    pub(crate) fn compact<'a>(&mut self, live: &Live, rows: impl Iterator<Item = &'a mut Row>, capacity: usize) {
+        let mut kept = 0;
+        for id in 0..self.list.len() {
+            if live.contains(id) {
+                self.list[kept] = self.list[id];
+                kept += 1;
+            }
+        }
+        self.list.truncate(kept);
         for row in rows {
             for cell in &mut row.cells {
                 let id = cell.style().0 as usize;
                 if id != 0 {
-                    if remap[id] == u32::MAX {
-                        remap[id] = self.intern(old.list[id]).0;
-                    }
-                    cell.set_style(StyleId(remap[id]));
+                    cell.set_style(StyleId(live.rank(id)));
                 }
             }
         }
+        self.recent.fill((EMPTY, 0));
+        // Reallocating copies the table, so only to grow, or to give back
+        // more than half of it.
+        if self.list.capacity() > 2 * capacity {
+            self.list.shrink_to(capacity);
+        }
+        self.list.reserve_exact(capacity.saturating_sub(kept));
+    }
+}
+
+/// Style ids in use: a bitmap, with a running count per word so an id's new
+/// number (its rank among live ids) takes one popcount.
+pub(crate) struct Live {
+    bits: Vec<u64>,
+    ranks: Vec<u32>,
+    len: usize,
+}
+
+impl Live {
+    /// Live styles, including the default.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    fn contains(&self, id: usize) -> bool {
+        self.bits[id / 64] & (1 << (id % 64)) != 0
+    }
+
+    fn rank(&self, id: usize) -> u32 {
+        let below = self.bits[id / 64] & ((1 << (id % 64)) - 1);
+        self.ranks[id / 64] + below.count_ones()
     }
 }
