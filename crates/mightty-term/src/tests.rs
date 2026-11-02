@@ -478,3 +478,17 @@ fn urls_are_found_in_plain_text() {
     // A scheme alone isn't a URL.
     assert_eq!(term(20, 1, "go to https:// now").url_at(0, 8), None);
 }
+
+#[test]
+fn full_link_table_stays_consistent() {
+    // Every id held by a live cell: collecting frees nothing, and the pen's
+    // cached style must not survive the renumbering.
+    let mut t = Term::with_scrollback(256, 256, 0);
+    for i in 0..u16::MAX as usize + 10 {
+        t.feed(format!("\x1b]8;;https://x/{i}\x07\x1b[3{}ma", i % 8).as_bytes());
+    }
+    t.feed(b"\x1b]8;;https://x/0\x07\x1b[31mb\x1b]8;;\x07c");
+    let (row, col) = t.cursor();
+    assert_eq!(t.lines()[row].cells[col - 1].c, 'c');
+    assert_eq!(t.link_at(t.lines_scrolled() + row as u64, col - 1), None);
+}

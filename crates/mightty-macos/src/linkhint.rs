@@ -68,6 +68,29 @@ impl LinkHint {
     }
 }
 
+/// What the hint says for a link to `uri`: its host first, so trimming a
+/// long target never hides it, and invisible or direction-changing
+/// characters made visible (`<U+202E>`), so the text can't pass for
+/// another address.
+pub fn describe(uri: &str) -> String {
+    let visible = |s: &str| {
+        s.chars()
+            .map(|c| if c.is_control() || is_invisible(c) { format!("<U+{:04X}>", c as u32) } else { c.to_string() })
+            .collect::<String>()
+    };
+    let host = uri.split_once("://").map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default());
+    match host.filter(|h| !h.is_empty()) {
+        Some(host) => format!("{}  —  {}", visible(host), visible(uri)),
+        None => visible(uri),
+    }
+}
+
+/// Format characters that render as nothing or reorder text around them.
+fn is_invisible(c: char) -> bool {
+    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+}
+
 impl Drop for LinkHint {
     fn drop(&mut self) {
         // SAFETY: main thread; the label goes with the panel.
@@ -75,5 +98,19 @@ impl Drop for LinkHint {
             call!(self.panel, c"removeFromSuperview");
             call!(self.panel, c"release");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hint_shows_host_and_hidden_characters() {
+        assert_eq!(describe("https://example.com/a?b"), "example.com  —  https://example.com/a?b");
+        assert_eq!(describe("mailto:me@x.org"), "mailto:me@x.org");
+        // Right-to-left override could make "evil.com/moc.elgoog" read as google.com.
+        assert_eq!(describe("https://evil.com/\u{202E}moc.elgoog"), "evil.com  —  https://evil.com/<U+202E>moc.elgoog");
+        assert_eq!(describe("https://a\u{200B}b.com"), "a<U+200B>b.com  —  https://a<U+200B>b.com");
     }
 }

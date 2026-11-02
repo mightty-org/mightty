@@ -206,6 +206,9 @@ pub struct Term {
     /// The OSC 8 hyperlink being written, 0 for none. Not part of the pen:
     /// SGR resets leave it.
     link: u16,
+    /// New links to refuse before collecting unused ones again, after a
+    /// collection that freed nothing.
+    link_gc_backoff: u32,
     /// The last character joined a cluster with U+200D (zero-width
     /// joiner), so the next one joins it too.
     joining: bool,
@@ -259,6 +262,7 @@ impl Term {
             graphemes: Graphemes::default(),
             links: Links::default(),
             link: 0,
+            link_gc_backoff: 0,
             joining: false,
         }
     }
@@ -762,6 +766,9 @@ impl Term {
     /// fresh colour per cell it holds a style per live cell, and a doubling
     /// `Vec` (plus a copy while collecting) would need several times that.
     fn collect_styles(&mut self) {
+        // Ids are renumbered: cached ones would point at other styles, or past the end.
+        self.pen_id = None;
+        self.erased_id = None;
         let Self { styles, primary, alternate, scrollback, .. } = self;
         let live = styles.live(primary.iter().chain(alternate.iter()).chain(scrollback.iter()));
         let next = (live.len() * 2).max(MIN_STYLE_GC);
@@ -1481,11 +1488,17 @@ impl Term {
                     .unwrap_or_default();
                 let link = match (std::str::from_utf8(&uri), std::str::from_utf8(id)) {
                     (Ok(uri), Ok(id)) if !uri.is_empty() => {
-                        if self.links.is_full() {
+                        if self.links.is_full() && self.link_gc_backoff == 0 {
                             self.collect_styles();
                             let used = self.styles.links();
                             self.links.collect(|n| used[usize::from(n)]);
+                            // Still full: every id is in use. Collecting is a
+                            // full scan, so wait a while before trying again.
+                            if self.links.is_full() {
+                                self.link_gc_backoff = LINK_GC_BACKOFF;
+                            }
                         }
+                        self.link_gc_backoff = self.link_gc_backoff.saturating_sub(1);
                         self.links.intern(id, uri).unwrap_or(0)
                     }
                     _ => 0,
@@ -1841,6 +1854,9 @@ fn fill_cells(cells: &mut [Cell], value: Cell) {
 /// tones is 41 bytes. With every id in use the table then holds at most a
 /// few MiB.
 const MAX_CLUSTER_BYTES: usize = 64;
+
+/// See `Term::link_gc_backoff`.
+const LINK_GC_BACKOFF: u32 = 4096;
 
 /// What a plain-text URL starts with, for [`Term::url_at`].
 const URL_SCHEMES: &[&str] = &["https://", "http://", "file://", "ftp://", "ssh://", "git://", "mailto:"];

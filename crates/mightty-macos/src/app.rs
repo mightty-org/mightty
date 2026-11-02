@@ -23,7 +23,7 @@ use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
 use crate::latency;
 use crate::open;
-use crate::linkhint::LinkHint;
+use crate::linkhint::{self, LinkHint};
 use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
 
 struct App {
@@ -772,7 +772,7 @@ impl Window {
             }
         }
         if let Some(hint) = &self.hint {
-            hint.show(hover.as_ref().map(|h| h.1.as_str()));
+            hint.show(hover.as_ref().map(|h| linkhint::describe(&h.1)).as_deref());
         }
         self.hover = hover;
         self.render();
@@ -1014,10 +1014,13 @@ unsafe fn register_view_class() -> Id {
         // SAFETY: `event` is an NSEvent.
         let flags: usize = unsafe { msg!(event, c"modifierFlags") };
         if flags & CMD != 0 {
-            // Cmd-click opens the link under the pointer; it never starts a selection.
+            // Cmd-click opens the link under the pointer; it never starts a
+            // selection. Only the target the hint was showing opens: if output
+            // changed what's under the pointer, the hint updates instead.
             let link = with_window(view, |w| {
+                let shown = w.hover.clone();
                 w.update_hover(true);
-                w.hover.as_ref().map(|h| h.1.clone())
+                (w.hover == shown).then(|| shown.map(|h| h.1)).flatten()
             });
             if let Some(uri) = link.flatten() {
                 open::open(&uri);
