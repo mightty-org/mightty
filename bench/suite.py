@@ -30,7 +30,7 @@ PROBE = os.path.join(ROOT, "bench", "probe.py")
 
 TERMINALS = {
     "mightty": (
-        [os.path.join(ROOT, "target", "release", "mightty"), "--window-width=120", "--window-height=40",
+        [os.path.join(ROOT, "target", "release", "mightty"), "--config-default-files=false", "--window-width=120", "--window-height=40",
          "--font-family=Menlo", "--font-size=14", "-e"],
         {},
     ),

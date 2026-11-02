@@ -8,8 +8,8 @@ use std::ffi::c_void;
 use std::mem;
 use std::path::PathBuf;
 
-use mightty_render::{SELECTION_BG, boxdraw, palette};
-use mightty_term::{Color, DEFAULT_BG, DEFAULT_FG, Flags, Row, StyledCell, Term};
+use mightty_render::{Rgb, Theme, boxdraw};
+use mightty_term::{Color, Flags, Row, StyledCell, Term};
 
 use crate::ffi::*;
 use crate::font::{Font, RasterGlyph, Style};
@@ -163,6 +163,7 @@ pub struct Renderer {
     font_name: String,
     font_size: f64,
     scale: f64,
+    theme: Theme,
     pub focused: bool,
     /// `MIGHTTY_SNAPSHOT`: every frame is also written to this PNG.
     snapshot: Option<PathBuf>,
@@ -170,7 +171,7 @@ pub struct Renderer {
 
 impl Renderer {
     /// `layer` must be a `CAMetalLayer`. `font_size` is in points.
-    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64) -> Self {
+    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme) -> Self {
         // SAFETY: Metal calls with the documented signatures.
         unsafe {
             let device = MTLCreateSystemDefaultDevice();
@@ -196,6 +197,7 @@ impl Renderer {
                 font_name: font_name.to_owned(),
                 font_size,
                 scale,
+                theme,
                 focused: true,
                 snapshot,
             }
@@ -251,7 +253,7 @@ impl Renderer {
             }
             let pass: Id = msg!(class(c"MTLRenderPassDescriptor"), c"renderPassDescriptor");
             let attachment: Id = msg!(msg!(pass, c"colorAttachments"), c"objectAtIndexedSubscript:", 0usize);
-            let [r, g, b, _] = rgba(DEFAULT_BG);
+            let [r, g, b, _] = rgba(self.theme.background);
             let texture: Id = msg!(drawable, c"texture");
             call!(attachment, c"setTexture:", texture);
             call!(attachment, c"setLoadAction:", 2usize); // clear
@@ -309,15 +311,19 @@ impl Renderer {
                 let x = pad + c as f32 * cw;
                 let wide = cell.flags.contains(Flags::WIDE);
                 let w = if wide { 2.0 * cw } else { cw };
-                let mut fg = resolve(cell.fg, DEFAULT_FG);
-                let mut bg = resolve(cell.bg, DEFAULT_BG);
+                let theme = &self.theme;
+                let mut fg = rgba(theme.resolve(cell.fg, theme.foreground));
+                let mut bg = rgba(theme.resolve(cell.bg, theme.background));
                 let inverse = cell.flags.contains(Flags::INVERSE);
                 if inverse {
                     mem::swap(&mut fg, &mut bg);
                 }
                 let selected = selection.is_some_and(|(start, end)| start <= (line, c) && (line, c) <= end);
                 if selected {
-                    bg = rgba(SELECTION_BG);
+                    bg = rgba(theme.selection_background);
+                    if let Some(color) = theme.selection_foreground {
+                        fg = rgba(color);
+                    }
                 }
                 if selected || inverse || cell.bg != Color::Default {
                     back.push(Quad::solid(x, y, w, ch, bg));
@@ -327,19 +333,22 @@ impl Renderer {
                     && r == cursor_row
                     && c == cursor_col
                 {
+                    let cursor = theme.cursor.map_or(fg, rgba);
                     match (self.focused, cursor_shape) {
                         (true, 0..=2) => {
-                            back.push(Quad::solid(x, y, w, ch, fg));
-                            fg = bg;
+                            back.push(Quad::solid(x, y, w, ch, cursor));
+                            fg = theme.cursor_text.map_or(bg, rgba);
                         }
-                        (true, 3 | 4) => back.push(Quad::solid(x, y + ch - 2.0 * thickness, w, 2.0 * thickness, fg)),
-                        (true, _) => back.push(Quad::solid(x, y, 2.0 * thickness, ch, fg)),
+                        (true, 3 | 4) => {
+                            back.push(Quad::solid(x, y + ch - 2.0 * thickness, w, 2.0 * thickness, cursor));
+                        }
+                        (true, _) => back.push(Quad::solid(x, y, 2.0 * thickness, ch, cursor)),
                         (false, _) => {
                             // Hollow block when the window isn't focused.
-                            front.push(Quad::solid(x, y, w, thickness, fg));
-                            front.push(Quad::solid(x, y + ch - thickness, w, thickness, fg));
-                            front.push(Quad::solid(x, y, thickness, ch, fg));
-                            front.push(Quad::solid(x + w - thickness, y, thickness, ch, fg));
+                            front.push(Quad::solid(x, y, w, thickness, cursor));
+                            front.push(Quad::solid(x, y + ch - thickness, w, thickness, cursor));
+                            front.push(Quad::solid(x, y, thickness, ch, cursor));
+                            front.push(Quad::solid(x + w - thickness, y, thickness, ch, cursor));
                         }
                     }
                 }
@@ -497,14 +506,6 @@ unsafe fn create_atlas(device: Id) -> Id {
     }
 }
 
-fn rgba((r, g, b): (u8, u8, u8)) -> [f32; 4] {
+fn rgba((r, g, b): Rgb) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
-}
-
-fn resolve(color: Color, default: (u8, u8, u8)) -> [f32; 4] {
-    rgba(match color {
-        Color::Default => default,
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(i) => palette(i),
-    })
 }

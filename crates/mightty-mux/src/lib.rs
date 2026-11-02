@@ -21,7 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use mightty_pty::{Pty, WindowSize};
-use mightty_term::Term;
+use mightty_term::{Term, TermOptions};
 
 pub use keys::key_bytes;
 pub use rpc::{RpcError, handle};
@@ -144,11 +144,17 @@ pub struct Mux {
     next_id: AtomicU64,
     host: Arc<dyn Host>,
     socket: OnceLock<PathBuf>,
+    /// For every pane's terminal.
+    options: TermOptions,
 }
 
 impl Mux {
     pub fn new(host: Arc<dyn Host>) -> Arc<Self> {
-        Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new() })
+        Self::with_options(host, TermOptions::default())
+    }
+
+    pub fn with_options(host: Arc<dyn Host>, options: TermOptions) -> Arc<Self> {
+        Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(), options })
     }
 
     /// The control socket, once `listen` has bound it.
@@ -184,7 +190,7 @@ impl Mux {
 
         let pty = Pty::spawn(cmd, WindowSize { cols: opts.cols, rows: opts.rows, ..Default::default() })?;
         let reader = pty.reader()?;
-        let mut term = Term::new(opts.cols.into(), opts.rows.into());
+        let mut term = Term::with_options(opts.cols.into(), opts.rows.into(), &self.options);
         if let Some(nonce) = &nonce {
             term.set_mark_nonce(nonce);
         }

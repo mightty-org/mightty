@@ -16,7 +16,7 @@ pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
 pub use styles::Styles;
 pub use width::char_width;
 
-const DEFAULT_SCROLLBACK: usize = 10_000;
+pub const DEFAULT_SCROLLBACK: usize = 10_000;
 const MAX_MARKS: usize = 10_000;
 /// Longer command lines (OSC 633;E) are cut, so the kept ones stay small.
 const MAX_COMMAND_LEN: usize = 4096;
@@ -26,9 +26,24 @@ const MIN_STYLE_GC: usize = 4096;
 /// are deliberately absent so paths and URLs select whole.
 const WORD_DELIMITERS: &str = "'\"`()[]{}<>|│,;";
 const TAB_WIDTH: usize = 8;
-/// Default colours, also reported for OSC 10/11 queries. TODO: move into a theme.
+/// Default colours, unless [`TermOptions`] says otherwise.
 pub const DEFAULT_FG: (u8, u8, u8) = (0xd8, 0xd8, 0xd8);
 pub const DEFAULT_BG: (u8, u8, u8) = (0x1e, 0x1e, 0x1e);
+
+/// Settings a terminal takes from the user's configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TermOptions {
+    pub scrollback_lines: usize,
+    /// Reported to programs that ask (OSC 10/11), to match what is drawn.
+    pub foreground: (u8, u8, u8),
+    pub background: (u8, u8, u8),
+}
+
+impl Default for TermOptions {
+    fn default() -> Self {
+        Self { scrollback_lines: DEFAULT_SCROLLBACK, foreground: DEFAULT_FG, background: DEFAULT_BG }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
@@ -166,6 +181,8 @@ pub struct Term {
     /// When set, shell-integration marks count only if they carry
     /// `nonce=<this>`, so programs can't fake a finished command.
     mark_nonce: Option<Box<[u8]>>,
+    /// Reported for OSC 10/11.
+    colors: [(u8, u8, u8); 2],
     responses: Vec<u8>,
     bell: bool,
     styles: Styles,
@@ -180,6 +197,12 @@ pub struct Term {
 impl Term {
     pub fn new(cols: usize, rows: usize) -> Self {
         Self::with_scrollback(cols, rows, DEFAULT_SCROLLBACK)
+    }
+
+    pub fn with_options(cols: usize, rows: usize, options: &TermOptions) -> Self {
+        let mut term = Self::with_scrollback(cols, rows, options.scrollback_lines);
+        term.colors = [options.foreground, options.background];
+        term
     }
 
     pub fn with_scrollback(cols: usize, rows: usize, scrollback_limit: usize) -> Self {
@@ -209,6 +232,7 @@ impl Term {
             commands: Vec::new(),
             pending_command: None,
             mark_nonce: None,
+            colors: [DEFAULT_FG, DEFAULT_BG],
             responses: Vec::new(),
             bell: false,
             styles: Styles::new(),
@@ -1055,9 +1079,9 @@ impl Term {
         let scrollback = mem::take(&mut self.scrollback);
         let styles = mem::replace(&mut self.styles, Styles::new());
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
-        let mark_nonce = self.mark_nonce.take();
+        let (mark_nonce, colors) = (self.mark_nonce.take(), self.colors);
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
-        self.mark_nonce = mark_nonce;
+        (self.mark_nonce, self.colors) = (mark_nonce, colors);
         // Scrollback keeps its style ids, so it keeps their table too.
         self.scrollback = scrollback;
         self.styles = styles;
@@ -1170,7 +1194,7 @@ impl Term {
             }
             [b"7", url, ..] => self.cwd = parse_file_url(url),
             [code @ (b"10" | b"11"), b"?"] => {
-                let (r, g, b) = if *code == b"10" { DEFAULT_FG } else { DEFAULT_BG };
+                let (r, g, b) = self.colors[usize::from(*code == b"11")];
                 let code = String::from_utf8_lossy(code);
                 let reply = format!("\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}");
                 self.respond(reply.as_bytes());

@@ -39,17 +39,43 @@ cargo run --release -- run -- ls -la    # headless: run, print the final screen
 cargo test
 ```
 
-Settings are command line flags written `--name=value`; names follow
-Ghostty's where the meaning is the same, and the same names will work in a
-config file. `mightty --help` lists them with their defaults.
+Settings live in `~/.config/mightty/config` (or `$XDG_CONFIG_HOME/mightty/config`),
+one `name = value` per line, `#` for comments. Every setting also works as a
+`--name=value` flag, which wins over the file. Names are Ghostty's where the
+meaning is the same. `mightty --help` lists them all with current values.
+
+```
+# ~/.config/mightty/config
+font-family = JetBrains Mono
+font-size = 13
+window-width = 120
+window-height = 36
+scrollback-lines = 50000
+theme = Dracula
+cursor-color = #ff79c6
+```
 
 | Setting | Default | |
 |---|---|---|
-| `--font-family` | `Menlo` | Font family |
-| `--font-size` | `14` | Points |
-| `--window-width`, `--window-height` | `100`, `30` | Size of new windows, in cells |
-| `--command` | login shell | Shell command line for the first window |
-| `--working-directory` | home | Working directory of the first window |
+| `font-family`, `font-size` | `Menlo`, `14` | Font and size in points |
+| `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
+| `scrollback-lines` | `10000` | Lines kept above the screen |
+| `theme` | | Colours from `themes/NAME` in the config directory, or a path |
+| `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
+| `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
+| `selection-background`, `selection-foreground` | `#3e4451`, unchanged | Selected text |
+| `palette` | xterm | `palette = N=#rrggbb`, one line per entry |
+| `command`, `working-directory` | login shell, home | First window only |
+
+Themes are config files containing only colour settings, in the same format
+as Ghostty's, so Ghostty's ~800 bundled themes work unchanged: copy one from
+`/Applications/Ghostty.app/Contents/Resources/ghostty/themes/` into
+`~/.config/mightty/themes/`. Settings after `theme` override it.
+
+A typo in the config file is reported on stderr with its line number and the
+rest still applies; a bad flag stops with an error.
+`--config-file=PATH` loads an extra file and `--config-default-files=false`
+skips the default one (the benchmark suite uses it).
 
 ```sh
 mightty --window-width=120 --window-height=40 -e htop
@@ -243,5 +269,5 @@ checks the header compiles as C++.
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. Agent status detection (working / waiting for you), attention queue, notifications
-6. Tabs/splits, config file, bash/fish integration
+6. Tabs/splits, bash/fish integration (config file ✅)
 7. Linux (raw Wayland protocol), own font rasterizer, Windows

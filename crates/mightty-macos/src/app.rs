@@ -212,7 +212,7 @@ pub fn run(config: Config) -> io::Result<()> {
 
         let host = Arc::new(GuiHost::default());
         let _ = HOST.set(host.clone());
-        let mux = Mux::new(host);
+        let mux = Mux::with_options(host, config.term_options());
         if let Err(e) = mightty_mux::listen(mux.clone()) {
             eprintln!("mightty: control socket unavailable: {e}");
         }
@@ -242,7 +242,7 @@ impl App {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
             let scale: f64 = if screen.is_null() { 2.0 } else { msg!(screen, c"backingScaleFactor") };
             let layer: Id = msg!(msg!(class(c"CAMetalLayer"), c"layer"), c"retain");
-            let renderer = Renderer::new(layer, &self.config.font, self.config.font_size, scale);
+            let renderer = Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone());
 
             let (cols, rows) = {
                 let term = pane.term.lock().unwrap();

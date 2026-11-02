@@ -35,14 +35,21 @@ fn main() -> ExitCode {
         Some("--help" | "-h") => {
             println!("{USAGE}");
             #[cfg(target_os = "macos")]
-            println!("\nsettings [default]:\n{}", mightty_macos::Config::default().help().trim_end());
+            match mightty_macos::Config::load(&[]) {
+                Ok((config, _)) => println!("\n{}", config.help().trim_end()),
+                Err(e) => eprintln!("mightty: {e}"),
+            }
             Ok(ExitCode::SUCCESS)
         }
         #[cfg(target_os = "macos")]
         _ if args.first().is_none_or(|a| a.starts_with('-')) => {
-            let mut config = mightty_macos::Config::default();
-            match config.apply_args(&args) {
-                Ok(()) => mightty_macos::run(config).map(|()| ExitCode::SUCCESS),
+            match mightty_macos::Config::load(&args) {
+                Ok((config, warnings)) => {
+                    for warning in warnings {
+                        eprintln!("mightty: {warning}");
+                    }
+                    mightty_macos::run(config).map(|()| ExitCode::SUCCESS)
+                }
                 Err(e) => {
                     eprintln!("mightty: {e}");
                     return ExitCode::from(2);

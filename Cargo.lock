@@ -58,6 +58,9 @@ version = "0.1.0"
 [[package]]
 name = "mightty-render"
 version = "0.1.0"
+dependencies = [
+ "mightty-term",
+]
 
 [[package]]
 name = "mightty-term"

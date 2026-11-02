@@ -1,6 +1,6 @@
 //! Rendering pieces shared by every front end: no GPU or OS code here.
 
 pub mod boxdraw;
-mod palette;
+mod theme;
 
-pub use palette::{SELECTION_BG, palette};
+pub use theme::{Rgb, Theme};
