@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use mightty_mux::{Host, Mux, Pane, PaneId, SpawnOptions};
 use mightty_term::{MouseMode, Term};
 
-use crate::config::Config;
+use crate::config::{Config, OptionAsAlt};
 use crate::ffi::*;
 use crate::keys::{self, Mods, MouseAction};
 use crate::latency;
@@ -101,6 +101,21 @@ fn selection_range(selection: Option<Selection>, term: &Term) -> Option<renderer
         }
     }
     Some((start, end))
+}
+
+/// The active keyboard layout is US or ABC, where Option's characters are
+/// rarely needed (Ghostty's default for `macos-option-as-alt`).
+fn us_keyboard_layout() -> bool {
+    // SAFETY: Carbon calls; the copied source is released, the property is borrowed from it.
+    unsafe {
+        let source = TISCopyCurrentKeyboardLayoutInputSource();
+        if source.is_null() {
+            return true;
+        }
+        let id = string_from_ns(TISGetInputSourceProperty(source, kTISPropertyInputSourceID) as Id);
+        CFRelease(source);
+        matches!(id.as_str(), "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
+    }
 }
 
 fn modifiers(flags: usize) -> Mods {
@@ -596,15 +611,21 @@ unsafe fn register_view_class() -> Id {
                 return; // Command shortcuts belong to the menu.
             }
             let mods = modifiers(flags);
+            // Option not acting as Alt types what the layout gives it (å, @,
+            // dead keys); keys it types nothing for, like arrows, still get Alt.
+            let alt = mods.alt && {
+                let setting = with_app(|app| app.config.option_as_alt).flatten();
+                OptionAsAlt::applies(setting, flags, us_keyboard_layout)
+            };
             // Text keys go through the input method (IME, dead keys), which
             // calls back with text to insert or to show as composing. Ctrl
-            // and Option (as Meta) chords skip it unless it's composing;
-            // keys it leaves alone (arrows, Return, ...) are encoded below.
+            // and Alt chords skip it unless it's composing; keys it leaves
+            // alone (arrows, Return, ...) are encoded below.
             let composing = with_window(view, |w| {
                 w.ime_used_key = false;
                 !w.preedit.is_empty()
             });
-            if composing == Some(true) || !(mods.ctrl || mods.alt) {
+            if composing == Some(true) || !(mods.ctrl || alt) {
                 let context: Id = msg!(view, c"inputContext");
                 if !context.is_null() {
                     // Not inside `with_window`: the callbacks borrow the window.

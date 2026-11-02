@@ -61,6 +61,7 @@ cursor-color = #ff79c6
 | `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
 | `scrollback-lines` | `10000` | Lines kept above the screen |
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
+| `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |

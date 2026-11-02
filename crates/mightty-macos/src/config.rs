@@ -30,6 +30,37 @@ pub struct Config {
     /// Show frames only at a display refresh: no tearing, but up to a
     /// refresh or two more latency.
     pub vsync: bool,
+    /// Which Option keys act as Alt (Meta) instead of typing special
+    /// characters; `None`: decided by the keyboard layout.
+    pub option_as_alt: Option<OptionAsAlt>,
+}
+
+/// `macos-option-as-alt`, as in Ghostty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionAsAlt {
+    None,
+    Both,
+    Left,
+    Right,
+}
+
+impl OptionAsAlt {
+    /// Whether Option acts as Alt for a key press with Option held and
+    /// these NSEvent modifier flags, `us_layout` saying whether a US keyboard layout is
+    /// active (used when the setting is unset).
+    pub fn applies(setting: Option<Self>, flags: usize, us_layout: impl FnOnce() -> bool) -> bool {
+        // Device-dependent bits for the left and right Option keys.
+        const LEFT: usize = 0x20;
+        const RIGHT: usize = 0x40;
+        match setting {
+            // Elsewhere Option types characters the layout needs, like `@`.
+            None => us_layout(),
+            Some(Self::None) => false,
+            Some(Self::Both) => true,
+            Some(Self::Left) => flags & LEFT != 0,
+            Some(Self::Right) => flags & RIGHT != 0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -44,6 +75,7 @@ impl Default for Config {
             theme: Theme::default(),
             scrollback_lines: DEFAULT_SCROLLBACK,
             vsync: true,
+            option_as_alt: None,
         }
     }
 }
@@ -128,6 +160,34 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.vsync.to_string()),
+    },
+    Setting {
+        name: "macos-option-as-alt",
+        value: "WHICH",
+        help: "true, false, left or right: Option keys that act as Alt instead of typing characters \
+               (default: true on US layouts, else false)",
+        color: false,
+        set: |c, v| {
+            c.option_as_alt = Some(match v {
+                "true" => OptionAsAlt::Both,
+                "false" => OptionAsAlt::None,
+                "left" => OptionAsAlt::Left,
+                "right" => OptionAsAlt::Right,
+                _ => return Err("expects true, false, left or right".into()),
+            });
+            Ok(())
+        },
+        get: |c| {
+            c.option_as_alt.map(|o| {
+                match o {
+                    OptionAsAlt::Both => "true",
+                    OptionAsAlt::None => "false",
+                    OptionAsAlt::Left => "left",
+                    OptionAsAlt::Right => "right",
+                }
+                .into()
+            })
+        },
     },
     Setting {
         name: "theme",
@@ -454,6 +514,20 @@ mod tests {
         c.apply_args(&args(&["--window-width=120", "--window-height=40", "--font-family=SF Mono", "--font-size=13.5", "--window-vsync=false"]))
             .unwrap();
         assert_eq!((c.cols, c.rows, c.font.as_str(), c.font_size, c.vsync), (120, 40, "SF Mono", 13.5, false));
+        c.apply_args(&args(&["--macos-option-as-alt=left"])).unwrap();
+        assert_eq!(c.option_as_alt, Some(OptionAsAlt::Left));
+    }
+
+    #[test]
+    fn option_as_alt_picks_keys() {
+        let (left, right) = (0x20 | 1 << 19, 0x40 | 1 << 19);
+        let us = || true;
+        assert!(OptionAsAlt::applies(None, left, us) && !OptionAsAlt::applies(None, left, || false));
+        assert!(OptionAsAlt::applies(Some(OptionAsAlt::Left), left, us));
+        assert!(!OptionAsAlt::applies(Some(OptionAsAlt::Left), right, us));
+        assert!(OptionAsAlt::applies(Some(OptionAsAlt::Right), right, us));
+        assert!(!OptionAsAlt::applies(Some(OptionAsAlt::None), left, us));
+        assert!(OptionAsAlt::applies(Some(OptionAsAlt::Both), right, || false));
     }
 
     #[test]
@@ -463,6 +537,7 @@ mod tests {
             "--window-width=x",
             "--font-size=-1",
             "--window-vsync=no",
+            "--macos-option-as-alt=both",
             "--nope=1",
             "--window-width",
             "stray",

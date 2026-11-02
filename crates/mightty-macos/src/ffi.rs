@@ -144,6 +144,13 @@ impl Block {
     }
 }
 
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    pub fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+    pub fn TISGetInputSourceProperty(source: CFTypeRef, key: CFStringRef) -> CFTypeRef;
+    pub static kTISPropertyInputSourceID: CFStringRef;
+}
+
 #[link(name = "Metal", kind = "framework")]
 unsafe extern "C" {
     pub fn MTLCreateSystemDefaultDevice() -> Id;
