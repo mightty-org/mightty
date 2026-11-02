@@ -316,7 +316,8 @@ checks the header compiles as C++.
 2. ✅ macOS window: Cocoa via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas, keyboard input
    - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line) + copy, mouse reporting
    - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters
-   - Next: IME (`NSTextInputClient`), URL hints, search
+   - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor
+   - Next: URL hints, search
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. Agent status detection (working / waiting for you), attention queue, notifications

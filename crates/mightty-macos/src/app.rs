@@ -57,6 +57,11 @@ struct Window {
     /// After a key press, the next output redraw comes this early instead,
     /// so the echo doesn't wait out the refresh.
     echo_frame: Option<Instant>,
+    /// Text an input method is composing (marked text), drawn at the
+    /// cursor until it's committed.
+    preedit: String,
+    /// The input method used the key being handled (inserted or composed text).
+    ime_used_key: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,6 +344,8 @@ impl App {
                 selection: None,
                 next_frame: Instant::now(),
                 echo_frame: None,
+                preedit: String::new(),
+                ime_used_key: false,
             };
             window.resize();
             self.windows.push(window);
@@ -387,6 +394,9 @@ impl Window {
                     None
                 } else {
                     self.snapshot.capture(&term, self.scroll_offset);
+                    if !self.preedit.is_empty() {
+                        self.snapshot.overlay(&self.preedit, term.cursor());
+                    }
                     Some(selection_range(self.selection, &term))
                 }
             };
@@ -419,6 +429,37 @@ impl Window {
             self.pane.resize(cols as u16, rows as u16, width as u16, height as u16);
         }
         self.render();
+    }
+
+    /// Sends typed input, drawing its echo early (see `ECHO_WAIT`).
+    fn type_bytes(&mut self, bytes: &[u8]) {
+        self.write(bytes);
+        if self.echo_frame.is_none() {
+            self.echo_frame = Some(Instant::now() + ECHO_WAIT);
+            // A redraw already waiting for the refresh would come too late.
+            run_on_main_after(ECHO_WAIT, on_redraw);
+        }
+    }
+
+    /// The cursor's cell in screen coordinates (points, origin bottom-left).
+    fn cursor_rect(&self) -> CGRect {
+        let (row, col) = self.pane.term.lock().unwrap().cursor();
+        let scale = self.renderer.scale();
+        let (cw, ch) = self.renderer.cell_size();
+        let pad = self.renderer.padding_px();
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let bounds = send_rect(self.view, c"bounds");
+            let cell = CGRect {
+                origin: CGPoint {
+                    x: (pad + col as f64 * cw as f64) / scale,
+                    y: bounds.size.height - (pad + (row + 1) as f64 * ch as f64) / scale,
+                },
+                size: CGSize { width: cw as f64 / scale, height: ch as f64 / scale },
+            };
+            let in_window = send_rect_with(self.view, c"convertRect:toView:", (cell, NIL));
+            send_rect_with(self.window, c"convertRectToScreen:", (in_window,))
+        }
     }
 
     /// Sends input to the pane and jumps back to the live screen.
@@ -555,21 +596,110 @@ unsafe fn register_view_class() -> Id {
                 return; // Command shortcuts belong to the menu.
             }
             let mods = modifiers(flags);
+            // Text keys go through the input method (IME, dead keys), which
+            // calls back with text to insert or to show as composing. Ctrl
+            // and Option (as Meta) chords skip it unless it's composing;
+            // keys it leaves alone (arrows, Return, ...) are encoded below.
+            let composing = with_window(view, |w| {
+                w.ime_used_key = false;
+                !w.preedit.is_empty()
+            });
+            if composing == Some(true) || !(mods.ctrl || mods.alt) {
+                let context: Id = msg!(view, c"inputContext");
+                if !context.is_null() {
+                    // Not inside `with_window`: the callbacks borrow the window.
+                    let _: Bool = msg!(context, c"handleEvent:", event);
+                }
+                if with_window(view, |w| w.ime_used_key) == Some(true) {
+                    return;
+                }
+            }
             let code: u16 = msg!(event, c"keyCode");
             let chars = string_from_ns(msg!(event, c"characters"));
             let base = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
             with_window(view, |w| {
                 let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
                 if let Some(bytes) = keys::encode(code, &chars, &base, mods, app_cursor) {
-                    w.write(&bytes);
-                    if w.echo_frame.is_none() {
-                        w.echo_frame = Some(Instant::now() + ECHO_WAIT);
-                        // A redraw already waiting for the refresh would come too late.
-                        run_on_main_after(ECHO_WAIT, on_redraw);
-                    }
+                    w.type_bytes(&bytes);
                 }
             });
         }
+    }
+
+    // ---- NSTextInputClient: what input methods call ----
+
+    /// `string` is an NSString or NSAttributedString.
+    unsafe fn text_of(string: Id) -> String {
+        unsafe {
+            let attributed: Bool = msg!(string, c"isKindOfClass:", class(c"NSAttributedString"));
+            string_from_ns(if attributed != 0 { msg!(string, c"string") } else { string })
+        }
+    }
+
+    extern "C" fn insert_text(view: Id, _: Sel, string: Id, _replace: NSRange) {
+        // SAFETY: AppKit passes a string object.
+        let text = unsafe { text_of(string) };
+        with_window(view, |w| {
+            w.ime_used_key = true;
+            let had_preedit = !mem::take(&mut w.preedit).is_empty();
+            w.type_bytes(text.as_bytes());
+            if had_preedit {
+                w.render();
+            }
+        });
+    }
+
+    extern "C" fn set_marked_text(view: Id, _: Sel, string: Id, _selected: NSRange, _replace: NSRange) {
+        // SAFETY: AppKit passes a string object.
+        let text = unsafe { text_of(string) };
+        with_window(view, |w| {
+            w.ime_used_key = true;
+            w.preedit = text;
+            w.render();
+        });
+    }
+
+    extern "C" fn unmark_text(view: Id, _: Sel) {
+        with_window(view, |w| {
+            if !mem::take(&mut w.preedit).is_empty() {
+                w.render();
+            }
+        });
+    }
+
+    extern "C" fn has_marked_text(view: Id, _: Sel) -> Bool {
+        if with_window(view, |w| !w.preedit.is_empty()) == Some(true) { YES } else { NO }
+    }
+
+    extern "C" fn marked_range(view: Id, _: Sel) -> NSRange {
+        let length = with_window(view, |w| w.preedit.encode_utf16().count()).unwrap_or(0);
+        if length == 0 { NSRange { location: NS_NOT_FOUND, length: 0 } } else { NSRange { location: 0, length } }
+    }
+
+    extern "C" fn selected_range(_: Id, _: Sel) -> NSRange {
+        NSRange { location: NS_NOT_FOUND, length: 0 }
+    }
+
+    extern "C" fn valid_attributes(_: Id, _: Sel) -> Id {
+        // SAFETY: documented signature.
+        unsafe { msg!(class(c"NSArray"), c"array") }
+    }
+
+    extern "C" fn attributed_substring(_: Id, _: Sel, _range: NSRange, _actual: *mut NSRange) -> Id {
+        NIL
+    }
+
+    extern "C" fn character_index(_: Id, _: Sel, _point: CGPoint) -> usize {
+        NS_NOT_FOUND
+    }
+
+    /// Where the input method puts its candidate window: the cursor's cell, in screen coordinates.
+    extern "C" fn first_rect(view: Id, _: Sel, _range: NSRange, _actual: *mut NSRange) -> CGRect {
+        with_window(view, |w| w.cursor_rect()).unwrap_or_default()
+    }
+
+    extern "C" fn do_command(_: Id, _: Sel, _command: Sel) {
+        // Left to `key_down`, which encodes the key itself.
     }
 
     extern "C" fn scroll_wheel(view: Id, _: Sel, event: Id) {
@@ -628,7 +758,7 @@ unsafe fn register_view_class() -> Id {
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
     let predicate = |f: extern "C" fn(Id, Sel) -> Bool| f as *const c_void;
     unsafe {
-        register_class(c"MighttyView", c"NSView", &[
+        register_class_with(c"MighttyView", c"NSView", &[c"NSTextInputClient"], &[
             (c"acceptsFirstResponder", predicate(yes), c"c@:"),
             (c"isOpaque", predicate(yes), c"c@:"),
             (c"keyDown:", action(key_down), c"v@:@"),
@@ -638,6 +768,29 @@ unsafe fn register_view_class() -> Id {
             (c"mouseDown:", action(mouse_down), c"v@:@"),
             (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
             (c"mouseUp:", action(mouse_up), c"v@:@"),
+            (c"insertText:replacementRange:", insert_text as *const c_void, c"v@:@{_NSRange=QQ}"),
+            (
+                c"setMarkedText:selectedRange:replacementRange:",
+                set_marked_text as *const c_void,
+                c"v@:@{_NSRange=QQ}{_NSRange=QQ}",
+            ),
+            (c"unmarkText", unmark_text as *const c_void, c"v@:"),
+            (c"hasMarkedText", predicate(has_marked_text), c"c@:"),
+            (c"markedRange", marked_range as *const c_void, c"{_NSRange=QQ}@:"),
+            (c"selectedRange", selected_range as *const c_void, c"{_NSRange=QQ}@:"),
+            (c"validAttributesForMarkedText", valid_attributes as *const c_void, c"@@:"),
+            (
+                c"attributedSubstringForProposedRange:actualRange:",
+                attributed_substring as *const c_void,
+                c"@@:{_NSRange=QQ}^{_NSRange=QQ}",
+            ),
+            (c"characterIndexForPoint:", character_index as *const c_void, c"Q@:{CGPoint=dd}"),
+            (
+                c"firstRectForCharacterRange:actualRange:",
+                first_rect as *const c_void,
+                c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}",
+            ),
+            (c"doCommandBySelector:", do_command as *const c_void, c"v@::"),
         ])
     }
 }

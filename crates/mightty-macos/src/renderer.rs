@@ -9,7 +9,7 @@ use std::mem;
 use std::path::PathBuf;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Flags, Row, StyledCell, Term};
+use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
 
 use crate::ffi::*;
 use crate::font::{Font, RasterGlyph, Style};
@@ -129,6 +129,36 @@ impl Snapshot {
 
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    /// Draws text an input method is composing over the cells from `(row,
+    /// col)`, underlined, with the cursor after it. What doesn't fit on
+    /// the row is cut off.
+    pub fn overlay(&mut self, text: &str, (row, mut col): (usize, usize)) {
+        if row >= self.rows {
+            return;
+        }
+        for c in text.chars() {
+            let width = char_width(c);
+            if width == 0 {
+                continue;
+            }
+            if col + width > self.cols {
+                break;
+            }
+            let i = row * self.cols + col;
+            let wide = if width == 2 { Flags::WIDE } else { Flags::empty() };
+            self.cells[i] = StyledCell { c, flags: Flags::UNDERLINE | wide, ..StyledCell::BLANK };
+            self.clusters.remove(&i);
+            if width == 2 {
+                self.cells[i + 1] = StyledCell { flags: Flags::WIDE_SPACER, ..StyledCell::BLANK };
+                self.clusters.remove(&(i + 1));
+            }
+            col += width;
+        }
+        if let Some(cursor) = &mut self.cursor {
+            (cursor.0, cursor.1) = (row, col.min(self.cols - 1));
+        }
     }
 
     /// Copies the visible screen, `scroll_offset` lines up into scrollback.

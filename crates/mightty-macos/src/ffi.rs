@@ -36,6 +36,16 @@ pub struct CGRect {
     pub size: CGSize,
 }
 
+/// `NSRange`, in UTF-16 code units.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NSRange {
+    pub location: usize,
+    pub length: usize,
+}
+
+pub const NS_NOT_FOUND: usize = isize::MAX as usize;
+
 #[repr(C)]
 pub struct CFRange {
     pub location: isize,
@@ -80,6 +90,8 @@ unsafe extern "C" {
     pub fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra_bytes: usize) -> Id;
     pub fn objc_registerClassPair(cls: Id);
     pub fn class_addMethod(cls: Id, name: Sel, imp: *const c_void, types: *const c_char) -> Bool;
+    fn class_addProtocol(cls: Id, protocol: Id) -> Bool;
+    fn objc_getProtocol(name: *const c_char) -> Id;
     pub fn objc_autoreleasePoolPush() -> *mut c_void;
     pub fn objc_autoreleasePoolPop(pool: *mut c_void);
 }
@@ -326,11 +338,19 @@ pub unsafe fn send<A: MessageArgs, R>(obj: Id, sel_name: &CStr, args: A) -> R {
 /// # Safety
 /// The receiver must respond to `sel` with signature `() -> CGRect`.
 pub unsafe fn send_rect(obj: Id, sel_name: &CStr) -> CGRect {
+    unsafe { send_rect_with(obj, sel_name, ()) }
+}
+
+/// `send_rect` for a method taking `args`.
+///
+/// # Safety
+/// The receiver must respond to `sel` with signature `(args) -> CGRect`.
+pub unsafe fn send_rect_with<A: MessageArgs>(obj: Id, sel_name: &CStr, args: A) -> CGRect {
     #[cfg(target_arch = "x86_64")]
     let imp = objc_msgSend_stret as *const ();
     #[cfg(not(target_arch = "x86_64"))]
     let imp = objc_msgSend as *const ();
-    unsafe { ().invoke(imp, obj, sel(sel_name)) }
+    unsafe { args.invoke(imp, obj, sel(sel_name)) }
 }
 
 /// `msg!(obj, c"selector:with:", a, b)`; the return type is inferred.
@@ -387,9 +407,26 @@ pub fn cfstring(s: &str) -> CFStringRef {
 
 /// Registers a new Objective-C class with the given methods.
 pub unsafe fn register_class(name: &CStr, superclass: &CStr, methods: &[(&CStr, *const c_void, &CStr)]) -> Id {
+    unsafe { register_class_with(name, superclass, &[], methods) }
+}
+
+/// Like `register_class`, also adopting `protocols` (which some AppKit
+/// APIs check, such as `NSTextInputClient`).
+pub unsafe fn register_class_with(
+    name: &CStr,
+    superclass: &CStr,
+    protocols: &[&CStr],
+    methods: &[(&CStr, *const c_void, &CStr)],
+) -> Id {
     unsafe {
         let cls = objc_allocateClassPair(class(superclass), name.as_ptr(), 0);
         assert!(!cls.is_null(), "class {name:?} already registered");
+        for protocol in protocols {
+            let protocol = objc_getProtocol(protocol.as_ptr());
+            if !protocol.is_null() {
+                class_addProtocol(cls, protocol);
+            }
+        }
         for &(selector, imp, types) in methods {
             class_addMethod(cls, sel(selector), imp, types.as_ptr());
         }
