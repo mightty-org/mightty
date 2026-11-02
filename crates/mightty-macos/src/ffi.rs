@@ -93,6 +93,43 @@ unsafe extern "C" {
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {
     pub static kCAGravityTopLeft: Id;
+    /// Seconds on the clock Core Animation and Metal timestamps use.
+    pub fn CACurrentMediaTime() -> f64;
+}
+
+// Blocks runtime, in libSystem.
+unsafe extern "C" {
+    static _NSConcreteGlobalBlock: [*const c_void; 32];
+}
+
+/// An Objective-C block that captures nothing, for APIs taking a callback
+/// block: `Block::new(f)` in a `static`, passed as `&BLOCK`.
+#[repr(C)]
+pub struct Block {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: unsafe extern "C" fn(*const Block, Id),
+    descriptor: &'static BlockDescriptor,
+}
+
+#[repr(C)]
+pub struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+}
+
+// SAFETY: a global block is immutable; copying it returns the same block.
+unsafe impl Sync for Block {}
+
+impl Block {
+    /// A block whose single argument is an object, as in `void (^)(id)`.
+    pub const fn new(invoke: unsafe extern "C" fn(*const Block, Id)) -> Self {
+        const BLOCK_IS_GLOBAL: i32 = 1 << 28;
+        static DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() };
+        // Only the address of the runtime's class object is taken.
+        Self { isa: (&raw const _NSConcreteGlobalBlock).cast(), flags: BLOCK_IS_GLOBAL, reserved: 0, invoke, descriptor: &DESCRIPTOR }
+    }
 }
 
 #[link(name = "Metal", kind = "framework")]
@@ -256,6 +293,7 @@ impl_message_args!(A);
 impl_message_args!(A, B);
 impl_message_args!(A, B, C);
 impl_message_args!(A, B, C, D);
+impl_message_args!(A, B, C, D, E, F, G, H, I, J);
 
 /// Sends `sel` to `obj`.
 ///

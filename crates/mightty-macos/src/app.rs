@@ -20,6 +20,7 @@ use mightty_term::{MouseMode, Term};
 use crate::config::Config;
 use crate::ffi::*;
 use crate::keys::{self, Mods, MouseAction};
+use crate::latency;
 use crate::renderer::{self, Renderer, Snapshot};
 
 struct App {
@@ -309,6 +310,7 @@ impl App {
             call!(window, c"makeFirstResponder:", view);
             if self.windows.is_empty() {
                 call!(window, c"center");
+                latency::start(window);
             }
             // With (0,0) this leaves the window in place and returns the next spot.
             self.cascade = msg!(window, c"cascadeTopLeftFromPoint:", self.cascade);
@@ -382,7 +384,8 @@ impl Window {
             // The terminal is unlocked again: build and draw the frame.
             if let Some(selection) = frame {
                 let frame = self.renderer.prepare(&self.snapshot, selection);
-                self.renderer.present(frame);
+                let presented = latency::frame(self.window, &self.snapshot);
+                self.renderer.present(frame, presented);
                 let screen: Id = msg!(self.window, c"screen");
                 let fps: isize = if screen.is_null() { 0 } else { msg!(screen, c"maximumFramesPerSecond") };
                 self.next_frame = Instant::now() + Duration::from_secs(1) / fps.clamp(30, 240) as u32;

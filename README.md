@@ -261,7 +261,28 @@ What made the difference, measured along the way:
   in an A/B run. Output after a pause (such as a typed key's echo) is
   drawn at once; during a stream it waits at most one refresh.
 
-Next: keypress-to-screen latency, and SIMD (NEON) for the SGR-heavy path.
+**Keypress to screen** (mightty only, 60 Hz display, 200 keys each): the
+probe types keys into the window through the app's event queue and reads
+Metal's presented time for the first frame showing each echo. It can't
+see the keyboard or the window server before the event reaches the app,
+and it can't run in other terminals; comparing those needs a camera or a
+tool like [Typometer](https://github.com/pavelfatin/typometer).
+
+| | to frame, median | to screen, median | to screen, P95 |
+|---|---|---|---|
+| idle | 0.40 ms | 24.9 ms | 32.8 ms |
+| while streaming 250 lines/s | 9.17 ms | 34.2 ms | 47.6 ms |
+| while flooded | 9.16 ms | 32.8 ms | 45.1 ms |
+
+```sh
+MIGHTTY_KEY_LATENCY=keys.tsv target/release/mightty -e python3 -I bench/keys.py [idle|stream|flood]
+```
+
+Idle, the echo is in a frame within half a millisecond; the rest is the
+wait for the display and the compositor. Busy, frame pacing holds the
+echo for the rest of the current refresh (~9 ms on average).
+
+Next: draw a key's echo at once even while output streams, and SIMD (NEON) for the SGR-heavy path.
 
 ## libmightty (C ABI)
 

@@ -8,6 +8,7 @@ mod config;
 mod ffi;
 mod font;
 mod keys;
+mod latency;
 mod renderer;
 mod snapshot;
 

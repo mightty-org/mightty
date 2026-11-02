@@ -113,6 +113,15 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The character at a visible cell.
+    pub fn char_at(&self, row: usize, col: usize) -> Option<char> {
+        (row < self.rows && col < self.cols).then(|| self.cells[row * self.cols + col].c)
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
     /// Copies the visible screen, `scroll_offset` lines up into scrollback.
     pub fn capture(&mut self, term: &Term, scroll_offset: usize) {
         let history = term.scrollback();
@@ -277,7 +286,9 @@ impl Renderer {
         Frame(quads)
     }
 
-    pub fn present(&mut self, Frame(mut quads): Frame) {
+    /// Draws `frame`; `presented` is called with the drawable once it's on
+    /// screen (or dropped).
+    pub fn present(&mut self, Frame(mut quads): Frame, presented: Option<&'static Block>) {
         // SAFETY: Metal calls with the documented signatures; objects created
         // with `new...` are released, the rest are autoreleased.
         unsafe {
@@ -318,6 +329,9 @@ impl Renderer {
                 call!(encoder, c"drawPrimitives:vertexStart:vertexCount:instanceCount:", 4usize, 0usize, 4usize, quads.len());
             }
             call!(encoder, c"endEncoding");
+            if let Some(block) = presented {
+                call!(drawable, c"addPresentedHandler:", block as *const Block);
+            }
             call!(commands, c"presentDrawable:", drawable);
             call!(commands, c"commit");
             if let Some(path) = &self.snapshot {
