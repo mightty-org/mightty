@@ -320,3 +320,77 @@ fn erase_keeps_background_only() {
     let cell = t.resolve(*t.lines()[0].cell(2));
     assert_eq!((cell.fg, cell.bg, cell.flags), (Color::Default, Color::Indexed(4), Flags::empty()));
 }
+
+#[test]
+fn combining_marks_join_the_previous_cell() {
+    // Decomposed é, a Thai syllable with marks above and below, and a mark
+    // arriving in its own write.
+    let mut t = term(20, 2, "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}");
+    assert_eq!(t.screen_text(), "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}");
+    assert_eq!(t.cursor(), (0, 7));
+    let cell = t.lines()[0].cells[0];
+    assert!(cell.flags().contains(Flags::GRAPHEME));
+    assert_eq!(t.cell_text(cell), Some("e\u{301}"));
+    assert_eq!(t.resolve(cell).c, 'e');
+    t.feed("\u{308}".as_bytes());
+    assert_eq!(t.screen_text(), "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}\u{308}");
+    // At the right margin, before the wrap.
+    let t = term(3, 2, "abc\u{301}d");
+    assert_eq!(t.screen_text(), "abc\u{301}d");
+    // The slow path (insert mode) joins too.
+    let t = term(10, 1, "\x1b[4hab\u{301}");
+    assert_eq!(t.screen_text(), "ab\u{301}");
+    // Nothing to join at the start of a row.
+    let t = term(10, 1, "\u{301}a");
+    assert_eq!(t.screen_text(), "a");
+}
+
+#[test]
+fn emoji_sequences_are_one_cluster() {
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let thumbs = "\u{1F44D}\u{1F3FD}";
+    let rainbow = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}";
+    let t = term(20, 1, &format!("{family}|{thumbs}|{rainbow}|"));
+    assert_eq!(t.screen_text(), format!("{family}|{thumbs}|{rainbow}|"));
+    // Each takes its first character's width.
+    assert_eq!(t.cursor(), (0, 2 + 1 + 2 + 1 + 1 + 1));
+    let cells = &t.lines()[0].cells;
+    assert_eq!(t.cell_text(cells[0]), Some(family));
+    assert!(cells[1].flags().contains(Flags::WIDE_SPACER));
+    // A skin tone alone stays a character of its own.
+    let t = term(20, 1, "a\u{1F3FD}");
+    assert_eq!(t.cursor(), (0, 3));
+}
+
+#[test]
+fn flags_pair_regional_indicators() {
+    let vn = "\u{1F1FB}\u{1F1F3}";
+    let t = term(10, 1, &format!("{vn}{vn}\u{1F1FA}x"));
+    assert_eq!(t.screen_text(), format!("{vn}{vn}\u{1F1FA}x"));
+    let cells = &t.lines()[0].cells;
+    assert_eq!(t.cell_text(cells[0]), Some(vn));
+    assert!(cells[0].flags().contains(Flags::WIDE) && cells[1].flags().contains(Flags::WIDE_SPACER));
+    assert_eq!(t.cell_text(cells[2]), Some(vn));
+    // A lone indicator is narrow; the cursor moves as apps expect (1 + 1 per letter).
+    assert_eq!(t.cursor(), (0, 6));
+    assert_eq!(cells[4].c, '\u{1F1FA}');
+}
+
+#[test]
+fn clusters_survive_scrolling_and_selection() {
+    let t = term(4, 2, "e\u{301}\r\n2\r\n3");
+    assert_eq!(t.history_text(), "e\u{301}\n2\n3");
+    assert_eq!(t.text_range((0, 0), (0, 3)), "e\u{301}");
+}
+
+#[test]
+fn cluster_ids_are_reclaimed() {
+    let mut t = Term::with_scrollback(4, 1, 0);
+    // More distinct clusters than there are ids, each soon overwritten.
+    for (i, base) in ('\u{4E00}'..).take(0x1_1000).enumerate() {
+        let mark = ['\u{300}', '\u{301}'][i % 2];
+        t.feed(format!("\r{base}{mark}").as_bytes());
+    }
+    t.feed("\re\u{301}".as_bytes());
+    assert_eq!(t.screen_text(), "e\u{301}");
+}

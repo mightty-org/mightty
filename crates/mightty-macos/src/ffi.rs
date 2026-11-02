@@ -161,6 +161,18 @@ unsafe extern "C" {
     ) -> CFStringRef;
     pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     pub fn CFRelease(cf: CFTypeRef);
+    pub fn CFDictionaryCreate(
+        alloc: *const c_void,
+        keys: *const CFTypeRef,
+        values: *const CFTypeRef,
+        count: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> CFTypeRef;
+    pub fn CFAttributedStringCreate(alloc: *const c_void, string: CFStringRef, attributes: CFTypeRef) -> CFTypeRef;
+    pub static kCFTypeDictionaryKeyCallBacks: [u8; 0];
+    pub static kCFTypeDictionaryValueCallBacks: [u8; 0];
+    pub static kCFBooleanTrue: CFTypeRef;
 }
 
 #[link(name = "CoreText", kind = "framework")]
@@ -187,6 +199,11 @@ unsafe extern "C" {
         count: isize,
     ) -> f64;
     pub fn CTFontDrawGlyphs(font: CTFontRef, glyphs: *const u16, positions: *const CGPoint, count: usize, ctx: CGContextRef);
+    pub fn CTLineCreateWithAttributedString(string: CFTypeRef) -> CFTypeRef;
+    pub fn CTLineGetTypographicBounds(line: CFTypeRef, ascent: *mut f64, descent: *mut f64, leading: *mut f64) -> f64;
+    pub fn CTLineDraw(line: CFTypeRef, ctx: CGContextRef);
+    pub static kCTFontAttributeName: CFStringRef;
+    pub static kCTForegroundColorFromContextAttributeName: CFStringRef;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -204,6 +221,7 @@ unsafe extern "C" {
     ) -> CGContextRef;
     pub fn CGContextRelease(ctx: CGContextRef);
     pub fn CGContextSetRGBFillColor(ctx: CGContextRef, r: f64, g: f64, b: f64, a: f64);
+    pub fn CGContextSetTextPosition(ctx: CGContextRef, x: f64, y: f64);
     pub fn CGContextSetAllowsFontSmoothing(ctx: CGContextRef, allows: bool);
     pub fn CGContextSetShouldSmoothFonts(ctx: CGContextRef, should: bool);
 }

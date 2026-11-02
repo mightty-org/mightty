@@ -110,42 +110,88 @@ impl Font {
             }
             let font = if fallback.is_null() { base } else { fallback };
             let color = CTFontGetSymbolicTraits(font) & kCTFontTraitColorGlyphs != 0;
+            let mut advance = CGSize::default();
+            CTFontGetAdvancesForGlyphs(font, 0, glyphs.as_ptr(), &mut advance, 1);
+            let raster = self.draw(cells, advance.width, |ctx, origin| {
+                CTFontDrawGlyphs(font, glyphs.as_ptr(), &origin, 1, ctx);
+            });
+            if !fallback.is_null() {
+                CFRelease(fallback);
+            }
+            raster.map(|r| RasterGlyph { color, ..r })
+        }
+    }
 
-            let (width, height) = (self.cell_width * cells, self.cell_height);
-            let mut pixels = vec![0u8; (width * height * 4) as usize];
+    /// Renders a grapheme cluster (several characters in one cell, such as
+    /// joined emoji, a flag or a letter with combining marks) through
+    /// CoreText's line layout, which shapes it and picks fallback fonts.
+    pub fn rasterize_cluster(&self, text: &str, style: Style, cells: u32) -> Option<RasterGlyph> {
+        // SAFETY: CoreFoundation/CoreText calls with valid arguments; every
+        // object created here is released before returning.
+        unsafe {
+            let keys = [kCTFontAttributeName, kCTForegroundColorFromContextAttributeName];
+            let values = [self.variants[style.0 as usize], kCFBooleanTrue];
+            let attributes = CFDictionaryCreate(
+                ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                2,
+                (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
+                (&raw const kCFTypeDictionaryValueCallBacks).cast(),
+            );
+            let string = cfstring(text);
+            let attributed = CFAttributedStringCreate(ptr::null(), string, attributes);
+            CFRelease(string);
+            CFRelease(attributes);
+            if attributed.is_null() {
+                return None;
+            }
+            let line = CTLineCreateWithAttributedString(attributed);
+            CFRelease(attributed);
+            if line.is_null() {
+                return None;
+            }
+            let width = CTLineGetTypographicBounds(line, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            let raster = self.draw(cells, width, |ctx, origin| {
+                CGContextSetTextPosition(ctx, origin.x, origin.y);
+                CTLineDraw(line, ctx);
+            });
+            CFRelease(line);
+            // Masks are drawn in white, so any tint means colour glyphs (emoji).
+            raster.map(|r| RasterGlyph { color: r.pixels.chunks_exact(4).any(|p| p[0] != p[1] || p[1] != p[2]), ..r })
+        }
+    }
+
+    /// A tile `cells` wide with `draw` called on it at the baseline origin
+    /// for content `width` pixels wide, centred when narrower than the tile
+    /// (wide CJK, emoji). `color` is left false.
+    unsafe fn draw(&self, cells: u32, width: f64, draw: impl FnOnce(CGContextRef, CGPoint)) -> Option<RasterGlyph> {
+        let (tile_width, height) = (self.cell_width * cells, self.cell_height);
+        let mut pixels = vec![0u8; (tile_width * height * 4) as usize];
+        // SAFETY: the context draws into `pixels`, sized for it, and is released here.
+        unsafe {
             let ctx = CGBitmapContextCreate(
                 pixels.as_mut_ptr().cast(),
-                width as usize,
+                tile_width as usize,
                 height as usize,
                 8,
-                width as usize * 4,
+                tile_width as usize * 4,
                 self.colorspace,
                 kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
             );
             if ctx.is_null() {
-                if !fallback.is_null() {
-                    CFRelease(fallback);
-                }
                 return None;
             }
             CGContextSetAllowsFontSmoothing(ctx, false);
             CGContextSetShouldSmoothFonts(ctx, false);
             CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 1.0);
-
-            // Centre glyphs narrower than their tile (wide CJK, emoji).
-            let mut advance = CGSize::default();
-            CTFontGetAdvancesForGlyphs(font, 0, glyphs.as_ptr(), &mut advance, 1);
-            let x = ((width as f64 - advance.width) / 2.0).max(0.0).round();
+            let x = ((tile_width as f64 - width) / 2.0).max(0.0).round();
             // CoreGraphics' origin is bottom-left.
             let y = (height - self.baseline) as f64;
-            CTFontDrawGlyphs(font, glyphs.as_ptr(), &CGPoint { x, y }, 1, ctx);
-
+            draw(ctx, CGPoint { x, y });
             CGContextRelease(ctx);
-            if !fallback.is_null() {
-                CFRelease(fallback);
-            }
-            Some(RasterGlyph { pixels, width, height, color })
         }
+        Some(RasterGlyph { pixels, width: tile_width, height, color: false })
     }
 }
 

@@ -59,6 +59,8 @@ typedef struct mightty_term mightty_term;
 #define MIGHTTY_CELL_WIDE (1u << 8)         /* left half of a double-width character */
 #define MIGHTTY_CELL_WIDE_SPACER (1u << 9)  /* right half; draw nothing */
 #define MIGHTTY_CELL_WRAP_SPACER (1u << 10) /* padding left when a wide char wrapped */
+#define MIGHTTY_CELL_GRAPHEME (1u << 11)    /* several code points (combining marks,
+                                               joined emoji, a flag); codepoint is the first */
 
 #define MIGHTTY_COLOR_DEFAULT 0 /* the theme's foreground or background */
 #define MIGHTTY_COLOR_INDEXED 1 /* value is a palette index, 0-255 */

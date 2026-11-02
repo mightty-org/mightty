@@ -315,6 +315,7 @@ checks the header compiles as C++.
 1. ✅ VT parser, terminal state, PTY, headless runner
 2. ✅ macOS window: Cocoa via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas, keyboard input
    - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line) + copy, mouse reporting
+   - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters
    - Next: IME (`NSTextInputClient`), URL hints, search
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window

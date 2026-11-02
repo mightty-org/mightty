@@ -98,6 +98,13 @@ impl Quad {
 /// Inclusive `(line, column)` range in absolute lines (see `Term::line`), start first.
 pub type Selection = ((u64, usize), (u64, usize));
 
+/// What a glyph draws: a character, or a grapheme cluster of several.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum GlyphKey {
+    Char(char),
+    Cluster(Box<str>),
+}
+
 /// What a frame needs from the terminal, copied out while it is locked so
 /// that building the frame doesn't hold the lock against the PTY reader.
 #[derive(Default)]
@@ -110,6 +117,8 @@ pub struct Snapshot {
     first_line: u64,
     /// Row, column and DECSCUSR shape, when the cursor is visible.
     cursor: Option<(usize, usize, u16)>,
+    /// Text of the cells holding grapheme clusters, by index into `cells`.
+    clusters: HashMap<usize, Box<str>>,
 }
 
 impl Snapshot {
@@ -131,11 +140,18 @@ impl Snapshot {
         self.cols = cols;
         self.rows = rows;
         self.cells.clear();
+        self.clusters.clear();
         for r in 0..rows {
             let index = history.len() - offset + r;
             let row: &Row = if index < history.len() { &history[index] } else { &lines[index - history.len()] };
             let n = row.cells.len().min(cols);
+            let start = self.cells.len();
             self.cells.extend(row.cells[..n].iter().map(|&cell| term.resolve(cell)));
+            for (i, &cell) in row.cells[..n].iter().enumerate() {
+                if let Some(text) = term.cell_text(cell) {
+                    self.clusters.insert(start + i, text.into());
+                }
+            }
             self.cells.resize(self.cells.len() + cols - n, StyledCell::BLANK);
         }
         self.first_line = term.lines_scrolled() - offset as u64;
@@ -183,7 +199,7 @@ pub struct Renderer {
     pipeline: Id,
     layer: Id,
     atlas: Atlas,
-    glyphs: HashMap<(char, Style), Option<Glyph>>,
+    glyphs: HashMap<(GlyphKey, Style), Option<Glyph>>,
     /// Set when the atlas was recycled mid-frame; the frame is rebuilt.
     atlas_reset: bool,
     font: Font,
@@ -459,7 +475,11 @@ impl Renderer {
                     continue;
                 }
                 let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
-                if let Some(g) = self.glyph(cell.c, style, if wide { 2 } else { 1 }) {
+                let key = match snapshot.clusters.get(&(r * cols + c)) {
+                    Some(text) => GlyphKey::Cluster(text.clone()),
+                    None => GlyphKey::Char(cell.c),
+                };
+                if let Some(g) = self.glyph(key, style, if wide { 2 } else { 1 }) {
                     front.push(Quad {
                         pos: [x, y],
                         size: g.size,
@@ -477,10 +497,22 @@ impl Renderer {
         back
     }
 
-    fn glyph(&mut self, c: char, style: Style, cells: u32) -> Option<Glyph> {
-        if let Some(&glyph) = self.glyphs.get(&(c, style)) {
+    fn glyph(&mut self, key: GlyphKey, style: Style, cells: u32) -> Option<Glyph> {
+        if let Some(&glyph) = self.glyphs.get(&(key.clone(), style)) {
             return glyph;
         }
+        let c = match &key {
+            GlyphKey::Char(c) => *c,
+            GlyphKey::Cluster(text) => {
+                // An atlas overflow returns early, uncached, as below.
+                let glyph = match self.font.rasterize_cluster(text, style, cells) {
+                    Some(raster) => Some(self.upload(&raster)?),
+                    None => None,
+                };
+                self.glyphs.insert((key, style), glyph);
+                return glyph;
+            }
+        };
         let (cw, ch) = self.cell_size();
         let stroke = (self.scale.round() as u32).max(1);
         // Box drawing and blocks are drawn from geometry so they join across cells.
@@ -497,7 +529,7 @@ impl Renderer {
             Some(raster) => Some(self.upload(&raster)?),
             None => None,
         };
-        self.glyphs.insert((c, style), glyph);
+        self.glyphs.insert((key, style), glyph);
         glyph
     }
 

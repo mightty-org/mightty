@@ -5,6 +5,17 @@ use std::cmp::Ordering;
 /// TODO: generate exhaustive tables from UnicodeData.txt / EastAsianWidth.txt
 /// with an in-tree tool; these ranges cover the common cases.
 pub fn char_width(c: char) -> usize {
+    match width_class(c) {
+        JOINS => if (0x1F1E6..=0x1F1FF).contains(&(c as u32)) { 1 } else { 2 },
+        width => width,
+    }
+}
+
+/// [`char_width`], except [`JOINS`] for characters with width that may
+/// join the grapheme cluster before them, so text loops find both those
+/// and zero-width characters with one comparison.
+#[inline]
+pub(crate) fn width_class(c: char) -> usize {
     let cp = c as u32;
     if cp < TABLE_END {
         return ((TABLE[(cp >> 2) as usize] >> ((cp & 3) * 2)) & 3) as usize;
@@ -18,6 +29,11 @@ pub fn char_width(c: char) -> usize {
     }
 }
 
+/// Regional indicators (width 1: flags are pairs of them) and emoji
+/// skin-tone modifiers (width 2).
+pub(crate) const JOINS: usize = 3;
+const JOINING: &[(u32, u32)] = &[(0x1F1E6, 0x1F1FF), (0x1F3FB, 0x1F3FF)];
+
 /// Code points below this are looked up in `TABLE`: the BMP plus the
 /// supplementary plane that holds emoji.
 const TABLE_END: u32 = 0x2_0000;
@@ -28,7 +44,7 @@ static TABLE: [u8; (TABLE_END / 4) as usize] = {
     let mut packed = [0x55u8; (TABLE_END / 4) as usize]; // every code point width 1
     let mut t = 0;
     // Wide first, so zero-width wins where tables overlap.
-    let tables: [(&[(u32, u32)], u8); 2] = [(WIDE, 2), (ZERO_WIDTH, 0)];
+    let tables: [(&[(u32, u32)], u8); 3] = [(WIDE, 2), (ZERO_WIDTH, 0), (JOINING, JOINS as u8)];
     while t < tables.len() {
         let (table, width) = tables[t];
         let mut i = 0;

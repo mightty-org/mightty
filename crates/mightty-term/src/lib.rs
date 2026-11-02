@@ -4,6 +4,7 @@
 //! collected and drained with [`Term::take_responses`].
 
 mod cell;
+mod graphemes;
 mod styles;
 mod width;
 
@@ -12,9 +13,12 @@ use std::{mem, slice};
 
 use mightty_vt::{Params, Parser, Perform};
 
+use graphemes::Graphemes;
+
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
 pub use styles::Styles;
 pub use width::char_width;
+use width::width_class;
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 const MAX_MARKS: usize = 10_000;
@@ -192,6 +196,10 @@ pub struct Term {
     erased_id: Option<StyleId>,
     /// Style-table size that triggers the next garbage collection.
     gc_at: usize,
+    graphemes: Graphemes,
+    /// The last character joined a cluster with U+200D (zero-width
+    /// joiner), so the next one joins it too.
+    joining: bool,
 }
 
 impl Term {
@@ -239,6 +247,8 @@ impl Term {
             pen_id: None,
             erased_id: None,
             gc_at: MIN_STYLE_GC,
+            graphemes: Graphemes::default(),
+            joining: false,
         }
     }
 
@@ -358,11 +368,45 @@ impl Term {
         self.styles.get(cell.style())
     }
 
-    /// `cell` with its style looked up.
+    /// `cell` with its style looked up. A cluster's `c` is its first
+    /// character; [`Term::cell_text`] has all of it.
     #[inline]
     pub fn resolve(&self, cell: Cell) -> StyledCell {
         let style = self.style(cell);
-        StyledCell { c: cell.c, fg: style.fg, bg: style.bg, flags: style.flags | cell.flags() }
+        let c = if cell.flags().contains(Flags::GRAPHEME) { self.graphemes.base(cell) } else { cell.c };
+        StyledCell { c, fg: style.fg, bg: style.bg, flags: style.flags | cell.flags() }
+    }
+
+    /// The grapheme cluster in `cell`, when it holds more than one
+    /// character ([`Flags::GRAPHEME`]).
+    pub fn cell_text(&self, cell: Cell) -> Option<&str> {
+        self.graphemes.get(cell)
+    }
+
+    fn rows_to_text<'a>(&self, rows: impl Iterator<Item = &'a Row>) -> String {
+        let mut out = String::new();
+        for row in rows {
+            let start = out.len();
+            let skip = |c: &&Cell| c.flags().contains(Flags::WIDE_SPACER) || c.flags().contains(Flags::WRAP_SPACER);
+            for &cell in row.cells.iter().filter(|c| !skip(c)) {
+                self.push_cell(&mut out, cell);
+            }
+            if !row.wrapped {
+                let len = out[start..].trim_end_matches(' ').len();
+                out.truncate(start + len);
+                out.push('\n');
+            }
+        }
+        let len = out.trim_end_matches(['\n', ' ']).len();
+        out.truncate(len);
+        out
+    }
+
+    fn push_cell(&self, out: &mut String, cell: Cell) {
+        match self.graphemes.get(cell) {
+            Some(text) => out.push_str(text),
+            None => out.push(cell.c),
+        }
     }
 
     pub fn is_alt_screen(&self) -> bool {
@@ -416,7 +460,7 @@ impl Term {
             let begin = out.len();
             for cell in row.cells.get(from..to).unwrap_or_default() {
                 if !cell.flags().contains(Flags::WIDE_SPACER) && !cell.flags().contains(Flags::WRAP_SPACER) {
-                    out.push(cell.c);
+                    self.push_cell(&mut out, *cell);
                 }
             }
             let continues = row.wrapped && to == row.cells.len();
@@ -441,7 +485,7 @@ impl Term {
         // The right half of a wide character belongs to its left half.
         let char_at = |i: usize| {
             let i = if i > 0 && cells[i].flags().contains(Flags::WIDE_SPACER) { i - 1 } else { i };
-            cells[i].c
+            self.graphemes.base(cells[i])
         };
         let is_word = |c: char| !c.is_whitespace() && !WORD_DELIMITERS.contains(c);
         if !is_word(char_at(col)) {
@@ -460,12 +504,12 @@ impl Term {
 
     /// Visible text, soft-wrapped rows joined, trailing blanks trimmed.
     pub fn screen_text(&self) -> String {
-        rows_to_text(self.lines().iter())
+        self.rows_to_text(self.lines().iter())
     }
 
     /// Scrollback followed by the primary screen.
     pub fn history_text(&self) -> String {
-        rows_to_text(self.scrollback.iter().chain(self.primary.iter()))
+        self.rows_to_text(self.scrollback.iter().chain(self.primary.iter()))
     }
 
     /// Resizes without reflow (TODO: rewrap soft-wrapped lines).
@@ -592,9 +636,13 @@ impl Term {
     fn input_char(&mut self, c: char) {
         let c = if self.charsets[self.gl] == Charset::DecGraphics { dec_graphics(c) } else { c };
         let width = char_width(c);
-        if width == 0 {
-            return; // TODO: attach combining marks to the previous cell
+        if (width == 0 || self.joining || may_join(c)) && self.join(c, width) {
+            return;
         }
+        if width == 0 {
+            return; // nothing before it to join
+        }
+        self.joining = false;
         self.last_char = Some(c);
 
         if self.cursor.pending_wrap {
@@ -640,6 +688,60 @@ impl Term {
         }
     }
 
+    /// Adds `c` to the character before the cursor when it continues its
+    /// grapheme cluster: a combining mark or other zero-width character, an
+    /// emoji modifier after an emoji, anything after a zero-width joiner,
+    /// or a flag's second letter. Returns whether `c` was used up.
+    ///
+    /// The cluster keeps its first character's width, as in kitty and
+    /// Ghostty, except that a flag takes the second letter's cell too.
+    fn join(&mut self, c: char, width: usize) -> bool {
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        let Some(col) = (if self.cursor.pending_wrap { Some(col) } else { col.checked_sub(1) }) else { return false };
+        let cells = &self.lines()[row].cells;
+        let col = if col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) { col - 1 } else { col };
+        let Some(&cell) = cells.get(col) else { return false };
+        let mut text = String::new();
+        self.push_cell(&mut text, cell);
+        let wide = cell.flags().contains(Flags::WIDE);
+        let flag = is_regional(c) && !wide && text.chars().count() == 1 && text.chars().all(is_regional);
+        let joins = width == 0
+            || (self.joining && text.ends_with('\u{200D}'))
+            || (wide && matches!(c, '\u{1F3FB}'..='\u{1F3FF}'))
+            || flag;
+        if !joins {
+            return false;
+        }
+        text.push(c);
+        self.joining = c == '\u{200D}';
+        if self.graphemes.is_full() {
+            let Self { graphemes, primary, alternate, scrollback, .. } = self;
+            graphemes.collect(primary.iter().chain(alternate.iter()).chain(scrollback.iter()));
+        }
+        // Out of ids even so: the character is dropped.
+        let Some(id) = self.graphemes.intern(&text) else { return true };
+        let mut flags = cell.flags() | Flags::GRAPHEME;
+        // The flag spreads over the cell its second letter would have taken.
+        let widen = flag && !self.cursor.pending_wrap && col + 1 < self.cols;
+        if widen {
+            self.erase_split_wide(row, col + 1, col + 2);
+            flags.insert(Flags::WIDE);
+        }
+        let cells = &mut self.lines_mut()[row].cells;
+        cells[col] = Cell::new(id, cell.style(), flags);
+        if widen {
+            grow(cells, col + 2);
+            cells[col + 1] = Cell::new(' ', cell.style(), Flags::WIDE_SPACER);
+            if col + 2 >= self.cols {
+                self.cursor.col = self.cols - 1;
+                self.cursor.pending_wrap = self.modes.autowrap;
+            } else {
+                self.cursor.col = col + 2;
+            }
+        }
+        true
+    }
+
     /// A run of printable text, written a row at a time rather than a
     /// character at a time. DEC graphics and insert mode take the slow path.
     fn input_str(&mut self, s: &str) {
@@ -667,6 +769,12 @@ impl Term {
         let pen = self.pen();
         let mut i = 0;
         while let Some(&first) = chars.get(i) {
+            if char_width(first) == 0 || self.joining || may_join(first) {
+                // Possibly part of the cluster before it: the careful path decides.
+                i += 1;
+                self.input_char(first);
+                continue;
+            }
             if self.cursor.pending_wrap {
                 self.wrap();
             }
@@ -697,14 +805,13 @@ impl Term {
             let mut under = Cell::BLANK;
             let mut provisional = false;
             while let Some(&c) = chars.get(i) {
-                let width = char_width(c);
-                if col + width > end {
+                // 1 or 2 here; zero-width characters and ones that may join
+                // a cluster end the pass, and the next one starts with them.
+                let width = width_class(c);
+                if (col + width > end) | (width.wrapping_sub(1) >= 2) {
                     break;
                 }
                 i += 1;
-                if width == 0 {
-                    continue; // TODO: attach combining marks to the previous cell
-                }
                 let wide = width == 2;
                 under = out[col + 1];
                 out[col] = Cell::new(c, pen, if wide { Flags::WIDE } else { Flags::empty() });
@@ -727,6 +834,7 @@ impl Term {
             }
             if last.is_some() {
                 self.last_char = last;
+                self.joining = false;
             }
             if col >= cols {
                 self.cursor.col = cols - 1;
@@ -741,6 +849,7 @@ impl Term {
     fn input_ascii(&mut self, mut bytes: &[u8]) {
         let cols = self.cols;
         let pen = self.pen();
+        self.joining = false;
         while let [.., last] = bytes {
             self.last_char = Some(*last as char);
             if self.cursor.pending_wrap {
@@ -1083,13 +1192,15 @@ impl Term {
     fn reset(&mut self) {
         let scrollback = mem::take(&mut self.scrollback);
         let styles = mem::replace(&mut self.styles, Styles::new());
+        let graphemes = mem::take(&mut self.graphemes);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
         let (mark_nonce, colors) = (self.mark_nonce.take(), self.colors);
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
         (self.mark_nonce, self.colors) = (mark_nonce, colors);
-        // Scrollback keeps its style ids, so it keeps their table too.
+        // Scrollback keeps its style and cluster ids, so it keeps their tables too.
         self.scrollback = scrollback;
         self.styles = styles;
+        self.graphemes = graphemes;
         self.lines_scrolled = lines_scrolled;
         self.gc_at = gc_at;
     }
@@ -1534,26 +1645,22 @@ fn fill_cells(cells: &mut [Cell], value: Cell) {
     }
 }
 
+/// A regional indicator: flags are pairs of them.
+fn is_regional(c: char) -> bool {
+    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
+}
+
+/// Might join the cluster before it even though it has width: a regional
+/// indicator or an emoji skin-tone modifier.
+#[inline]
+fn may_join(c: char) -> bool {
+    width_class(c) == width::JOINS
+}
+
 fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c > 0 && c % TAB_WIDTH == 0).collect()
 }
 
-fn rows_to_text<'a>(rows: impl Iterator<Item = &'a Row>) -> String {
-    let mut out = String::new();
-    for row in rows {
-        let start = out.len();
-        let skip = |c: &&Cell| c.flags().contains(Flags::WIDE_SPACER) || c.flags().contains(Flags::WRAP_SPACER);
-        out.extend(row.cells.iter().filter(|c| !skip(c)).map(|c| c.c));
-        if !row.wrapped {
-            let len = out[start..].trim_end_matches(' ').len();
-            out.truncate(start + len);
-            out.push('\n');
-        }
-    }
-    let len = out.trim_end_matches(['\n', ' ']).len();
-    out.truncate(len);
-    out
-}
 
 #[cfg(test)]
 mod tests;

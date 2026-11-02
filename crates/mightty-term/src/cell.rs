@@ -26,6 +26,9 @@ impl Flags {
     pub const WIDE_SPACER: Self = Self(1 << 9);
     /// Blank left in the last column when a wide character wrapped to the next row.
     pub const WRAP_SPACER: Self = Self(1 << 10);
+    /// The cell holds a grapheme cluster: read it with
+    /// [`Term::cell_text`](crate::Term::cell_text), not from `c`.
+    pub const GRAPHEME: Self = Self(1 << 11);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -95,9 +98,9 @@ impl StyleId {
 }
 
 /// Layout flags packed into a cell's top bits, above the style id.
-const LAYOUT_SHIFT: u32 = 29;
+const LAYOUT_SHIFT: u32 = 28;
 const STYLE_MASK: u32 = (1 << LAYOUT_SHIFT) - 1;
-const LAYOUT_FLAGS: u16 = Flags::WIDE.0 | Flags::WIDE_SPACER.0 | Flags::WRAP_SPACER.0;
+const LAYOUT_FLAGS: u16 = Flags::WIDE.0 | Flags::WIDE_SPACER.0 | Flags::WRAP_SPACER.0 | Flags::GRAPHEME.0;
 
 /// One screen cell: 8 bytes, a character and a packed `(layout flags, style id)`.
 /// Colours and attributes are looked up with [`Term::style`](crate::Term::style),
@@ -112,7 +115,7 @@ impl Cell {
     /// An empty cell with the default style.
     pub const BLANK: Cell = Cell { c: ' ', packed: 0 };
 
-    /// `flags` keeps only the layout bits (`WIDE`, `WIDE_SPACER`, `WRAP_SPACER`).
+    /// `flags` keeps only the layout bits (`WIDE`, `WIDE_SPACER`, `WRAP_SPACER`, `GRAPHEME`).
     #[inline]
     pub const fn new(c: char, style: StyleId, flags: Flags) -> Self {
         let layout = ((flags.0 & LAYOUT_FLAGS) >> 8) as u32;
@@ -124,7 +127,7 @@ impl Cell {
         StyleId(self.packed & STYLE_MASK)
     }
 
-    /// Layout flags: `WIDE`, `WIDE_SPACER`, `WRAP_SPACER`.
+    /// Layout flags: `WIDE`, `WIDE_SPACER`, `WRAP_SPACER`, `GRAPHEME`.
     #[inline]
     pub const fn flags(self) -> Flags {
         Flags(((self.packed >> LAYOUT_SHIFT) as u16) << 8)
