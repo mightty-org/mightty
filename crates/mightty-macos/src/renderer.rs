@@ -319,6 +319,11 @@ impl Renderer {
         &self.theme
     }
 
+    /// The `CAMetalLayer` drawn into.
+    pub fn layer(&self) -> Id {
+        self.layer
+    }
+
     /// Rebuilds the font for a new backing scale (moving between displays).
     pub fn set_scale(&mut self, scale: f64) {
         self.scale = scale;
@@ -727,6 +732,12 @@ impl Drop for Renderer {
             }
         }
     }
+}
+
+/// `a` moved `t` of the way toward `b`.
+pub fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+    let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
 fn rgba((r, g, b): Rgb) -> [f32; 4] {

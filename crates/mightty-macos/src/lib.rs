@@ -14,6 +14,7 @@ mod linkhint;
 mod open;
 mod renderer;
 mod snapshot;
+mod split;
 
 pub use app::run;
 pub use config::Config;

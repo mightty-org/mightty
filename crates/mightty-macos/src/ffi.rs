@@ -375,6 +375,15 @@ pub unsafe fn send_super_rect<A: MessageArgs>(obj: Id, superclass: Id, sel_name:
     unsafe { args.invoke(imp, (&raw const sup).cast_mut().cast(), sel(sel_name)) }
 }
 
+/// `msg!` to `superclass`'s implementation, for results that aren't structs.
+///
+/// # Safety
+/// As for `send_super_rect`, with signature `(args) -> R`.
+pub unsafe fn send_super<A: MessageArgs, R>(obj: Id, superclass: Id, sel_name: &CStr, args: A) -> R {
+    let sup = ObjcSuper { receiver: obj, superclass };
+    unsafe { args.invoke(objc_msgSendSuper as *const (), (&raw const sup).cast_mut().cast(), sel(sel_name)) }
+}
+
 /// `send_rect` for a method taking `args`.
 ///
 /// # Safety

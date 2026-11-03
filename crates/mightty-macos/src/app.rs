@@ -26,21 +26,51 @@ use crate::latency;
 use crate::open;
 use crate::linkhint::{self, LinkHint};
 use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
+use crate::split::{self, Axis, Direction, Divider, Node, Rect};
 
 struct App {
     mux: Arc<Mux>,
     windows: Vec<Window>,
+    surfaces: Vec<Surface>,
     /// App delegate and delegate of every window.
     delegate: Id,
     view_class: Id,
+    split_class: Id,
     config: Config,
     /// Where the next window's top-left corner goes.
     cascade: CGPoint,
 }
 
-/// One NSWindow showing one pane.
+/// Points between split panes, drawn as a divider.
+const GAP: f64 = 1.0;
+/// How far either side of a divider grabs it.
+const GRAB: f64 = 3.0;
+/// Panes are never made smaller than this by dragging, in points.
+const MIN_PANE: f64 = 60.0;
+/// Panes keys aren't going to are dimmed toward the background (as in Ghostty).
+const UNFOCUSED_OPACITY: f32 = 0.7;
+
+/// An NSWindow (or tab) and how its panes share it.
 struct Window {
     window: Id,
+    /// The content view, a `MighttySplitView`: holds each pane's container,
+    /// showing through between them as dividers.
+    root: Id,
+    /// The panes, by their views.
+    tree: Node<Id>,
+    /// The view of the pane keys go to.
+    active: Id,
+    /// The active pane alone fills the window (⌘⇧↩).
+    zoomed: bool,
+    /// The divider being dragged.
+    dragging: Option<Divider>,
+}
+
+/// One pane shown in a window: its view, drawing and what's on screen.
+struct Surface {
+    window: Id,
+    /// Holds the view, and the find bar and link hint above it.
+    container: Id,
     view: Id,
     layer: Id,
     renderer: Renderer,
@@ -73,6 +103,8 @@ struct Window {
     hover: Option<(HoveredLink, String)>,
     /// Shows `hover`'s target; made on first use.
     hint: Option<LinkHint>,
+    /// The pane keys go to in its window (it shows the window's title).
+    active: bool,
 }
 
 /// An open search bar and what it found.
@@ -185,9 +217,11 @@ fn us_keyboard_layout() -> bool {
     }
 }
 
-/// NSEventModifierFlagCommand and NSEventModifierFlagShift.
+/// NSEventModifierFlagCommand, …Shift, …Control and …Option.
 const CMD: usize = 1 << 20;
 const SHIFT: usize = 1 << 17;
+const CTRL: usize = 1 << 18;
+const ALT: usize = 1 << 19;
 
 fn modifiers(flags: usize) -> Mods {
     Mods { shift: flags & (1 << 17) != 0, ctrl: flags & (1 << 18) != 0, alt: flags & (1 << 19) != 0 }
@@ -206,9 +240,9 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     })
 }
 
-/// Runs `f` on the window whose NSWindow or NSView is `id`.
-fn with_window<R>(id: Id, f: impl FnOnce(&mut Window) -> R) -> Option<R> {
-    with_app(|app| app.windows.iter_mut().find(|w| w.window == id || w.view == id).map(f)).flatten()
+/// Runs `f` on the surface whose view is `view`.
+fn with_surface<R>(view: Id, f: impl FnOnce(&mut Surface) -> R) -> Option<R> {
+    with_app(|app| app.surfaces.iter_mut().find(|w| w.view == view).map(f)).flatten()
 }
 
 // ---- Mux host ----
@@ -263,7 +297,7 @@ extern "C" fn on_redraw(_: *mut c_void) {
     let now = Instant::now();
     let mut wait: Option<(Duration, Vec<PaneId>)> = None;
     with_app(|app| {
-        for window in app.windows.iter_mut().filter(|w| ids.contains(&w.pane.id)) {
+        for window in app.surfaces.iter_mut().filter(|w| ids.contains(&w.pane.id)) {
             let due = window.echo_frame.map_or(window.next_frame, |at| at.min(window.next_frame));
             if due <= now {
                 window.render();
@@ -291,32 +325,34 @@ extern "C" fn on_redraw(_: *mut c_void) {
 
 extern "C" fn on_pane_exited(context: *mut c_void) {
     let id = context as PaneId;
-    // Collect first: closing re-enters through windowWillClose:.
-    let to_close = with_app(|app| {
-        let mut to_close = Vec::new();
-        for window in app.windows.iter_mut().filter(|w| w.pane.id == id) {
-            if window.hold {
-                window.render(); // the title now says it exited
+    let views = with_app(|app| {
+        let mut views = Vec::new();
+        for surface in app.surfaces.iter_mut().filter(|w| w.pane.id == id) {
+            if surface.hold {
+                surface.render(); // the title now says it exited
             } else {
-                to_close.push(window.window);
+                views.push(surface.view);
             }
         }
-        to_close
+        views
     });
-    close_windows(to_close.unwrap_or_default());
+    close_surfaces(views.unwrap_or_default());
 }
 
 extern "C" fn on_pane_closed(context: *mut c_void) {
     let id = context as PaneId;
-    let windows = with_app(|app| app.windows.iter().filter(|w| w.pane.id == id).map(|w| w.window).collect());
-    close_windows(windows.unwrap_or_default());
+    let views = with_app(|app| app.surfaces.iter().filter(|w| w.pane.id == id).map(|w| w.view).collect());
+    close_surfaces(views.unwrap_or_default());
 }
 
-/// Must run outside `with_app`: closing re-enters through windowWillClose:.
-fn close_windows(windows: Vec<Id>) {
-    for window in windows {
-        // SAFETY: main thread; a live NSWindow.
-        unsafe { call!(window, c"close") };
+/// Closes these panes, and windows they were the last of: those outside
+/// `with_app`, as closing re-enters through windowWillClose:.
+fn close_surfaces(views: Vec<Id>) {
+    for view in views {
+        if let Some(window) = with_app(|app| app.close_surface(view)).flatten() {
+            // SAFETY: main thread; a live NSWindow.
+            unsafe { call!(window, c"close") };
+        }
     }
 }
 
@@ -357,7 +393,16 @@ pub fn run(config: Config) -> io::Result<()> {
             ..Default::default()
         })?;
 
-        let app = App { mux, windows: Vec::new(), delegate, view_class: register_view_class(), config, cascade: CGPoint::default() };
+        let app = App {
+            mux,
+            windows: Vec::new(),
+            surfaces: Vec::new(),
+            delegate,
+            view_class: register_view_class(),
+            split_class: register_split_class(),
+            config,
+            cascade: CGPoint::default(),
+        };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| app.open_window(pane, false));
         call!(ns_app, c"activateIgnoringOtherApps:", YES);
@@ -377,9 +422,7 @@ impl App {
         unsafe {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
             let scale: f64 = if screen.is_null() { 2.0 } else { msg!(screen, c"backingScaleFactor") };
-            let layer: Id = msg!(msg!(class(c"CAMetalLayer"), c"layer"), c"retain");
-            let renderer = Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone(), self.config.vsync);
-
+            let renderer = self.new_renderer(scale);
             let (cols, rows) = {
                 let term = pane.term.lock().unwrap();
                 (term.cols(), term.rows())
@@ -408,13 +451,52 @@ impl App {
             // Native tabs: windows with one identifier can be tabs of each other.
             call!(window, c"setTabbingIdentifier:", nsstring("mightty"));
 
-            let view: Id = msg!(msg!(self.view_class, c"alloc"), c"initWithFrame:", content);
+            let root: Id = msg!(msg!(self.split_class, c"alloc"), c"initWithFrame:", content);
+            call!(root, c"setWantsLayer:", YES);
+            let divider = color(renderer::mix(renderer.theme().background, renderer.theme().foreground, 0.25));
+            call!(msg!(root, c"layer"), c"setBackgroundColor:", divider);
+            call!(window, c"setContentView:", root);
+            call!(root, c"release");
+            let view = self.add_surface(window, content, renderer, pane, hold);
+            self.windows.push(Window { window, root, tree: Node::Leaf(view), active: view, zoomed: false, dragging: None });
+            call!(window, c"makeFirstResponder:", view);
+            if self.windows.len() == 1 {
+                call!(window, c"center");
+                latency::start(window);
+            }
+            if tab_of.is_null() {
+                // With (0,0) this leaves the window in place and returns the next spot.
+                self.cascade = msg!(window, c"cascadeTopLeftFromPoint:", self.cascade);
+            } else {
+                call!(tab_of, c"addTabbedWindow:ordered:", window, 1isize); // above: just after it
+            }
+            call!(window, c"makeKeyAndOrderFront:", NIL);
+            self.layout(window, true);
+        }
+    }
+
+    fn new_renderer(&self, scale: f64) -> Renderer {
+        // SAFETY: main thread; documented signatures.
+        let layer: Id = unsafe { msg!(msg!(class(c"CAMetalLayer"), c"layer"), c"retain") };
+        Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone(), self.config.vsync)
+    }
+
+    /// Adds a view for `pane` to `window`, at `frame` of its content view
+    /// until the next layout. Returns the view.
+    fn add_surface(&mut self, window: Id, frame: CGRect, renderer: Renderer, pane: Arc<Pane>, hold: bool) -> Id {
+        // SAFETY: main thread; AppKit calls with documented signatures.
+        unsafe {
+            let layer = renderer.layer();
+            let bounds = CGRect { origin: CGPoint::default(), size: frame.size };
+            let view: Id = msg!(msg!(self.view_class, c"alloc"), c"initWithFrame:", bounds);
             // Layer-hosting view: set the layer before enabling it.
             call!(view, c"setLayer:", layer);
             call!(view, c"setWantsLayer:", YES);
             // The terminal fills a container, which also holds the search bar above it.
-            let container: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", content);
+            // Its background shows through a dimmed terminal.
+            let container: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", frame);
             call!(container, c"setWantsLayer:", YES);
+            call!(msg!(container, c"layer"), c"setBackgroundColor:", color(renderer.theme().background));
             call!(view, c"setAutoresizingMask:", 18usize); // width and height sizable
             // Mouse moves (for Cmd-hovering links) while the window is key.
             let options = 0x01usize | 0x02 | 0x20 | 0x200; // entered/exited, moved, active in key window, visible rect
@@ -429,25 +511,14 @@ impl App {
             call!(view, c"addTrackingArea:", area);
             call!(area, c"release");
             call!(container, c"addSubview:", view);
-            call!(window, c"setContentView:", container);
+            call!(msg!(window, c"contentView"), c"addSubview:", container);
             call!(container, c"release");
             call!(view, c"release");
-            call!(window, c"makeFirstResponder:", view);
-            if self.windows.is_empty() {
-                call!(window, c"center");
-                latency::start(window);
-            }
-            if tab_of.is_null() {
-                // With (0,0) this leaves the window in place and returns the next spot.
-                self.cascade = msg!(window, c"cascadeTopLeftFromPoint:", self.cascade);
-            } else {
-                call!(tab_of, c"addTabbedWindow:ordered:", window, 1isize); // above: just after it
-            }
-            call!(window, c"makeKeyAndOrderFront:", NIL);
 
             pane.set_visible(true);
-            let mut window = Window {
+            self.surfaces.push(Surface {
                 window,
+                container,
                 view,
                 layer,
                 renderer,
@@ -466,51 +537,280 @@ impl App {
                 search: None,
                 hover: None,
                 hint: None,
-            };
-            window.resize();
-            self.windows.push(window);
+                active: true,
+            });
+            view
         }
     }
 
-    /// A shell in a new window, or with `tab` in a new tab of the key window.
-    /// It starts where the key window's shell is (OSC 7), as in Ghostty.
-    fn new_shell_window(&mut self, tab: bool) {
+    /// The key window and its active pane.
+    fn key_window(&self) -> Option<(Id, Id)> {
         // SAFETY: main thread; documented signature.
         let key: Id = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow") };
-        let current = self.windows.iter().find(|w| w.window == key);
+        self.windows.iter().find(|w| w.window == key).map(|w| (w.window, w.active))
+    }
+
+    /// Where a shell started from `surface` should start: where its shell
+    /// is (OSC 7), as in Ghostty, else where it started.
+    fn cwd_of(&self, surface: &Surface) -> Option<PathBuf> {
         // Any program can report a directory: use it only if it is on this
         // machine (not from a shell over ssh) and is one.
-        let host = open::hostname();
-        let reported = |w: &Window| {
-            let term = w.pane.term.lock().unwrap();
-            term.cwd().filter(|_| open::is_local(term.cwd_host(), &host)).map(PathBuf::from)
+        let reported = {
+            let term = surface.pane.term.lock().unwrap();
+            term.cwd().filter(|_| open::is_local(term.cwd_host(), &open::hostname())).map(PathBuf::from)
         };
-        let cwd = current.and_then(|w| reported(w).or_else(|| w.start_dir.clone())).filter(|dir| dir.is_dir());
-        let tab_of = if tab { current.map_or(NIL, |w| w.window) } else { NIL };
+        reported.or_else(|| surface.start_dir.clone()).filter(|dir| dir.is_dir())
+    }
+
+    /// A shell in a new window, or with `tab` in a new tab of the key window.
+    fn new_shell_window(&mut self, tab: bool) {
+        let key = self.key_window();
+        let current = key.and_then(|(_, view)| self.surfaces.iter().find(|s| s.view == view));
+        let cwd = current.and_then(|s| self.cwd_of(s));
+        let tab_of = if tab { key.map_or(NIL, |k| k.0) } else { NIL };
         let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd: cwd.clone(), ..Default::default() };
         match self.mux.spawn(opts) {
             Ok(pane) => {
                 self.open_window_in(pane, false, tab_of);
-                if let Some(window) = self.windows.last_mut() {
-                    window.start_dir = cwd;
+                if let Some(surface) = self.surfaces.last_mut() {
+                    surface.start_dir = cwd;
                 }
             }
             Err(e) => eprintln!("mightty: could not start a shell: {e}"),
         }
     }
 
-    /// Forgets a closed window and ends its pane unless another window shows it.
-    fn window_closed(&mut self, window: Id) {
-        let Some(i) = self.windows.iter().position(|w| w.window == window) else { return };
-        let closed = self.windows.remove(i);
-        if !self.windows.iter().any(|w| w.pane.id == closed.pane.id) {
+    /// Splits the key window's active pane, a new shell going right of it
+    /// (`Axis::Row`) or below it.
+    fn split(&mut self, axis: Axis) {
+        let Some((window, active)) = self.key_window() else { return };
+        let Some(current) = self.surfaces.iter().find(|s| s.view == active) else { return };
+        let cwd = self.cwd_of(current);
+        // SAFETY: main thread; documented signatures.
+        let (frame, scale) = unsafe { (send_rect(current.container, c"frame"), msg!(window, c"backingScaleFactor")) };
+        // The new pane gets about half: start the shell at that size.
+        let mut size = frame.size;
+        match axis {
+            Axis::Row => size.width = (size.width - GAP) / 2.0,
+            Axis::Column => size.height = (size.height - GAP) / 2.0,
+        }
+        let (cols, rows) = current.renderer.grid_size(size.width * scale, size.height * scale);
+        let opts = SpawnOptions { cols: cols as u16, rows: rows as u16, cwd: cwd.clone(), ..Default::default() };
+        let pane = match self.mux.spawn(opts) {
+            Ok(pane) => pane,
+            Err(e) => return eprintln!("mightty: could not start a shell: {e}"),
+        };
+        let renderer = self.new_renderer(scale);
+        let view = self.add_surface(window, frame, renderer, pane, false);
+        if let Some(surface) = self.surfaces.last_mut() {
+            surface.start_dir = cwd;
+        }
+        let Some(w) = self.windows.iter_mut().find(|w| w.window == window) else { return };
+        w.tree.split(active, view, axis);
+        w.zoomed = false;
+        self.focus(view);
+        self.layout(window, false);
+    }
+
+    /// Closes `view`'s pane. If it was its window's last, returns the window
+    /// for the caller to close outside `with_app`.
+    fn close_surface(&mut self, view: Id) -> Option<Id> {
+        let i = self.surfaces.iter().position(|s| s.view == view)?;
+        let window = self.surfaces[i].window;
+        let w = self.windows.iter_mut().find(|w| w.window == window)?;
+        let order = w.tree.leaves();
+        if !w.tree.remove(view) {
+            return Some(window);
+        }
+        w.zoomed = false;
+        let was_active = w.active == view;
+        let surface = self.surfaces.remove(i);
+        // SAFETY: main thread; the window's content view holds the container.
+        unsafe { call!(surface.container, c"removeFromSuperview") };
+        self.release_pane(&surface);
+        if was_active {
+            // The pane before it, as in Ghostty.
+            let at = order.iter().position(|&v| v == view).unwrap_or(0);
+            self.focus(order[if at == 0 { 1 } else { at - 1 }]);
+        }
+        self.layout(window, false);
+        None
+    }
+
+    /// Ends `closed`'s pane unless another surface shows it.
+    fn release_pane(&self, closed: &Surface) {
+        if !self.surfaces.iter().any(|s| s.pane.id == closed.pane.id) {
             closed.pane.set_visible(false);
             self.mux.close(closed.pane.id);
         }
     }
+
+    /// Forgets a closed window, ending its panes.
+    fn window_closed(&mut self, window: Id) {
+        self.windows.retain(|w| w.window != window);
+        let (closed, kept) = mem::take(&mut self.surfaces).into_iter().partition(|s| s.window == window);
+        self.surfaces = kept;
+        for surface in closed {
+            self.release_pane(&surface);
+        }
+    }
+
+    /// Makes `view` the pane keys go to: the first responder of its window.
+    fn focus(&mut self, view: Id) {
+        self.activate(view);
+        let Some(window) = self.surfaces.iter().find(|s| s.view == view).map(|s| s.window) else { return };
+        // SAFETY: main thread; documented signature. Its becomeFirstResponder
+        // finds the app busy and leaves the work done above.
+        unsafe { call!(window, c"makeFirstResponder:", view) };
+    }
+
+    /// Marks `view` as its window's active pane, the others as not.
+    fn activate(&mut self, view: Id) {
+        let Some(window) = self.surfaces.iter().find(|s| s.view == view).map(|s| s.window) else { return };
+        let Some(w) = self.windows.iter_mut().find(|w| w.window == window) else { return };
+        let zoomed_away = w.zoomed && w.active != view;
+        w.active = view;
+        if zoomed_away {
+            w.zoomed = false;
+        }
+        // SAFETY: main thread; documented signature.
+        let key: Bool = unsafe { msg!(window, c"isKeyWindow") };
+        for surface in self.surfaces.iter_mut().filter(|s| s.window == window) {
+            let active = surface.view == view;
+            if surface.active != active {
+                surface.active = active;
+                surface.title.clear(); // the window shows the new one's
+                surface.set_focused(active && key != NO);
+            }
+        }
+        if zoomed_away {
+            self.layout(window, false);
+        } else {
+            self.dim(window);
+        }
+    }
+
+    /// Places `window`'s panes, resizing those whose size changed (all of
+    /// them with `force`, for a new scale).
+    fn layout(&mut self, window: Id, force: bool) {
+        let Some(w) = self.windows.iter().find(|w| w.window == window) else { return };
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let bounds = to_rect(send_rect(w.root, c"bounds"));
+            let frames = if w.zoomed { vec![(w.active, bounds)] } else { w.tree.frames(bounds, GAP) };
+            for surface in self.surfaces.iter_mut().filter(|s| s.window == window) {
+                let Some(&(_, frame)) = frames.iter().find(|f| f.0 == surface.view) else {
+                    call!(surface.container, c"setHidden:", YES);
+                    continue;
+                };
+                let frame = from_rect(frame);
+                let old = send_rect(surface.container, c"frame");
+                call!(surface.container, c"setHidden:", NO);
+                call!(surface.container, c"setFrame:", frame);
+                if force || old.size.width != frame.size.width || old.size.height != frame.size.height {
+                    surface.resize();
+                }
+            }
+            call!(window, c"invalidateCursorRectsForView:", w.root);
+        }
+        self.dim(window);
+    }
+
+    /// Dims the panes keys aren't going to, when there are several.
+    fn dim(&self, window: Id) {
+        let Some(w) = self.windows.iter().find(|w| w.window == window) else { return };
+        let several = !w.zoomed && matches!(w.tree, Node::Split { .. });
+        for surface in self.surfaces.iter().filter(|s| s.window == window) {
+            let opacity = if several && !surface.active { UNFOCUSED_OPACITY } else { 1.0 };
+            // SAFETY: main thread; documented signature.
+            unsafe { call!(surface.layer, c"setOpacity:", opacity) };
+        }
+    }
+
+    /// Moves to the pane `step` places after the active one, in reading
+    /// order, wrapping around.
+    fn select_split(&mut self, step: isize) {
+        let Some((window, active)) = self.key_window() else { return };
+        let Some(w) = self.windows.iter().find(|w| w.window == window) else { return };
+        let order = w.tree.leaves();
+        let at = order.iter().position(|&v| v == active).unwrap_or(0) as isize;
+        let next = order[(at + step).rem_euclid(order.len() as isize) as usize];
+        self.focus(next);
+    }
+
+    fn select_split_toward(&mut self, direction: Direction) {
+        let Some((window, active)) = self.key_window() else { return };
+        let Some(w) = self.windows.iter().find(|w| w.window == window) else { return };
+        // SAFETY: main thread; documented signature.
+        let bounds = to_rect(unsafe { send_rect(w.root, c"bounds") });
+        if let Some(next) = split::neighbor(&w.tree.frames(bounds, GAP), active, direction) {
+            self.focus(next);
+        }
+    }
+
+    fn toggle_zoom(&mut self) {
+        let Some((window, _)) = self.key_window() else { return };
+        let Some(w) = self.windows.iter_mut().find(|w| w.window == window) else { return };
+        if matches!(w.tree, Node::Split { .. }) {
+            w.zoomed = !w.zoomed;
+            self.layout(window, false);
+        }
+    }
+
+    fn equalize(&mut self) {
+        let Some((window, _)) = self.key_window() else { return };
+        let Some(w) = self.windows.iter_mut().find(|w| w.window == window) else { return };
+        w.tree.equalize();
+        self.layout(window, false);
+    }
+
+    /// The divider of `root`'s window under `point` (in `root`'s coordinates).
+    fn divider_at(&self, root: Id, point: CGPoint) -> Option<Divider> {
+        let w = self.windows.iter().find(|w| w.root == root).filter(|w| !w.zoomed)?;
+        // SAFETY: main thread; documented signature.
+        let bounds = to_rect(unsafe { send_rect(root, c"bounds") });
+        w.tree.dividers(bounds, GAP).into_iter().find(|d| grab_area(d).contains(point.x, point.y))
+    }
+
+    /// Drags the divider grabbed in `root` (see `divider_at`) to `point`.
+    fn drag_divider(&mut self, root: Id, point: CGPoint) {
+        let Some(w) = self.windows.iter_mut().find(|w| w.root == root) else { return };
+        let Some(divider) = &w.dragging else { return };
+        let ratio = split::ratio_at(divider, point.x, point.y, GAP, MIN_PANE);
+        w.tree.set_ratio(&divider.path, ratio);
+        let window = w.window;
+        self.layout(window, false);
+    }
 }
 
-impl Window {
+/// Where a divider can be grabbed: wider than it's drawn.
+fn grab_area(divider: &Divider) -> Rect {
+    let r = divider.rect;
+    match divider.axis {
+        Axis::Row => Rect { x: r.x - GRAB, width: r.width + 2.0 * GRAB, ..r },
+        Axis::Column => Rect { y: r.y - GRAB, height: r.height + 2.0 * GRAB, ..r },
+    }
+}
+
+fn to_rect(r: CGRect) -> Rect {
+    Rect { x: r.origin.x, y: r.origin.y, width: r.size.width, height: r.size.height }
+}
+
+fn from_rect(r: Rect) -> CGRect {
+    CGRect { origin: CGPoint { x: r.x, y: r.y }, size: CGSize { width: r.width, height: r.height } }
+}
+
+/// A `CGColor` (autoreleased with its `NSColor`).
+fn color((r, g, b): (u8, u8, u8)) -> Id {
+    let c = |v: u8| v as f64 / 255.0;
+    // SAFETY: documented signatures.
+    unsafe {
+        let color: Id = msg!(class(c"NSColor"), c"colorWithSRGBRed:green:blue:alpha:", c(r), c(g), c(b), 1.0f64);
+        msg!(color, c"CGColor")
+    }
+}
+
+impl Surface {
     fn render(&mut self) {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
@@ -524,7 +824,8 @@ impl Window {
                 if let Some(code) = self.pane.exit_status() {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
                 }
-                if title != self.title {
+                // The window shows its active pane's title.
+                if self.active && title != self.title {
                     call!(self.window, c"setTitle:", nsstring(&title));
                     self.title = title;
                 }
@@ -623,8 +924,9 @@ impl Window {
         }
     }
 
+    /// `location` is in the window's coordinates.
     fn mouse(&mut self, action: MouseAction, location: CGPoint, clicks: isize, mods: Mods) {
-        let (col, row) = self.cell_at(location);
+        let (col, row) = self.cell_at(self.local(location));
         let (mode, sgr, cols, rows, lines_scrolled) = {
             let term = self.pane.term.lock().unwrap();
             let m = term.modes();
@@ -671,7 +973,7 @@ impl Window {
                 call!(search.bar.field, c"selectText:", NIL);
                 return;
             }
-            let bar = FindBar::open(msg!(self.window, c"contentView"), self.view, self.dark());
+            let bar = FindBar::open(self.container, self.view, self.dark());
             call!(self.window, c"makeFirstResponder:", bar.field);
             self.search = Some(Search { bar, query: String::new(), matches: Vec::new(), current: None, searched_to: 0, alt: false });
         }
@@ -781,7 +1083,7 @@ impl Window {
     /// and turns the pointer into a hand.
     fn update_hover(&mut self, cmd: bool) {
         // SAFETY: main thread; documented signatures.
-        let location: CGPoint = unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") };
+        let location = self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") });
         let bounds = unsafe { send_rect(self.view, c"bounds") };
         let inside = (0.0..bounds.size.width).contains(&location.x) && (0.0..bounds.size.height).contains(&location.y);
         let hover = (cmd && inside)
@@ -803,7 +1105,7 @@ impl Window {
             let cursor: Id = msg!(class(c"NSCursor"), if hover.is_some() { c"pointingHandCursor" } else { c"arrowCursor" });
             call!(cursor, c"set");
             if hover.is_some() && self.hint.is_none() {
-                self.hint = Some(LinkHint::new(msg!(self.window, c"contentView"), self.dark()));
+                self.hint = Some(LinkHint::new(self.container, self.dark()));
             }
         }
         if let Some(hint) = &self.hint {
@@ -821,7 +1123,13 @@ impl Window {
         self.render();
     }
 
-    /// Converts a window-space point to a grid cell.
+    /// A point in the window's coordinates in the view's.
+    fn local(&self, point: CGPoint) -> CGPoint {
+        // SAFETY: main thread; documented signature.
+        unsafe { msg!(self.view, c"convertPoint:fromView:", point, NIL) }
+    }
+
+    /// Converts a view-space point to a grid cell.
     fn cell_at(&self, point: CGPoint) -> (usize, usize) {
         // SAFETY: main thread; documented signature.
         let bounds = unsafe { send_rect(self.view, c"bounds") };
@@ -859,24 +1167,24 @@ unsafe fn register_view_class() -> Id {
             // calls back with text to insert or to show as composing. Ctrl
             // and Alt chords skip it unless it's composing; keys it leaves
             // alone (arrows, Return, ...) are encoded below.
-            let composing = with_window(view, |w| {
+            let composing = with_surface(view, |w| {
                 w.ime_used_key = false;
                 !w.preedit.is_empty()
             });
             if composing == Some(true) || !(mods.ctrl || alt) {
                 let context: Id = msg!(view, c"inputContext");
                 if !context.is_null() {
-                    // Not inside `with_window`: the callbacks borrow the window.
+                    // Not inside `with_surface`: the callbacks borrow the window.
                     let _: Bool = msg!(context, c"handleEvent:", event);
                 }
-                if with_window(view, |w| w.ime_used_key) == Some(true) {
+                if with_surface(view, |w| w.ime_used_key) == Some(true) {
                     return;
                 }
             }
             let code: u16 = msg!(event, c"keyCode");
             let chars = string_from_ns(msg!(event, c"characters"));
             let base = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
-            with_window(view, |w| {
+            with_surface(view, |w| {
                 let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
                 if let Some(bytes) = keys::encode(code, &chars, &base, mods, app_cursor) {
                     w.type_bytes(&bytes);
@@ -888,11 +1196,11 @@ unsafe fn register_view_class() -> Id {
     // ---- Search ----
 
     extern "C" fn find(view: Id, _: Sel, _sender: Id) {
-        with_window(view, Window::open_search);
+        with_surface(view, Surface::open_search);
     }
 
     fn find_step(view: Id, step: isize) {
-        with_window(view, |w| if w.search.is_some() { w.search(Some(step)) } else { w.open_search() });
+        with_surface(view, |w| if w.search.is_some() { w.search(Some(step)) } else { w.open_search() });
     }
     extern "C" fn find_next(view: Id, _: Sel, _sender: Id) {
         find_step(view, -1);
@@ -901,12 +1209,12 @@ unsafe fn register_view_class() -> Id {
         find_step(view, 1);
     }
     extern "C" fn close_search(view: Id, _: Sel, _sender: Id) {
-        with_window(view, Window::close_search);
+        with_surface(view, Surface::close_search);
     }
 
     /// The search bar's text changed (the view is its delegate).
     extern "C" fn search_changed(view: Id, _: Sel, _notification: Id) {
-        with_window(view, |w| w.search(None));
+        with_surface(view, |w| w.search(None));
     }
 
     /// Keys in the search bar: Return steps to older matches (with Shift,
@@ -922,7 +1230,7 @@ unsafe fn register_view_class() -> Id {
             };
             find_step(view, if shift { 1 } else { -1 });
         } else if command == sel(c"cancelOperation:") {
-            with_window(view, Window::close_search);
+            with_surface(view, Surface::close_search);
         } else {
             return NO;
         }
@@ -942,7 +1250,7 @@ unsafe fn register_view_class() -> Id {
     extern "C" fn insert_text(view: Id, _: Sel, string: Id, _replace: NSRange) {
         // SAFETY: AppKit passes a string object.
         let text = unsafe { text_of(string) };
-        with_window(view, |w| {
+        with_surface(view, |w| {
             w.ime_used_key = true;
             let had_preedit = !mem::take(&mut w.preedit).is_empty();
             w.type_bytes(text.as_bytes());
@@ -955,7 +1263,7 @@ unsafe fn register_view_class() -> Id {
     extern "C" fn set_marked_text(view: Id, _: Sel, string: Id, _selected: NSRange, _replace: NSRange) {
         // SAFETY: AppKit passes a string object.
         let text = unsafe { text_of(string) };
-        with_window(view, |w| {
+        with_surface(view, |w| {
             w.ime_used_key = true;
             w.preedit = text;
             w.render();
@@ -963,7 +1271,7 @@ unsafe fn register_view_class() -> Id {
     }
 
     extern "C" fn unmark_text(view: Id, _: Sel) {
-        with_window(view, |w| {
+        with_surface(view, |w| {
             if !mem::take(&mut w.preedit).is_empty() {
                 w.render();
             }
@@ -971,11 +1279,11 @@ unsafe fn register_view_class() -> Id {
     }
 
     extern "C" fn has_marked_text(view: Id, _: Sel) -> Bool {
-        if with_window(view, |w| !w.preedit.is_empty()) == Some(true) { YES } else { NO }
+        if with_surface(view, |w| !w.preedit.is_empty()) == Some(true) { YES } else { NO }
     }
 
     extern "C" fn marked_range(view: Id, _: Sel) -> NSRange {
-        let length = with_window(view, |w| w.preedit.encode_utf16().count()).unwrap_or(0);
+        let length = with_surface(view, |w| w.preedit.encode_utf16().count()).unwrap_or(0);
         if length == 0 { NSRange { location: NS_NOT_FOUND, length: 0 } } else { NSRange { location: 0, length } }
     }
 
@@ -998,7 +1306,7 @@ unsafe fn register_view_class() -> Id {
 
     /// Where the input method puts its candidate window: the cursor's cell, in screen coordinates.
     extern "C" fn first_rect(view: Id, _: Sel, _range: NSRange, _actual: *mut NSRange) -> CGRect {
-        with_window(view, |w| w.cursor_rect()).unwrap_or_default()
+        with_surface(view, |w| w.cursor_rect()).unwrap_or_default()
     }
 
     extern "C" fn do_command(_: Id, _: Sel, _command: Sel) {
@@ -1011,11 +1319,11 @@ unsafe fn register_view_class() -> Id {
             let dy: f64 = msg!(event, c"scrollingDeltaY");
             let precise: Bool = msg!(event, c"hasPreciseScrollingDeltas");
             let location: CGPoint = msg!(event, c"locationInWindow");
-            with_window(view, |w| {
+            with_surface(view, |w| {
                 // Trackpads report points, wheels report lines.
                 let points_per_line = w.renderer.cell_size().1 as f64 / w.renderer.scale();
                 let lines = if precise != 0 { dy / points_per_line } else { dy };
-                let (col, row) = w.cell_at(location);
+                let (col, row) = w.cell_at(w.local(location));
                 w.scroll(lines, col, row);
             });
         }
@@ -1029,7 +1337,7 @@ unsafe fn register_view_class() -> Id {
             if text.is_empty() {
                 return;
             }
-            with_window(view, |w| {
+            with_surface(view, |w| {
                 let bracketed = w.pane.term.lock().unwrap().modes().bracketed_paste;
                 w.write(&keys::paste(&text, bracketed));
             });
@@ -1042,7 +1350,7 @@ unsafe fn register_view_class() -> Id {
             let mods = modifiers(msg!(event, c"modifierFlags"));
             let location: CGPoint = msg!(event, c"locationInWindow");
             let clicks: isize = msg!(event, c"clickCount");
-            with_window(view, |w| w.mouse(action, location, clicks, mods));
+            with_surface(view, |w| w.mouse(action, location, clicks, mods));
         }
     }
     extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
@@ -1052,7 +1360,7 @@ unsafe fn register_view_class() -> Id {
             // Cmd-click opens the link under the pointer; it never starts a
             // selection. Only the target the hint was showing opens: if output
             // changed what's under the pointer, the hint updates instead.
-            let link = with_window(view, |w| {
+            let link = with_surface(view, |w| {
                 let shown = w.hover.clone();
                 w.update_hover(true);
                 (w.hover == shown).then(|| shown.map(|h| h.1)).flatten()
@@ -1067,16 +1375,16 @@ unsafe fn register_view_class() -> Id {
     extern "C" fn mouse_moved(view: Id, _: Sel, event: Id) {
         // SAFETY: `event` is an NSEvent.
         let flags: usize = unsafe { msg!(event, c"modifierFlags") };
-        with_window(view, |w| w.update_hover(flags & CMD != 0));
+        with_surface(view, |w| w.update_hover(flags & CMD != 0));
     }
     extern "C" fn mouse_exited(view: Id, _: Sel, _event: Id) {
-        with_window(view, |w| w.update_hover(false));
+        with_surface(view, |w| w.update_hover(false));
     }
     /// Cmd pressed or released without the mouse moving.
     extern "C" fn flags_changed(view: Id, _: Sel, event: Id) {
         // SAFETY: `event` is an NSEvent.
         let flags: usize = unsafe { msg!(event, c"modifierFlags") };
-        with_window(view, |w| w.update_hover(flags & CMD != 0));
+        with_surface(view, |w| w.update_hover(flags & CMD != 0));
     }
     extern "C" fn mouse_dragged(view: Id, _: Sel, event: Id) {
         mouse_event(view, event, MouseAction::Motion);
@@ -1085,7 +1393,14 @@ unsafe fn register_view_class() -> Id {
         mouse_event(view, event, MouseAction::Release);
     }
     extern "C" fn copy(view: Id, _: Sel, _sender: Id) {
-        with_window(view, Window::copy);
+        with_surface(view, Surface::copy);
+    }
+    /// Clicked, or focused by AppKit: its pane becomes the active one. When
+    /// the app is busy, the caller did that already (`App::focus`).
+    extern "C" fn become_first_responder(view: Id, _: Sel) -> Bool {
+        with_app(|app| app.activate(view));
+        // SAFETY: `view` is a MighttyView, an NSView.
+        unsafe { send_super(view, class(c"NSView"), c"becomeFirstResponder", ()) }
     }
 
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
@@ -1093,6 +1408,7 @@ unsafe fn register_view_class() -> Id {
     unsafe {
         register_class_with(c"MighttyView", c"NSView", &[c"NSTextInputClient"], &[
             (c"acceptsFirstResponder", predicate(yes), c"c@:"),
+            (c"becomeFirstResponder", predicate(become_first_responder), c"c@:"),
             (c"isOpaque", predicate(yes), c"c@:"),
             (c"keyDown:", action(key_down), c"v@:@"),
             (c"scrollWheel:", action(scroll_wheel), c"v@:@"),
@@ -1139,6 +1455,82 @@ unsafe fn register_view_class() -> Id {
     }
 }
 
+/// A window's content view: lays out its panes, and lets their dividers be dragged.
+unsafe fn register_split_class() -> Id {
+    /// Near a divider, events come here rather than to the pane under them.
+    extern "C" fn hit_test(view: Id, _: Sel, point: CGPoint) -> Id {
+        // SAFETY: `view` is a MighttySplitView; documented signatures.
+        unsafe {
+            let superview: Id = msg!(view, c"superview");
+            let local: CGPoint = msg!(view, c"convertPoint:fromView:", point, superview);
+            if with_app(|app| app.divider_at(view, local).is_some()) == Some(true) {
+                return view;
+            }
+            send_super(view, class(c"NSView"), c"hitTest:", (point,))
+        }
+    }
+    fn location(view: Id, event: Id) -> CGPoint {
+        // SAFETY: `event` is an NSEvent; documented signatures.
+        unsafe {
+            let point: CGPoint = msg!(event, c"locationInWindow");
+            msg!(view, c"convertPoint:fromView:", point, NIL)
+        }
+    }
+    extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
+        let point = location(view, event);
+        // SAFETY: `event` is an NSEvent.
+        let clicks: isize = unsafe { msg!(event, c"clickCount") };
+        with_app(|app| {
+            let divider = app.divider_at(view, point);
+            let w = app.windows.iter_mut().find(|w| w.root == view)?;
+            // Double-clicking a divider shares the space evenly.
+            if clicks == 2 && divider.is_some() {
+                w.tree.equalize();
+                let window = w.window;
+                app.layout(window, false);
+            } else {
+                w.dragging = divider;
+            }
+            Some(())
+        });
+    }
+    extern "C" fn mouse_dragged(view: Id, _: Sel, event: Id) {
+        let point = location(view, event);
+        with_app(|app| app.drag_divider(view, point));
+    }
+    extern "C" fn mouse_up(view: Id, _: Sel, _event: Id) {
+        with_app(|app| app.windows.iter_mut().find(|w| w.root == view).map(|w| w.dragging = None));
+    }
+    /// Resize pointers over the dividers.
+    extern "C" fn reset_cursor_rects(view: Id, _: Sel) {
+        let dividers = with_app(|app| {
+            let w = app.windows.iter().find(|w| w.root == view).filter(|w| !w.zoomed)?;
+            // SAFETY: main thread; documented signature.
+            let bounds = to_rect(unsafe { send_rect(view, c"bounds") });
+            Some(w.tree.dividers(bounds, GAP))
+        });
+        for divider in dividers.flatten().unwrap_or_default() {
+            let cursor = if divider.axis == Axis::Row { c"resizeLeftRightCursor" } else { c"resizeUpDownCursor" };
+            // SAFETY: main thread; documented signatures.
+            unsafe {
+                let cursor: Id = msg!(class(c"NSCursor"), cursor);
+                call!(view, c"addCursorRect:cursor:", from_rect(grab_area(&divider)), cursor);
+            }
+        }
+    }
+
+    let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
+    unsafe {
+        register_class(c"MighttySplitView", c"NSView", &[
+            (c"hitTest:", hit_test as *const c_void, c"@@:{CGPoint=dd}"),
+            (c"mouseDown:", action(mouse_down), c"v@:@"),
+            (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
+            (c"mouseUp:", action(mouse_up), c"v@:@"),
+            (c"resetCursorRects", reset_cursor_rects as *const c_void, c"v@:"),
+        ])
+    }
+}
+
 /// App delegate and window delegate in one.
 unsafe fn register_delegate_class() -> Id {
     /// The NSWindow a window notification is about.
@@ -1158,13 +1550,20 @@ unsafe fn register_delegate_class() -> Id {
         });
     }
     extern "C" fn did_resize(_: Id, _: Sel, notification: Id) {
-        with_window(window_of(notification), Window::resize);
+        with_app(|app| app.layout(window_of(notification), true));
+    }
+    fn set_key(notification: Id, key: bool) {
+        let window = window_of(notification);
+        with_app(|app| {
+            let active = app.windows.iter().find(|w| w.window == window)?.active;
+            app.surfaces.iter_mut().find(|s| s.view == active).map(|s| s.set_focused(key))
+        });
     }
     extern "C" fn did_become_key(_: Id, _: Sel, notification: Id) {
-        with_window(window_of(notification), |w| w.set_focused(true));
+        set_key(notification, true);
     }
     extern "C" fn did_resign_key(_: Id, _: Sel, notification: Id) {
-        with_window(window_of(notification), |w| w.set_focused(false));
+        set_key(notification, false);
     }
     extern "C" fn will_close(_: Id, _: Sel, notification: Id) {
         let window = window_of(notification);
@@ -1176,6 +1575,36 @@ unsafe fn register_delegate_class() -> Id {
     /// ⌘T, and the tab bar's + button (`newWindowForTab:`).
     extern "C" fn new_tab(_: Id, _: Sel, _sender: Id) {
         with_app(|app| app.new_shell_window(true));
+    }
+    extern "C" fn split_right(_: Id, _: Sel, _sender: Id) {
+        with_app(|app| app.split(Axis::Row));
+    }
+    extern "C" fn split_down(_: Id, _: Sel, _sender: Id) {
+        with_app(|app| app.split(Axis::Column));
+    }
+    /// ⌘W: the active pane, and the window with its last.
+    extern "C" fn close_split(_: Id, _: Sel, _sender: Id) {
+        let active = with_app(|app| app.key_window()).flatten();
+        close_surfaces(active.map(|(_, view)| vec![view]).unwrap_or_default());
+    }
+    /// ⌘[ / ⌘]: the menu item's tag is the step.
+    extern "C" fn select_split(_: Id, _: Sel, sender: Id) {
+        // SAFETY: `sender` is the menu item.
+        let step: isize = unsafe { msg!(sender, c"tag") };
+        with_app(|app| app.select_split(step));
+    }
+    /// ⌘⌥ and an arrow: the tag is the `Direction`.
+    extern "C" fn select_split_toward(_: Id, _: Sel, sender: Id) {
+        // SAFETY: `sender` is the menu item.
+        let tag: isize = unsafe { msg!(sender, c"tag") };
+        let direction = [Direction::Left, Direction::Right, Direction::Up, Direction::Down][tag as usize % 4];
+        with_app(|app| app.select_split_toward(direction));
+    }
+    extern "C" fn toggle_zoom(_: Id, _: Sel, _sender: Id) {
+        with_app(App::toggle_zoom);
+    }
+    extern "C" fn equalize(_: Id, _: Sel, _sender: Id) {
+        with_app(App::equalize);
     }
     /// ⌘1…⌘8 pick that tab, ⌘9 the last (the menu item's tag is the digit).
     extern "C" fn select_tab(_: Id, _: Sel, sender: Id) {
@@ -1214,6 +1643,13 @@ unsafe fn register_delegate_class() -> Id {
             (c"newTab:", action(new_tab), c"v@:@"),
             (c"newWindowForTab:", action(new_tab), c"v@:@"),
             (c"selectTabByDigit:", action(select_tab), c"v@:@"),
+            (c"splitRight:", action(split_right), c"v@:@"),
+            (c"splitDown:", action(split_down), c"v@:@"),
+            (c"closeSplit:", action(close_split), c"v@:@"),
+            (c"selectSplit:", action(select_split), c"v@:@"),
+            (c"selectSplitToward:", action(select_split_toward), c"v@:@"),
+            (c"toggleSplitZoom:", action(toggle_zoom), c"v@:@"),
+            (c"equalizeSplits:", action(equalize), c"v@:@"),
         ])
     }
 }
@@ -1230,6 +1666,13 @@ unsafe fn install_menu(ns_app: Id) {
             );
             call!(menu, c"addItem:", item);
             item
+        }
+    }
+
+    unsafe fn separator(menu: Id) {
+        unsafe {
+            let item: Id = msg!(class(c"NSMenuItem"), c"separatorItem");
+            call!(menu, c"addItem:", item);
         }
     }
 
@@ -1250,7 +1693,12 @@ unsafe fn install_menu(ns_app: Id) {
         let shell_menu = submenu(bar, "Shell");
         add_item(shell_menu, "New Window", c"newWindow:", "n");
         add_item(shell_menu, "New Tab", c"newTab:", "t");
-        add_item(shell_menu, "Close Window", c"performClose:", "w");
+        add_item(shell_menu, "Split Right", c"splitRight:", "d");
+        // ⌘⇧D: for letters, the capital implies Shift (unlike "[" below).
+        add_item(shell_menu, "Split Down", c"splitDown:", "D");
+        separator(shell_menu);
+        add_item(shell_menu, "Close", c"closeSplit:", "w");
+        add_item(shell_menu, "Close Window", c"performClose:", "W");
         let edit_menu = submenu(bar, "Edit");
         add_item(edit_menu, "Copy", c"copy:", "c");
         add_item(edit_menu, "Paste", c"paste:", "v");
@@ -1260,6 +1708,23 @@ unsafe fn install_menu(ns_app: Id) {
         // AppKit adds the tab items (Show Tab Bar, Move Tab to New Window, …) here.
         let window_menu = submenu(bar, "Window");
         add_item(window_menu, "Minimize", c"performMiniaturize:", "m");
+        separator(window_menu);
+        let item = add_item(window_menu, "Zoom Split", c"toggleSplitZoom:", "\r");
+        call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
+        let item = add_item(window_menu, "Equalize Splits", c"equalizeSplits:", "=");
+        call!(item, c"setKeyEquivalentModifierMask:", CMD | CTRL);
+        for (title, key, step) in [("Select Previous Split", "[", -1isize), ("Select Next Split", "]", 1)] {
+            let item = add_item(window_menu, title, c"selectSplit:", key);
+            call!(item, c"setTag:", step);
+        }
+        // The arrow keys' characters (NSLeftArrowFunctionKey, …), in `Direction` order.
+        let arrows = [("Left", "\u{F702}"), ("Right", "\u{F703}"), ("Above", "\u{F700}"), ("Below", "\u{F701}")];
+        for (tag, (title, key)) in arrows.into_iter().enumerate() {
+            let item = add_item(window_menu, &format!("Select Split {title}"), c"selectSplitToward:", key);
+            call!(item, c"setKeyEquivalentModifierMask:", CMD | ALT);
+            call!(item, c"setTag:", tag as isize);
+        }
+        separator(window_menu);
         // ⌘⇧[ and ⌘⇧]: the unshifted key with Shift in the mask, since with
         // Cmd held the key may report "[" rather than "{".
         for (title, action, key) in [("Show Previous Tab", c"selectPreviousTab:", "["), ("Show Next Tab", c"selectNextTab:", "]")] {
