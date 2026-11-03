@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use mightty_render::{Rgb, Theme, boxdraw};
 use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
 
+use crate::config::FontBackend;
 use crate::ffi::*;
 use crate::font::{Font, RasterGlyph, Style};
 use crate::snapshot;
@@ -255,6 +256,7 @@ pub struct Renderer {
     font: Font,
     font_name: String,
     font_size: f64,
+    backend: FontBackend,
     scale: f64,
     theme: Theme,
     /// Quad lists kept between frames, so drawing doesn't allocate.
@@ -270,7 +272,7 @@ pub struct Renderer {
 impl Renderer {
     /// `layer` must be a `CAMetalLayer`. `font_size` is in points.
     /// Without `vsync`, frames show as soon as they're ready, possibly torn.
-    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme, vsync: bool) -> Self {
+    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme, vsync: bool, backend: FontBackend) -> Self {
         // SAFETY: Metal calls with the documented signatures.
         unsafe {
             let device = MTLCreateSystemDefaultDevice();
@@ -296,7 +298,8 @@ impl Renderer {
                 atlas: Atlas { texture: create_atlas(device, ATLAS_MIN), size: ATLAS_MIN, x: 0, y: 0, row_height: 0 },
                 glyphs: HashMap::new(),
                 atlas_reset: false,
-                font: Font::new(font_name, font_size * scale),
+                font: Font::new(font_name, font_size * scale, backend),
+                backend,
                 font_name: font_name.to_owned(),
                 font_size,
                 scale,
@@ -327,7 +330,7 @@ impl Renderer {
     /// Rebuilds the font for a new backing scale (moving between displays).
     pub fn set_scale(&mut self, scale: f64) {
         self.scale = scale;
-        self.font = Font::new(&self.font_name, self.font_size * scale);
+        self.font = Font::new(&self.font_name, self.font_size * scale, self.backend);
         self.reset_atlas();
     }
 

@@ -243,6 +243,9 @@ unsafe extern "C" {
     pub fn CTFontGetDescent(font: CTFontRef) -> f64;
     pub fn CTFontGetLeading(font: CTFontRef) -> f64;
     pub fn CTFontGetSymbolicTraits(font: CTFontRef) -> u32;
+    pub fn CTFontCopyAttribute(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef;
+    pub fn CTFontCopyPostScriptName(font: CTFontRef) -> CFStringRef;
+    pub static kCTFontURLAttribute: CFStringRef;
     pub fn CTFontGetGlyphsForCharacters(font: CTFontRef, chars: *const u16, glyphs: *mut u16, count: isize) -> bool;
     pub fn CTFontGetAdvancesForGlyphs(
         font: CTFontRef,

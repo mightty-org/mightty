@@ -35,6 +35,16 @@ pub struct Config {
     pub option_as_alt: Option<OptionAsAlt>,
     pub confirm_close: ConfirmClose,
     pub save_state: SaveState,
+    pub font_backend: FontBackend,
+}
+
+/// `font-backend`: who reads fonts and draws glyphs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontBackend {
+    CoreText,
+    /// mightty's own (`mightty-font`), for TrueType fonts; CoreText still
+    /// finds font files and draws what that can't yet (emoji, clusters).
+    Mightty,
 }
 
 /// `window-save-state`, as in Ghostty: whether windows, tabs and splits
@@ -101,6 +111,7 @@ impl Default for Config {
             option_as_alt: None,
             confirm_close: ConfirmClose::Running,
             save_state: SaveState::Default,
+            font_backend: FontBackend::CoreText,
         }
     }
 }
@@ -239,6 +250,21 @@ const SETTINGS: &[Setting] = &[
                 .into(),
             )
         },
+    },
+    Setting {
+        name: "font-backend",
+        value: "NAME",
+        help: "coretext or mightty: who draws glyphs (mightty: our own rasterizer, TrueType fonts; for testing)",
+        color: false,
+        set: |c, v| {
+            c.font_backend = match v {
+                "coretext" => FontBackend::CoreText,
+                "mightty" => FontBackend::Mightty,
+                _ => return Err("expects coretext or mightty".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(if c.font_backend == FontBackend::Mightty { "mightty" } else { "coretext" }.into()),
     },
     Setting {
         name: "window-save-state",

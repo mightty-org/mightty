@@ -22,6 +22,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mightty-font"
+version = "0.1.0"
+
+[[package]]
 name = "mightty-json"
 version = "0.1.0"
 
@@ -29,6 +33,7 @@ version = "0.1.0"
 name = "mightty-macos"
 version = "0.1.0"
 dependencies = [
+ "mightty-font",
  "mightty-json",
  "mightty-mux",
  "mightty-render",

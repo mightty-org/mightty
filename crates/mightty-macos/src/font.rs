@@ -1,11 +1,17 @@
-//! Font loading and glyph rasterisation through CoreText.
+//! Font loading and glyph rasterisation: through CoreText, or with
+//! `font-backend = mightty` through our own `mightty-font`, CoreText then
+//! only finding font files and drawing what ours can't yet.
 //!
 //! Each glyph is drawn into a cell-sized (or two-cell) BGRA tile, so the
 //! renderer can place tiles on the grid without per-glyph metrics.
-//! TODO: replace with our own rasteriser behind this same interface.
 
+use std::fs;
 use std::ptr;
+use std::sync::Arc;
 
+use mightty_font::Face;
+
+use crate::config::FontBackend;
 use crate::ffi::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -32,6 +38,11 @@ pub struct RasterGlyph {
 pub struct Font {
     /// Indexed by `Style`: regular, bold, italic, bold italic.
     variants: [CTFontRef; 4],
+    /// With `font-backend = mightty`, the same faces read by us, where we
+    /// can read them; also indexed by `Style`.
+    own: [Option<Face>; 4],
+    /// In pixels.
+    size: f64,
     colorspace: CGColorSpaceRef,
     pub cell_width: u32,
     pub cell_height: u32,
@@ -41,7 +52,7 @@ pub struct Font {
 
 impl Font {
     /// `size` is in pixels (points × backing scale).
-    pub fn new(name: &str, size: f64) -> Self {
+    pub fn new(name: &str, size: f64, backend: FontBackend) -> Self {
         // SAFETY: CoreText/CoreGraphics calls with valid arguments; every
         // created object is owned by `Font` and released in `Drop`.
         unsafe {
@@ -58,20 +69,36 @@ impl Font {
             let italic = variant(kCTFontTraitItalic);
             let bold_italic = variant(kCTFontTraitBold | kCTFontTraitItalic);
 
-            let ascent = CTFontGetAscent(regular);
-            let descent = CTFontGetDescent(regular);
-            let leading = CTFontGetLeading(regular);
-            let mut glyph = 0u16;
-            let mut advance = CGSize::default();
-            CTFontGetGlyphsForCharacters(regular, &(b'M' as u16), &mut glyph, 1);
-            CTFontGetAdvancesForGlyphs(regular, 0, &glyph, &mut advance, 1);
+            let variants = [regular, bold, italic, bold_italic];
+            let own = match backend {
+                FontBackend::CoreText => [None, None, None, None],
+                FontBackend::Mightty => own_faces(&variants),
+            };
+            let (ascent, descent, leading, m_advance) = match &own[0] {
+                // Our reading of the same numbers.
+                Some(face) => {
+                    let m = face.metrics();
+                    let scale = size / m.units_per_em as f64;
+                    let m_advance = face.glyph('M').map_or(size / 2.0, |g| face.advance(g) as f64 * scale);
+                    (m.ascender as f64 * scale, -m.descender as f64 * scale, m.line_gap as f64 * scale, m_advance)
+                }
+                None => {
+                    let mut glyph = 0u16;
+                    let mut advance = CGSize::default();
+                    CTFontGetGlyphsForCharacters(regular, &(b'M' as u16), &mut glyph, 1);
+                    CTFontGetAdvancesForGlyphs(regular, 0, &glyph, &mut advance, 1);
+                    (CTFontGetAscent(regular), CTFontGetDescent(regular), CTFontGetLeading(regular), advance.width)
+                }
+            };
 
-            let cell_width = advance.width.round().max(1.0) as u32;
+            let cell_width = m_advance.round().max(1.0) as u32;
             let cell_height = (ascent + descent + leading).ceil().max(1.0) as u32;
             let baseline = ((cell_height as f64 - ascent - descent) / 2.0 + ascent).round() as u32;
 
             Self {
-                variants: [regular, bold, italic, bold_italic],
+                variants,
+                own,
+                size,
                 colorspace: CGColorSpaceCreateDeviceRGB(),
                 cell_width,
                 cell_height,
@@ -82,6 +109,12 @@ impl Font {
 
     /// Renders `c` into a tile `cells` wide. Returns `None` when no font has the glyph.
     pub fn rasterize(&self, c: char, style: Style, cells: u32) -> Option<RasterGlyph> {
+        if let Some(face) = &self.own[style.0 as usize]
+            && let Some(glyph) = face.glyph(c)
+            && let Some(raster) = self.draw_own(face, glyph, cells)
+        {
+            return Some(raster);
+        }
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         let n = units.len() as isize;
@@ -162,6 +195,20 @@ impl Font {
         }
     }
 
+    /// `glyph` of `face` drawn by our rasterizer, placed as `draw` places
+    /// CoreText's: on the baseline, centred when narrower than the tile.
+    fn draw_own(&self, face: &Face, glyph: u16, cells: u32) -> Option<RasterGlyph> {
+        let (width, height) = (self.cell_width * cells, self.cell_height);
+        let scale = (self.size / face.metrics().units_per_em as f64) as f32;
+        let advance = face.advance(glyph) as f32 * scale;
+        let x = ((width as f32 - advance) / 2.0).max(0.0).round();
+        let outline = face.outline(glyph).ok()?;
+        let coverage = mightty_font::rasterize(&outline, scale, x, self.baseline as f32, width as usize, height as usize);
+        // White, premultiplied: every channel is the coverage.
+        let pixels = coverage.iter().flat_map(|&c| [c; 4]).collect();
+        Some(RasterGlyph { pixels, width, height, color: false })
+    }
+
     /// A tile `cells` wide with `draw` called on it at the baseline origin
     /// for content `width` pixels wide, centred when narrower than the tile
     /// (wide CJK, emoji). `color` is left false.
@@ -195,6 +242,44 @@ impl Font {
     }
 }
 
+/// Our faces for CoreText's `fonts`: the face each one was loaded from,
+/// found by its file and PostScript name. `None` where we can't read it
+/// (CFF outlines, for now), which leaves that style to CoreText.
+fn own_faces(fonts: &[CTFontRef; 4]) -> [Option<Face>; 4] {
+    // Styles often share a file (a .ttc collection).
+    let mut files: Vec<(String, Arc<[u8]>)> = Vec::new();
+    fonts.map(|font| {
+        // SAFETY: a live CTFont; copied objects are released here.
+        let (path, name) = unsafe {
+            let url = CTFontCopyAttribute(font, kCTFontURLAttribute);
+            if url.is_null() {
+                return None;
+            }
+            let path = string_from_ns(msg!(url as Id, c"path"));
+            CFRelease(url);
+            let name = CTFontCopyPostScriptName(font);
+            let ps = string_from_ns(name as Id);
+            CFRelease(name);
+            (path, ps)
+        };
+        let data = match files.iter().find(|f| f.0 == path) {
+            Some((_, data)) => data.clone(),
+            None => {
+                let data: Arc<[u8]> = fs::read(&path).ok()?.into();
+                files.push((path.clone(), data.clone()));
+                data
+            }
+        };
+        let faces = Face::count(&data);
+        let face = (0..faces).find_map(|i| Face::parse(data.clone(), i).ok().filter(|f| f.postscript_name().as_deref() == Some(name.as_str())));
+        let face = face.or_else(|| if faces == 1 { Face::parse(data.clone(), 0).ok() } else { None });
+        if face.is_none() {
+            eprintln!("mightty: font-backend=mightty can't read {name} ({path}); CoreText draws it");
+        }
+        face
+    })
+}
+
 impl Drop for Font {
     fn drop(&mut self) {
         // SAFETY: we own one reference to each.
@@ -203,6 +288,44 @@ impl Drop for Font {
                 CFRelease(font);
             }
             CGColorSpaceRelease(self.colorspace);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Our rasterizer against CoreText on the same font: same cell, and
+    /// glyphs within a little anti-aliasing of each other.
+    #[test]
+    fn matches_coretext() {
+        for size in [24.0, 28.0, 33.0] {
+            let theirs = Font::new("Menlo", size, FontBackend::CoreText);
+            let ours = Font::new("Menlo", size, FontBackend::Mightty);
+            assert!(ours.own.iter().all(Option::is_some), "Menlo's four styles are TrueType");
+            assert_eq!((ours.cell_width, ours.cell_height, ours.baseline), (theirs.cell_width, theirs.cell_height, theirs.baseline), "{size}");
+            let mut worst = (0.0f64, ' ', Style::default());
+            let (mut sum, mut count) = (0.0, 0);
+            for style in [Style::new(false, false), Style::new(true, false), Style::new(false, true), Style::new(true, true)] {
+                for c in (0x21u8..0x7f).map(char::from).chain(['é', 'ß', '─', '█', '→']) {
+                    let a = theirs.rasterize(c, style, 1).unwrap();
+                    let b = ours.rasterize(c, style, 1).unwrap();
+                    let total: u64 = a.pixels.iter().step_by(4).map(|&p| p as u64).sum();
+                    let diff: u64 = a.pixels.iter().zip(&b.pixels).step_by(4).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
+                    // Differences relative to the glyph's ink.
+                    let relative = diff as f64 / total.max(1) as f64;
+                    (sum, count) = (sum + relative, count + 1);
+                    if relative > worst.0 {
+                        worst = (relative, c, style);
+                    }
+                }
+            }
+            // Edges anti-aliased a little differently, no more: a misplaced
+            // or misread glyph differs by far more of its ink.
+            let mean = sum / count as f64;
+            assert!(worst.0 < 0.08, "size {size}: {:?} {:?} differs by {:.1}% of its ink", worst.1, worst.2, worst.0 * 100.0);
+            assert!(mean < 0.02, "size {size}: glyphs differ by {:.1}% of their ink on average", mean * 100.0);
         }
     }
 }

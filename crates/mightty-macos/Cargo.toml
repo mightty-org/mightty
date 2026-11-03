@@ -10,6 +10,7 @@ mightty-term.workspace = true
 mightty-mux.workspace = true
 mightty-render.workspace = true
 mightty-json.workspace = true
+mightty-font.workspace = true
 
 [lints]
 workspace = true
