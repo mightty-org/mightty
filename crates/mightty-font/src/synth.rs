@@ -49,30 +49,36 @@ pub fn embolden(outline: &mut [Segment], amount: f32) {
 
 fn grow_contour(contour: &mut [Segment], amount: f32) {
     let original: Vec<Point> = contour.iter_mut().flat_map(points).map(|p| *p).collect();
-    let n = original.len();
-    if n < 3 {
+    // Runs of the same point (a contour ends where it starts) move as one,
+    // between the points before and after the run.
+    let mut runs: Vec<Point> = Vec::new();
+    let mut run_of = Vec::with_capacity(original.len());
+    for (i, &p) in original.iter().enumerate() {
+        if i == 0 || p != original[i - 1] {
+            runs.push(p);
+        }
+        run_of.push(runs.len() - 1);
+    }
+    if runs.len() > 1 && runs[0] == runs[runs.len() - 1] {
+        let last = runs.len() - 1;
+        runs.pop();
+        for r in run_of.iter_mut().filter(|r| **r == last) {
+            *r = 0;
+        }
+    }
+    let m = runs.len();
+    if m < 3 {
         return;
     }
-    let distinct = |i: usize, step: isize| {
-        let mut j = i;
-        for _ in 0..n {
-            j = (j as isize + step).rem_euclid(n as isize) as usize;
-            if original[j] != original[i] {
-                return Some(original[j]);
-            }
-        }
-        None
-    };
     let unit = |from: Point, to: Point| {
         let (dx, dy) = (to.x - from.x, to.y - from.y);
         let len = (dx * dx + dy * dy).sqrt();
         // The normal on the outward side of an edge running anticlockwise.
         (dy / len, -dx / len)
     };
-    let moved: Vec<Point> = (0..n)
-        .map(|i| {
-            let p = original[i];
-            let (Some(prev), Some(next)) = (distinct(i, -1), distinct(i, 1)) else { return p };
+    let moved: Vec<Point> = (0..m)
+        .map(|r| {
+            let (prev, p, next) = (runs[(r + m - 1) % m], runs[r], runs[(r + 1) % m]);
             let (a, b) = (unit(prev, p), unit(p, next));
             let (sx, sy) = (a.0 + b.0, a.1 + b.1);
             // 1 + cos of the turn: small at a hairpin, where the bisector
@@ -81,8 +87,8 @@ fn grow_contour(contour: &mut [Segment], amount: f32) {
             Point { x: p.x + sx * amount / d, y: p.y + sy * amount / d }
         })
         .collect();
-    for (p, q) in contour.iter_mut().flat_map(points).zip(moved) {
-        *p = q;
+    for (p, r) in contour.iter_mut().flat_map(points).zip(run_of) {
+        *p = moved[r];
     }
 }
 
@@ -127,6 +133,19 @@ mod tests {
         ring.extend(square(7.0, 3.0, 3.0, 7.0));
         embolden(&mut ring, 0.5);
         assert!((ink(&ring) - (81.0 - 9.0)).abs() < 0.1, "{}", ink(&ring));
+    }
+
+    /// Linear in the points: a contour of 65535 points, nearly all the
+    /// same (once quadratic), takes no time.
+    #[test]
+    fn many_repeated_points() {
+        let mut outline = vec![Segment::MoveTo(p(0.0, 0.0)), Segment::LineTo(p(4.0, 0.0)), Segment::LineTo(p(4.0, 4.0))];
+        outline.extend(std::iter::repeat_n(Segment::LineTo(p(0.0, 4.0)), 65_535));
+        outline.push(Segment::Close);
+        let started = std::time::Instant::now();
+        embolden(&mut outline, 0.5);
+        assert!(started.elapsed().as_millis() < 500);
+        assert_eq!(outline[100], Segment::LineTo(p(-0.5, 4.5)));
     }
 
     #[test]

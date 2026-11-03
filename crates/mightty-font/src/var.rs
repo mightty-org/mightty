@@ -17,6 +17,10 @@ pub struct Axis {
     pub max: f32,
 }
 
+/// Points × tuples one glyph's deltas may take: real glyphs need a few
+/// thousand.
+const MAX_DELTA_WORK: usize = 1 << 20;
+
 fn fixed(b: Bytes<'_>, at: usize) -> Option<f32> {
     Some(b.u32(at)? as i32 as f32 / 65536.0)
 }
@@ -214,6 +218,9 @@ pub(crate) fn glyph_deltas(b: Bytes<'_>, gvar: usize, coords: &[f32], glyph: u16
     } else {
         None
     };
+    // Each tuple that applies costs a pass over the points; a damaged font
+    // could ask for thousands of tuples over thousands of points.
+    let mut work = 0usize;
     let mut header = 4;
     for _ in 0..tuples {
         let size = data.u16(header)? as usize;
@@ -246,6 +253,10 @@ pub(crate) fn glyph_deltas(b: Bytes<'_>, gvar: usize, coords: &[f32], glyph: u16
         };
         if scalar == 0.0 {
             continue;
+        }
+        work += points;
+        if work > MAX_DELTA_WORK {
+            return None;
         }
         let (private, at) = if index & 0x2000 != 0 { packed_points(tuple, 0, points).map(|(p, at)| (Some(p), at))? } else { (None, 0) };
         let which = private.as_ref().or(shared_points.as_ref())?;
@@ -359,13 +370,16 @@ fn infer(deltas: &mut [Option<Point>], outline: &[Point], ends: &[usize]) {
             continue;
         }
         let mut inferred = Vec::new();
+        // How many touched points come before `i`: one walk along both.
+        let mut k = 0;
         for i in range.clone() {
             if deltas[i].is_some() {
+                k += 1;
                 continue;
             }
             // The touched points before and after `i`, around the contour.
-            let before = touched.iter().rev().find(|&&t| t < i).or(touched.last()).copied().unwrap_or(i);
-            let after = touched.iter().find(|&&t| t > i).or(touched.first()).copied().unwrap_or(i);
+            let before = if k > 0 { touched[k - 1] } else { touched[touched.len() - 1] };
+            let after = touched.get(k).copied().unwrap_or(touched[0]);
             let (db, da) = (deltas[before].unwrap_or(Point { x: 0.0, y: 0.0 }), deltas[after].unwrap_or(Point { x: 0.0, y: 0.0 }));
             let axis = |c: fn(Point) -> f32| {
                 let (cb, ca, ci) = (c(outline[before]), c(outline[after]), c(outline[i]));
@@ -407,6 +421,19 @@ mod tests {
         infer(&mut deltas, &outline, &[3]);
         assert_eq!(deltas[1], Some(p(15.0, 2.0)));
         assert_eq!(deltas[3], Some(p(20.0, 0.0)));
+    }
+
+    /// Linear in the points: a contour of 65535 with every other one
+    /// touched (once quadratic) takes no time.
+    #[test]
+    fn inferring_is_linear() {
+        let n = 65_535;
+        let outline: Vec<Point> = (0..n).map(|i| p(i as f32, 0.0)).collect();
+        let mut deltas: Vec<Option<Point>> = (0..n).map(|i| (i % 2 == 0).then_some(p(1.0, 0.0))).collect();
+        let started = std::time::Instant::now();
+        infer(&mut deltas, &outline, &[n - 1]);
+        assert!(started.elapsed().as_millis() < 500);
+        assert!(deltas.iter().all(|d| *d == Some(p(1.0, 0.0))));
     }
 
     #[test]
