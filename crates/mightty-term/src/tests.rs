@@ -107,6 +107,7 @@ fn osc_title_cwd_and_marks() {
     let t = term(20, 3, "\x1b]0;my;title\x07\x1b]7;file://host/tmp/a%20b\x1b\\");
     assert_eq!(t.title(), "my;title");
     assert_eq!(t.cwd(), Some("/tmp/a b"));
+    assert_eq!(t.cwd_host(), "host");
     let t = term(20, 3, "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;2\x07");
     let kinds: Vec<_> = t.marks().iter().map(|m| (m.kind, m.line)).collect();
     assert_eq!(kinds, [

@@ -478,10 +478,14 @@ impl App {
         // SAFETY: main thread; documented signature.
         let key: Id = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow") };
         let current = self.windows.iter().find(|w| w.window == key);
-        // Any program can report a directory; use it only if it is one.
-        let cwd = current
-            .and_then(|w| w.pane.term.lock().unwrap().cwd().map(PathBuf::from).or_else(|| w.start_dir.clone()))
-            .filter(|dir| dir.is_dir());
+        // Any program can report a directory: use it only if it is on this
+        // machine (not from a shell over ssh) and is one.
+        let host = open::hostname();
+        let reported = |w: &Window| {
+            let term = w.pane.term.lock().unwrap();
+            term.cwd().filter(|_| open::is_local(term.cwd_host(), &host)).map(PathBuf::from)
+        };
+        let cwd = current.and_then(|w| reported(w).or_else(|| w.start_dir.clone())).filter(|dir| dir.is_dir());
         let tab_of = if tab { current.map_or(NIL, |w| w.window) } else { NIL };
         let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd: cwd.clone(), ..Default::default() };
         match self.mux.spawn(opts) {

@@ -39,10 +39,15 @@ pub fn decide(uri: &str, host: &str, resolve: impl Fn(&Path) -> Option<PathBuf>,
     // A query or fragment would make the path checked differ from the one opened.
     let Some(rest) = rest.strip_prefix("//").filter(|r| !r.contains(['?', '#'])) else { return Action::Refuse };
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    let local = authority.is_empty() || authority.eq_ignore_ascii_case("localhost") || authority.eq_ignore_ascii_case(host);
+    let local = is_local(authority, host);
     let Some(path) = percent_decode(path).filter(|p| local && p.starts_with('/')) else { return Action::Refuse };
     let Some(real) = resolve(Path::new(&path)) else { return Action::Refuse };
     if safe(&real) { Action::OpenFile(real) } else { Action::Reveal(real) }
+}
+
+/// Whether a `file://` URL's host, `authority`, is this machine, named `host`.
+pub fn is_local(authority: &str, host: &str) -> bool {
+    authority.is_empty() || authority.eq_ignore_ascii_case("localhost") || authority.eq_ignore_ascii_case(host)
 }
 
 /// Kinds of file whose default app runs, installs or launches something,
@@ -71,6 +76,19 @@ pub fn safe_with(path: &Path, conforms: impl Fn(&str) -> bool) -> bool {
         return conforms("public.folder");
     }
     meta.is_file() && meta.permissions().mode() & 0o111 == 0 && SAFE_TYPES.iter().any(|t| conforms(t))
+}
+
+/// Apps that run what they open: never the one a file opens with, even
+/// if the user made one the default for a safe type.
+const RUNNERS: &[&str] = &[
+    "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "net.kovidgoyal.kitty", "com.github.wez.wezterm",
+    "org.alacritty", "dev.warp.Warp-Stable", "com.apple.ScriptEditor2", "com.apple.Automator", "com.apple.shortcuts",
+    "org.python.PythonLauncher", "com.apple.installer", "com.apple.archiveutility",
+];
+
+/// Whether files may be opened with the app whose bundle id is `id`.
+pub fn viewer(id: &str) -> bool {
+    !id.is_empty() && !RUNNERS.iter().any(|r| id.eq_ignore_ascii_case(r))
 }
 
 pub fn resolve(path: &Path) -> Option<PathBuf> {
@@ -103,13 +121,25 @@ pub fn open(uri: &str) {
         let safe = |path: &Path| safe_with(path, |id| conforms(path, id));
         let url: Id = match decide(uri, &host, resolve, safe) {
             Action::Open(uri) => msg!(class(c"NSURL"), c"URLWithString:", nsstring(&uri)),
-            Action::OpenFile(path) => msg!(class(c"NSURL"), c"fileURLWithPath:", nsstring(&path.to_string_lossy())),
-            Action::Reveal(path) => {
-                let url: Id = msg!(class(c"NSURL"), c"fileURLWithPath:", nsstring(&path.to_string_lossy()));
+            Action::OpenFile(path) if path.is_dir() => file_url(&path),
+            Action::OpenFile(path) => {
+                // With the app for its type, not one the file names itself
+                // ("Open With" is stored in the file, by whoever wrote it).
+                let url = file_url(&path);
+                let app: Id = match content_type(url) {
+                    NIL => NIL,
+                    kind => msg!(workspace, c"URLForApplicationToOpenContentType:", kind),
+                };
+                let id = if app.is_null() { String::new() } else { bundle_id(app) };
+                if !viewer(&id) {
+                    return reveal(workspace, url);
+                }
                 let urls: Id = msg!(class(c"NSArray"), c"arrayWithObject:", url);
-                call!(workspace, c"activateFileViewerSelectingURLs:", urls);
+                let config: Id = msg!(class(c"NSWorkspaceOpenConfiguration"), c"configuration");
+                call!(workspace, c"openURLs:withApplicationAtURL:configuration:completionHandler:", urls, app, config, NIL);
                 return;
             }
+            Action::Reveal(path) => return reveal(workspace, file_url(&path)),
             Action::Refuse => NIL,
         };
         let opened: Bool = if url.is_null() { NO } else { msg!(workspace, c"openURL:", url) };
@@ -119,15 +149,42 @@ pub fn open(uri: &str) {
     }
 }
 
+/// Selects `url` in Finder.
+unsafe fn reveal(workspace: Id, url: Id) {
+    unsafe {
+        let urls: Id = msg!(class(c"NSArray"), c"arrayWithObject:", url);
+        call!(workspace, c"activateFileViewerSelectingURLs:", urls);
+    }
+}
+
+unsafe fn file_url(path: &Path) -> Id {
+    unsafe { msg!(class(c"NSURL"), c"fileURLWithPath:", nsstring(&path.to_string_lossy())) }
+}
+
+/// The file's type (a `UTType`), or nil.
+unsafe fn content_type(url: Id) -> Id {
+    unsafe {
+        let mut kind: Id = NIL;
+        let found: Bool = msg!(url, c"getResourceValue:forKey:error:", &mut kind as *mut Id, NSURLContentTypeKey, NIL);
+        if found == NO { NIL } else { kind }
+    }
+}
+
+/// The bundle id of the app at `app` (a file URL), or "".
+unsafe fn bundle_id(app: Id) -> String {
+    unsafe {
+        let bundle: Id = msg!(class(c"NSBundle"), c"bundleWithURL:", app);
+        if bundle.is_null() { String::new() } else { string_from_ns(msg!(bundle, c"bundleIdentifier")) }
+    }
+}
+
 /// Whether the file at `path` has a type conforming to `identifier`.
 fn conforms(path: &Path, identifier: &str) -> bool {
     // SAFETY: Foundation and UniformTypeIdentifiers calls with documented signatures.
     unsafe {
-        let url: Id = msg!(class(c"NSURL"), c"fileURLWithPath:", nsstring(&path.to_string_lossy()));
-        let mut kind: Id = NIL;
-        let found: Bool = msg!(url, c"getResourceValue:forKey:error:", &mut kind as *mut Id, NSURLContentTypeKey, NIL);
+        let kind = content_type(file_url(path));
         let wanted: Id = msg!(class(c"UTType"), c"typeWithIdentifier:", nsstring(identifier));
-        if found == NO || kind.is_null() || wanted.is_null() {
+        if kind.is_null() || wanted.is_null() {
             return false;
         }
         let yes: Bool = msg!(kind, c"conformsToType:", wanted);
@@ -143,7 +200,7 @@ unsafe extern "C" {
     static NSURLContentTypeKey: Id;
 }
 
-fn hostname() -> String {
+pub fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: `buf` is writable for its length.
     let ok = unsafe { gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
@@ -215,6 +272,15 @@ mod tests {
             assert!(!safe(&app));
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn files_never_open_in_apps_that_run_them() {
+        assert!(viewer("com.apple.TextEdit"));
+        assert!(viewer("com.microsoft.VSCode"));
+        assert!(!viewer("com.apple.Terminal"));
+        assert!(!viewer("COM.GOOGLECODE.ITERM2"));
+        assert!(!viewer(""));
     }
 
     #[test]

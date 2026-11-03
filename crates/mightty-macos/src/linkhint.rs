@@ -69,26 +69,43 @@ impl LinkHint {
 }
 
 /// What the hint says for a link to `uri`: its host first, so trimming a
-/// long target never hides it, and invisible or direction-changing
-/// characters made visible (`<U+202E>`), so the text can't pass for
-/// another address.
+/// long target never hides it, and anything that could make the text pass
+/// for another address made visible (`<U+202E>`): invisible and
+/// direction-changing characters, and in the host anything not ASCII
+/// (a Cyrillic "а" looks like "a").
 pub fn describe(uri: &str) -> String {
-    let visible = |s: &str| {
+    let visible = |s: &str, ascii: bool| {
         s.chars()
-            .map(|c| if c.is_control() || is_invisible(c) { format!("<U+{:04X}>", c as u32) } else { c.to_string() })
+            .map(|c| {
+                let hide = c.is_control() || is_invisible(c) || (ascii && !c.is_ascii());
+                if hide { format!("<U+{:04X}>", c as u32) } else { c.to_string() }
+            })
             .collect::<String>()
     };
-    let host = uri.split_once("://").map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default());
-    match host.filter(|h| !h.is_empty()) {
-        Some(host) => format!("{}  —  {}", visible(host), visible(uri)),
-        None => visible(uri),
+    match host(uri).filter(|h| !h.is_empty()) {
+        Some(host) => format!("{}  —  {}", visible(host, true), visible(uri, false)),
+        None => visible(uri, false),
     }
 }
 
-/// Format characters that render as nothing or reorder text around them.
+/// The host a URL with an authority goes to: past any `user@` (so
+/// `https://google.com@evil.com` is evil.com), up to the path. A backslash
+/// ends it too, as browsers read one in a web address as a slash.
+fn host(uri: &str) -> Option<&str> {
+    let (_, rest) = uri.split_once("://")?;
+    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or_default();
+    Some(authority.rsplit_once('@').map_or(authority, |(_, host)| host))
+}
+
+/// Format characters and other default-ignorable code points: they render
+/// as nothing or reorder the text around them.
 fn is_invisible(c: char) -> bool {
-    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+    matches!(c, '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}'
+        | '\u{0890}'..='\u{0891}' | '\u{08E2}' | '\u{115F}'..='\u{1160}' | '\u{17B4}'..='\u{17B5}'
+        | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
+        | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFFB}'
+        | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}')
 }
 
 impl Drop for LinkHint {
@@ -112,5 +129,11 @@ mod tests {
         // Right-to-left override could make "evil.com/moc.elgoog" read as google.com.
         assert_eq!(describe("https://evil.com/\u{202E}moc.elgoog"), "evil.com  —  https://evil.com/<U+202E>moc.elgoog");
         assert_eq!(describe("https://a\u{200B}b.com"), "a<U+200B>b.com  —  https://a<U+200B>b.com");
+        // What comes before an @ is a user name, not where the link goes.
+        assert_eq!(describe("https://google.com@evil.com/x"), "evil.com  —  https://google.com@evil.com/x");
+        assert_eq!(describe("https://evil.com\\@google.com/"), "evil.com  —  https://evil.com\\@google.com/");
+        // Look-alike letters, variation selectors and tag characters.
+        assert_eq!(describe("https://\u{0430}pple.com"), "<U+0430>pple.com  —  https://\u{0430}pple.com");
+        assert_eq!(describe("https://x.com/a\u{FE0F}\u{E0041}"), "x.com  —  https://x.com/a<U+FE0F><U+E0041>");
     }
 }

@@ -182,6 +182,8 @@ pub struct Term {
     modes: Modes,
     title: String,
     cwd: Option<String>,
+    /// The host OSC 7 named with `cwd` (empty when it named none).
+    cwd_host: String,
     marks: Vec<Mark>,
     /// Command lines (OSC 633;E) keyed by the line their output starts on.
     commands: Vec<(u64, String)>,
@@ -248,6 +250,7 @@ impl Term {
             modes: Modes::default(),
             title: String::new(),
             cwd: None,
+            cwd_host: String::new(),
             marks: Vec::new(),
             commands: Vec::new(),
             pending_command: None,
@@ -312,6 +315,12 @@ impl Term {
 
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// The machine `cwd` is on, as reported: a shell over ssh reports the
+    /// remote one, whose paths mean nothing here.
+    pub fn cwd_host(&self) -> &str {
+        &self.cwd_host
     }
 
     /// Accept shell-integration marks (OSC 133, 633;E) only when they carry
@@ -1511,7 +1520,10 @@ impl Term {
             [b"0" | b"2", rest @ ..] => {
                 self.title = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
             }
-            [b"7", url, ..] => self.cwd = parse_file_url(url),
+            [b"7", url, ..] => match parse_file_url(url) {
+                Some((host, path)) => (self.cwd_host, self.cwd) = (host, Some(path)),
+                None => (self.cwd_host, self.cwd) = (String::new(), None),
+            },
             [code @ (b"10" | b"11"), b"?"] => {
                 let (r, g, b) = self.colors[usize::from(*code == b"11")];
                 let code = String::from_utf8_lossy(code);
@@ -1776,9 +1788,11 @@ fn unescape_command(raw: &[u8]) -> String {
 }
 
 /// `file://host/path` → `/path`, percent-decoded.
-fn parse_file_url(url: &[u8]) -> Option<String> {
+/// `file://host/path` as (host, decoded path).
+fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
     let rest = url.strip_prefix(b"file://")?;
-    let path = &rest[rest.iter().position(|&c| c == b'/')?..];
+    let (host, path) = rest.split_at(rest.iter().position(|&c| c == b'/')?);
+    let host = String::from_utf8(host.to_vec()).ok()?;
     let mut out = Vec::with_capacity(path.len());
     let mut i = 0;
     while i < path.len() {
@@ -1794,7 +1808,7 @@ fn parse_file_url(url: &[u8]) -> Option<String> {
             }
         }
     }
-    String::from_utf8(out).ok()
+    Some((host, String::from_utf8(out).ok()?))
 }
 
 /// DEC Special Graphics (`ESC ( 0`): line drawing used by many TUIs.
