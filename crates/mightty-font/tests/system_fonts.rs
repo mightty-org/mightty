@@ -1,6 +1,6 @@
 //! Against fonts macOS ships; each test is skipped where its font isn't installed.
 
-use mightty_font::{ColorGlyph, Face, FontData, Segment, draw_color, rasterize};
+use mightty_font::{ColorGlyph, Face, FontData, LIGATURES, Segment, draw_color, rasterize};
 
 fn load(path: &str) -> Option<FontData> {
     FontData::map(path.as_ref()).ok()
@@ -122,14 +122,19 @@ fn variable_fonts() {
 }
 
 /// `data` damaged many ways: cut short anywhere, and with bytes overwritten
-/// (only within `tables`, if any named, to aim at their parsers). Each
-/// copy must be an error or a glyph, never a panic or a hang.
-fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)]) {
+/// `rounds` times (only within `tables`, if any named, to aim at their
+/// parsers). Each copy must be an error or a glyph, never a panic or a hang.
+fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)], rounds: usize) {
     let exercise = |bytes: Vec<u8>| {
         let Ok(mut face) = Face::parse(FontData::from(bytes), 0) else { return };
         face.set_variations(variations);
         let _ = face.postscript_name();
         let _ = face.metrics();
+        for text in ["->", "a != b === c", "e\u{301}\u{302}", "www <!-- -->"] {
+            let chars: Vec<char> = text.chars().collect();
+            let shaped = face.shape(&chars, &LIGATURES);
+            let _ = face.position(&shaped);
+        }
         for c in ['A', 'g', 'é', '@', '─', '\u{10FFFF}'] {
             if let Some(g) = face.glyph(c) {
                 let _ = face.advance(g);
@@ -158,7 +163,7 @@ fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)]) {
         seed ^= seed << 17;
         seed
     };
-    for _ in 0..2000 {
+    for _ in 0..rounds {
         let mut bytes = data.to_vec();
         for _ in 0..8 {
             let (start, len) = ranges[next() as usize % ranges.len()];
@@ -171,13 +176,18 @@ fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)]) {
 #[test]
 fn damaged_files_dont_panic() {
     if let Some(data) = load("/System/Library/Fonts/Monaco.ttf") {
-        fuzz(&data, &[], &[]);
+        fuzz(&data, &[], &[], 2000);
     }
     if let Some(data) = load("/System/Library/Fonts/Supplemental/STIXGeneralBol.otf") {
-        fuzz(&data, &[b"CFF "], &[]);
+        fuzz(&data, &[b"CFF "], &[], 2000);
     }
     if let Some(data) = load("/System/Library/Fonts/SFNSMono.ttf") {
-        fuzz(&data, &[b"fvar", b"gvar", b"HVAR", b"MVAR"], &[(*b"wght", 700.0)]);
+        fuzz(&data, &[b"fvar", b"gvar", b"HVAR", b"MVAR"], &[(*b"wght", 700.0)], 2000);
+    }
+    // Substitution and positioning: a coding font's ligatures and anchors
+    // (fewer rounds: each copy works out its 460 lookups afresh).
+    if let Some(data) = user_font("JetBrainsMono-Regular.ttf") {
+        fuzz(&data, &[b"GSUB", b"GPOS", b"GDEF"], &[], 300);
     }
 }
 
@@ -468,4 +478,76 @@ fn apple_color_emoji() {
             }
         }
     }
+}
+
+/// A font installed for the user, as Homebrew's font casks put them.
+fn user_font(file: &str) -> Option<FontData> {
+    let home = std::env::var_os("HOME")?;
+    FontData::map(&std::path::Path::new(&home).join("Library/Fonts").join(file)).ok()
+}
+
+/// Coding fonts' ligatures are contextual alternates: a glyph a character,
+/// changed where they make a ligature, as the fonts' own GSUB says.
+#[test]
+fn ligature_fonts() {
+    for file in ["JetBrainsMono-Regular.ttf", "FiraCode-Regular.ttf"] {
+        let Some(data) = user_font(file) else { continue };
+        let face = Face::parse(data, 0).unwrap();
+        let shape = |text: &str| {
+            let chars: Vec<char> = text.chars().collect();
+            let nominal: Vec<u16> = chars.iter().map(|&c| face.glyph(c).unwrap()).collect();
+            let shaped = face.shape(&chars, &LIGATURES);
+            assert_eq!(shaped.iter().map(|s| s.cluster as usize).collect::<Vec<_>>(), (0..chars.len()).collect::<Vec<_>>(), "{file} {text}");
+            (shaped.iter().map(|s| s.glyph).collect::<Vec<_>>(), nominal)
+        };
+        for text in ["->", "!=", "===", "<=>"] {
+            let (shaped, nominal) = shape(text);
+            assert!(shaped.iter().zip(&nominal).all(|(a, b)| a != b), "{file} {text}: {shaped:?} {nominal:?}");
+        }
+        for text in ["plain", "a b", "- >"] {
+            let (shaped, nominal) = shape(text);
+            assert_eq!(shaped, nominal, "{file} {text}");
+        }
+        // Without the features, nothing changes.
+        let chars: Vec<char> = "->".chars().collect();
+        assert_eq!(face.shape(&chars, &[]).iter().map(|s| s.glyph).collect::<Vec<_>>(), chars.iter().map(|&c| face.glyph(c).unwrap()).collect::<Vec<_>>());
+        // An accent sits above its letter, by the font's anchors.
+        let chars: Vec<char> = "e\u{301}".chars().collect();
+        let (placed, width) = face.position(&face.shape(&chars, &LIGATURES));
+        assert_eq!(width, face.advance(face.glyph('e').unwrap()));
+        let (lo, hi) = face.bounds(placed[1].glyph).unwrap();
+        let centre = placed[1].x + (lo.x + hi.x) / 2.0;
+        assert!(centre > 0.0 && centre < width && placed[1].y + lo.y > 0.0, "{placed:?}");
+    }
+}
+
+/// A GSUB whose one lookup (chained context, format 3, on glyph 0) calls
+/// itself 64 times: nested as deep as allowed, that's 64⁴ calls a glyph.
+fn recursive_gsub() -> Vec<u8> {
+    let be = |v: u16| v.to_be_bytes();
+    // Header (10), script list (8) + script (4) + lang sys (8) at 10,
+    // feature list (8) + feature (6) at 30, lookup list at 44.
+    let mut g = [be(1), be(0), be(10), be(30), be(44)].concat();
+    g.extend([be(1), *b"DF", *b"LT", be(8), be(4), be(0), be(0), be(0xFFFF), be(1), be(0)].concat());
+    g.extend([be(1), *b"li", *b"ga", be(8), be(0), be(1), be(0)].concat());
+    // Lookup list (4) at 44, lookup (8) at 48, subtable at 56.
+    g.extend([be(1), be(4), be(6), be(0), be(1), be(8)].concat());
+    let records = 64u16;
+    let coverage = 2 + 2 + 2 + 2 + 2 + 2 + 4 * records;
+    g.extend([be(3), be(0), be(1), be(coverage), be(0), be(records)].concat());
+    for _ in 0..records {
+        g.extend([be(0), be(0)].concat());
+    }
+    g.extend([be(1), be(1), be(0)].concat());
+    g
+}
+
+#[test]
+fn substitution_bombs_are_refused() {
+    let face = Face::parse(FontData::from(font_with(&[], None, vec![(b"GSUB", recursive_gsub())])), 0).unwrap();
+    let text = vec!['x'; 200];
+    let started = std::time::Instant::now();
+    let shaped = face.shape(&text, &LIGATURES);
+    assert_eq!(shaped.len(), 200);
+    assert!(started.elapsed().as_secs() < 1, "{:?}", started.elapsed());
 }

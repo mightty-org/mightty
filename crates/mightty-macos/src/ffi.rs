@@ -229,6 +229,7 @@ unsafe extern "C" {
     ) -> CFStringRef;
     pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     pub fn CFRelease(cf: CFTypeRef);
+    pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
     pub fn CFDictionaryCreate(
         alloc: *const c_void,
         keys: *const CFTypeRef,
@@ -241,6 +242,9 @@ unsafe extern "C" {
     pub fn CFDictionaryGetCount(dict: CFTypeRef) -> isize;
     pub fn CFDictionaryGetKeysAndValues(dict: CFTypeRef, keys: *mut CFTypeRef, values: *mut CFTypeRef);
     pub fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
+    pub fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
     pub static kCFTypeDictionaryKeyCallBacks: [u8; 0];
     pub static kCFTypeDictionaryValueCallBacks: [u8; 0];
     pub static kCFBooleanTrue: CFTypeRef;
@@ -283,6 +287,11 @@ unsafe extern "C" {
     pub fn CTLineCreateWithAttributedString(string: CFTypeRef) -> CFTypeRef;
     pub fn CTLineGetTypographicBounds(line: CFTypeRef, ascent: *mut f64, descent: *mut f64, leading: *mut f64) -> f64;
     pub fn CTLineDraw(line: CFTypeRef, ctx: CGContextRef);
+    pub fn CTLineGetGlyphRuns(line: CFTypeRef) -> CFTypeRef;
+    pub fn CTRunGetGlyphCount(run: CFTypeRef) -> isize;
+    pub fn CTRunGetGlyphs(run: CFTypeRef, range: CFRange, glyphs: *mut u16);
+    pub fn CTRunGetStringIndices(run: CFTypeRef, range: CFRange, indices: *mut isize);
+    pub fn CTRunGetAttributes(run: CFTypeRef) -> CFTypeRef;
     pub static kCTFontAttributeName: CFStringRef;
     pub static kCTForegroundColorFromContextAttributeName: CFStringRef;
 }

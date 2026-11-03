@@ -7,13 +7,14 @@ use std::env;
 use std::ffi::c_void;
 use std::mem;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
 use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
 
 use crate::config::FontBackend;
 use crate::ffi::*;
-use crate::font::{Font, RasterGlyph, Style};
+use crate::font::{Font, Ligature, RasterGlyph, Style};
 use crate::snapshot;
 
 /// The glyph atlas starts small and doubles when full, up to the maximum;
@@ -119,11 +120,28 @@ pub enum HoveredLink {
     Range(Selection),
 }
 
-/// What a glyph draws: a character, or a grapheme cluster of several.
+/// What a glyph draws: a character, a grapheme cluster of several, or a
+/// ligature's glyphs (each with its cell) across this many cells.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum GlyphKey {
     Char(char),
     Cluster(Box<str>),
+    Ligature(Box<[(u16, u16)]>, u16),
+}
+
+/// A run of text and its style, as shaped.
+type RunKey = (Box<[char]>, Style);
+
+/// Runs of text shaped, kept until there are this many.
+const SHAPED_MAX: usize = 4096;
+
+/// A cell's part in a ligature.
+#[derive(Clone, Copy)]
+enum LigatureCell {
+    /// The first cell: draws ligature `n` of the row's.
+    Start(usize),
+    /// A later cell, drawn by the first.
+    Covered,
 }
 
 /// What a frame needs from the terminal, copied out while it is locked so
@@ -254,6 +272,10 @@ pub struct Renderer {
     /// Set when the atlas was recycled mid-frame; the frame is rebuilt.
     atlas_reset: bool,
     font: Font,
+    /// `font-ligatures`.
+    ligatures: bool,
+    /// Ligatures found in runs of text, by the text and its style.
+    shaped: HashMap<RunKey, Rc<[Ligature]>>,
     font_name: String,
     font_size: f64,
     backend: FontBackend,
@@ -272,7 +294,8 @@ pub struct Renderer {
 impl Renderer {
     /// `layer` must be a `CAMetalLayer`. `font_size` is in points.
     /// Without `vsync`, frames show as soon as they're ready, possibly torn.
-    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme, vsync: bool, backend: FontBackend) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme, vsync: bool, backend: FontBackend, ligatures: bool) -> Self {
         // SAFETY: Metal calls with the documented signatures.
         unsafe {
             let device = MTLCreateSystemDefaultDevice();
@@ -299,6 +322,8 @@ impl Renderer {
                 glyphs: HashMap::new(),
                 atlas_reset: false,
                 font: Font::new(font_name, font_size * scale, backend),
+                ligatures,
+                shaped: HashMap::new(),
                 backend,
                 font_name: font_name.to_owned(),
                 font_size,
@@ -468,6 +493,7 @@ impl Renderer {
         let baseline = self.font.baseline as f32;
 
         let (cols, rows) = (snapshot.cols, snapshot.rows);
+        let mut ligature_cells = Vec::new();
 
         let mut back = mem::take(&mut self.spare);
         let mut front = mem::take(&mut self.front);
@@ -476,6 +502,7 @@ impl Renderer {
         for r in 0..rows {
             let y = pad + r as f32 * ch;
             let line = snapshot.first_line + r as u64;
+            let ligatures = if self.ligatures { self.row_ligatures(snapshot, r, &mut ligature_cells) } else { Rc::from([]) };
 
             for c in 0..cols {
                 let cell = &snapshot.cells[r * cols + c];
@@ -550,6 +577,19 @@ impl Renderer {
                     front.push(Quad::solid(x, y + (ch / 2.0).round(), w, thickness, fg));
                 }
 
+                match ligature_cells.get(c).copied().flatten() {
+                    Some(LigatureCell::Covered) => continue,
+                    Some(LigatureCell::Start(n)) => {
+                        let lig: &Ligature = &ligatures[n];
+                        let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
+                        let key = GlyphKey::Ligature(lig.glyphs.clone(), lig.cells as u16);
+                        if let Some(g) = self.glyph(key, style, lig.cells as u32) {
+                            front.push(Quad { pos: [x, y], size: g.size, uv: g.uv, uv_size: g.size, color: fg, mode: MASK, _pad: [0; 3] });
+                        }
+                        continue;
+                    }
+                    None => {}
+                }
                 let blank = cell.c == ' '
                     || cell.flags.contains(Flags::HIDDEN)
                     || cell.flags.contains(Flags::WIDE_SPACER)
@@ -580,11 +620,81 @@ impl Renderer {
         back
     }
 
+    /// Row `r`'s ligatures, and in `cells` each cell's part in one. Text is
+    /// shaped in runs of cells that look alike (style and colours), apart
+    /// from the cursor's cell, wide characters, clusters and box drawing,
+    /// so a ligature never spans what's drawn differently.
+    fn row_ligatures(&mut self, snapshot: &Snapshot, r: usize, cells: &mut Vec<Option<LigatureCell>>) -> Rc<[Ligature]> {
+        let cols = snapshot.cols;
+        cells.clear();
+        cells.resize(cols, None);
+        let row = &snapshot.cells[r * cols..(r + 1) * cols];
+        let cursor = snapshot.cursor.filter(|cur| cur.0 == r).map(|cur| cur.1);
+        let apart = Flags::HIDDEN | Flags::WIDE | Flags::WIDE_SPACER | Flags::WRAP_SPACER;
+        let shapeable = |c: usize| {
+            let cell = &row[c];
+            cell.flags.bits() & apart.bits() == 0 && Some(c) != cursor && !snapshot.clusters.contains_key(&(r * cols + c)) && !(0x2500..=0x259F).contains(&(cell.c as u32))
+        };
+        let drawn = (Flags::BOLD | Flags::ITALIC | Flags::INVERSE | Flags::DIM).bits();
+        let looks = |c: usize| {
+            let cell = &row[c];
+            (cell.fg, cell.bg, cell.flags.bits() & drawn)
+        };
+        let mut all = Vec::new();
+        let mut c = 0;
+        while c < cols {
+            if !shapeable(c) {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            let look = looks(c);
+            c += 1;
+            while c < cols && shapeable(c) && looks(c) == look {
+                c += 1;
+            }
+            // Spaces either side shape the same as none; a lone character has no ligature.
+            let text: Box<[char]> = row[start..c].iter().map(|cell| cell.c).collect();
+            if text.iter().filter(|&&ch| ch != ' ').count() < 2 {
+                continue;
+            }
+            let style = Style::new(look.2 & Flags::BOLD.bits() != 0, look.2 & Flags::ITALIC.bits() != 0);
+            let found = match self.shaped.get(&(text.clone(), style)) {
+                Some(found) => found.clone(),
+                None => {
+                    if self.shaped.len() >= SHAPED_MAX {
+                        self.shaped.clear();
+                    }
+                    let found: Rc<[Ligature]> = self.font.ligatures(&text, style).into();
+                    self.shaped.insert((text, style), found.clone());
+                    found
+                }
+            };
+            for lig in found.iter() {
+                let first = start + lig.start;
+                cells[first] = Some(LigatureCell::Start(all.len()));
+                for covered in &mut cells[first + 1..first + lig.cells] {
+                    *covered = Some(LigatureCell::Covered);
+                }
+                all.push(Ligature { start: first, ..lig.clone() });
+            }
+        }
+        all.into()
+    }
+
     fn glyph(&mut self, key: GlyphKey, style: Style, cells: u32) -> Option<Glyph> {
         if let Some(&glyph) = self.glyphs.get(&(key.clone(), style)) {
             return glyph;
         }
         let c = match &key {
+            GlyphKey::Ligature(glyphs, _) => {
+                let glyph = match self.font.rasterize_ligature(glyphs, style, cells) {
+                    Some(raster) => Some(self.upload(&raster)?),
+                    None => None,
+                };
+                self.glyphs.insert((key, style), glyph);
+                return glyph;
+            }
             GlyphKey::Char(c) => *c,
             GlyphKey::Cluster(text) => {
                 // An atlas overflow returns early, uncached, as below.

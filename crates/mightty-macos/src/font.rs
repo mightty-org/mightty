@@ -35,6 +35,18 @@ pub struct RasterGlyph {
     pub color: bool,
 }
 
+/// Cells a font draws as one: a ligature, or glyphs it changed by
+/// context (coding fonts draw `->` as a spacer and an arrow reaching back
+/// over it), so they're drawn together in one tile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ligature {
+    /// The first cell, counted in the text shaped.
+    pub start: usize,
+    pub cells: usize,
+    /// Glyphs and the cell, counted from `start`, each is drawn in.
+    pub glyphs: Box<[(u16, u16)]>,
+}
+
 pub struct Font {
     /// Indexed by `Style`: regular, bold, italic, bold italic.
     variants: [CTFontRef; 4],
@@ -198,6 +210,11 @@ impl Font {
     /// joined emoji, a flag or a letter with combining marks) through
     /// CoreText's line layout, which shapes it and picks fallback fonts.
     pub fn rasterize_cluster(&self, text: &str, style: Style, cells: u32) -> Option<RasterGlyph> {
+        if self.backend == FontBackend::Mightty
+            && let Some(raster) = self.draw_cluster_own(text, style, cells)
+        {
+            return Some(raster);
+        }
         // SAFETY: CoreFoundation/CoreText calls with valid arguments; every
         // object created here is released before returning.
         unsafe {
@@ -231,6 +248,226 @@ impl Font {
             CFRelease(line);
             // Masks are drawn in white, so any tint means colour glyphs (emoji).
             raster.map(|r| RasterGlyph { color: r.pixels.chunks_exact(4).any(|p| p[0] != p[1] || p[1] != p[2]), ..r })
+        }
+    }
+
+    /// Where `text`, a character a cell in `style`, has ligatures: runs of
+    /// cells whose glyphs the font's substitutions changed.
+    pub fn ligatures(&self, text: &[char], style: Style) -> Vec<Ligature> {
+        let own = self.own[style.0 as usize].as_ref();
+        let (shaped, nominal): (Vec<(u16, usize)>, Vec<u16>) = match own {
+            Some(face) => (
+                face.shape(text, &mightty_font::LIGATURES).iter().map(|s| (s.glyph, s.cluster as usize)).collect(),
+                text.iter().map(|&c| face.glyph(c).unwrap_or(0)).collect(),
+            ),
+            // SAFETY: a live CTFont of ours.
+            None => unsafe { self.shape_coretext(text, self.variants[style.0 as usize]) },
+        };
+        let mut per_char: Vec<Vec<u16>> = vec![Vec::new(); text.len()];
+        for &(glyph, i) in &shaped {
+            if let Some(list) = per_char.get_mut(i) {
+                list.push(glyph);
+            }
+        }
+        // Characters the font lacks (glyph 0) are left to fallback fonts.
+        let changed: Vec<bool> = (0..text.len()).map(|i| nominal[i] != 0 && !per_char[i].contains(&0) && per_char[i] != [nominal[i]]).collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < text.len() {
+            if !changed[i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < text.len() && changed[i] {
+                i += 1;
+            }
+            let glyphs = (start..i).flat_map(|c| per_char[c].iter().map(move |&g| (g, (c - start) as u16))).collect();
+            out.push(Ligature { start, cells: i - start, glyphs });
+        }
+        out
+    }
+
+    /// `text` shaped by CoreText in `font`: each glyph and the character
+    /// it starts at. Glyphs of fallback fonts come back as glyph 0, and the
+    /// glyphs CoreText would draw for each character alone as well.
+    unsafe fn shape_coretext(&self, text: &[char], font: CTFontRef) -> (Vec<(u16, usize)>, Vec<u16>) {
+        let string: String = text.iter().collect();
+        // UTF-16 offsets to character indices.
+        let mut char_at = Vec::new();
+        for (i, c) in text.iter().enumerate() {
+            char_at.extend(std::iter::repeat_n(i, c.len_utf16()));
+        }
+        let mut shaped = Vec::new();
+        let mut nominal = Vec::with_capacity(text.len());
+        // SAFETY: CoreFoundation/CoreText calls with valid arguments; every
+        // object created here is released before returning, runs and their
+        // attributes belong to the line.
+        unsafe {
+            for c in text {
+                let mut units = [0u16; 2];
+                let units = c.encode_utf16(&mut units);
+                let mut glyphs = [0u16; 2];
+                let found = CTFontGetGlyphsForCharacters(font, units.as_ptr(), glyphs.as_mut_ptr(), units.len() as isize);
+                nominal.push(if found { glyphs[0] } else { 0 });
+            }
+            let keys = [kCTFontAttributeName];
+            let values = [font];
+            let attributes = CFDictionaryCreate(
+                ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
+                (&raw const kCFTypeDictionaryValueCallBacks).cast(),
+            );
+            let cf = cfstring(&string);
+            let attributed = CFAttributedStringCreate(ptr::null(), cf, attributes);
+            CFRelease(cf);
+            CFRelease(attributes);
+            if attributed.is_null() {
+                return (shaped, nominal);
+            }
+            let line = CTLineCreateWithAttributedString(attributed);
+            CFRelease(attributed);
+            if line.is_null() {
+                return (shaped, nominal);
+            }
+            let runs = CTLineGetGlyphRuns(line);
+            for r in 0..CFArrayGetCount(runs) {
+                let run = CFArrayGetValueAtIndex(runs, r);
+                let n = CTRunGetGlyphCount(run).max(0);
+                let mut glyphs = vec![0u16; n as usize];
+                let mut indices = vec![0isize; n as usize];
+                CTRunGetGlyphs(run, CFRange { location: 0, length: n }, glyphs.as_mut_ptr());
+                CTRunGetStringIndices(run, CFRange { location: 0, length: n }, indices.as_mut_ptr());
+                let run_font = CFDictionaryGetValue(CTRunGetAttributes(run), kCTFontAttributeName);
+                let ours = !run_font.is_null() && CFEqual(run_font, font);
+                for (g, i) in glyphs.into_iter().zip(indices) {
+                    if let Some(&c) = usize::try_from(i).ok().and_then(|i| char_at.get(i)) {
+                        shaped.push((if ours { g } else { 0 }, c));
+                    }
+                }
+            }
+            CFRelease(line);
+        }
+        (shaped, nominal)
+    }
+
+    /// A ligature's glyphs drawn together into a tile `cells` wide, each
+    /// placed in its cell as `rasterize` places a lone glyph.
+    pub fn rasterize_ligature(&self, glyphs: &[(u16, u16)], style: Style, cells: u32) -> Option<RasterGlyph> {
+        let (cw, width) = (self.cell_width as f32, self.cell_width * cells);
+        if let Some(face) = &self.own[style.0 as usize] {
+            // One outline, so pieces meeting at a cell edge join without a seam.
+            let em = face.metrics().units_per_em as f32;
+            let scale = self.size as f32 / em;
+            let synthetic = self.synthetic[style.0 as usize];
+            let mut outline = Vec::new();
+            for &(glyph, cell) in glyphs {
+                let x = cell as f32 * cw + ((cw - face.advance(glyph) * scale) / 2.0).max(0.0).round();
+                let mut part = face.outline(glyph).ok()?;
+                if synthetic & Style::ITALIC != 0 {
+                    mightty_font::oblique(&mut part, OBLIQUE);
+                }
+                if synthetic & Style::BOLD != 0 {
+                    mightty_font::embolden(&mut part, EMBOLDEN * em);
+                }
+                mightty_font::translate(&mut part, x / scale, 0.0);
+                outline.extend(part);
+            }
+            let coverage = mightty_font::rasterize(&outline, scale, 0.0, self.baseline as f32, width as usize, self.cell_height as usize);
+            let pixels = coverage.iter().flat_map(|&c| [c; 4]).collect();
+            return Some(RasterGlyph { pixels, width, height: self.cell_height, color: false });
+        }
+        let font = self.variants[style.0 as usize];
+        let ids: Vec<u16> = glyphs.iter().map(|g| g.0).collect();
+        let mut advances = vec![CGSize::default(); ids.len()];
+        // SAFETY: buffers sized for the glyphs; the font is ours.
+        unsafe { CTFontGetAdvancesForGlyphs(font, 0, ids.as_ptr(), advances.as_mut_ptr(), ids.len() as isize) };
+        let positions: Vec<CGPoint> = glyphs
+            .iter()
+            .zip(&advances)
+            .map(|(&(_, cell), a)| CGPoint { x: cell as f64 * cw as f64 + ((cw as f64 - a.width) / 2.0).max(0.0).round(), y: 0.0 })
+            .collect();
+        // SAFETY: as `rasterize`; positions are relative to the tile's origin.
+        unsafe {
+            self.draw(cells, width as f64, style, |ctx, origin| {
+                let placed: Vec<CGPoint> = positions.iter().map(|p| CGPoint { x: origin.x + p.x, y: origin.y }).collect();
+                CTFontDrawGlyphs(font, ids.as_ptr(), placed.as_ptr(), ids.len(), ctx);
+            })
+        }
+    }
+
+    /// A cluster shaped, placed and drawn by us: in our face for `style` if
+    /// it has every character, else in the fallback font CoreText picks for
+    /// the cluster. `None` leaves it to CoreText: fonts composing with
+    /// Apple's `morx` (Menlo, Apple Color Emoji), and sequences the font
+    /// doesn't join into one colour glyph.
+    fn draw_cluster_own(&self, text: &str, style: Style, cells: u32) -> Option<RasterGlyph> {
+        let chars: Vec<char> = text.chars().collect();
+        let draw = |face: &Face| -> Option<RasterGlyph> {
+            if face.uses_morx() {
+                return None;
+            }
+            // Joiners and variation selectors a font doesn't map only steer
+            // substitution; any other character it lacks is another font's.
+            let invisible = |c: char| matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}');
+            let shaped: Vec<_> = face.shape(&chars, &mightty_font::LIGATURES).into_iter().filter(|s| s.glyph != 0 || !invisible(chars[s.cluster as usize])).collect();
+            if shaped.is_empty() || shaped.iter().any(|s| s.glyph == 0) {
+                return None;
+            }
+            let (width, height) = (self.cell_width * cells, self.cell_height);
+            let em = face.metrics().units_per_em as f32;
+            let scale = self.size as f32 / em;
+            let (placed, advance) = face.position(&shaped);
+            let x = ((width as f32 - advance * scale) / 2.0).max(0.0).round();
+            let baseline = self.baseline as f32;
+            if let [one] = placed[..]
+                && let Some(mut pixels) = mightty_font::draw_color(face, one.glyph, self.size as f32, x, baseline, width as usize, height as usize)
+            {
+                for p in pixels.chunks_exact_mut(4) {
+                    p.swap(0, 2);
+                }
+                return Some(RasterGlyph { pixels, width, height, color: true });
+            }
+            // Several colour glyphs: a sequence the font didn't join.
+            if placed.iter().any(|p| face.color_glyph(p.glyph, self.size as f32).is_some()) {
+                return None;
+            }
+            let synthetic = self.synthetic[style.0 as usize];
+            let mut outline = Vec::new();
+            for p in &placed {
+                let mut part = face.outline(p.glyph).ok()?;
+                if synthetic & Style::ITALIC != 0 {
+                    mightty_font::oblique(&mut part, OBLIQUE);
+                }
+                if synthetic & Style::BOLD != 0 {
+                    mightty_font::embolden(&mut part, EMBOLDEN * em);
+                }
+                mightty_font::translate(&mut part, p.x, p.y);
+                outline.extend(part);
+            }
+            let coverage = mightty_font::rasterize(&outline, scale, x, baseline, width as usize, height as usize);
+            Some(RasterGlyph { pixels: coverage.iter().flat_map(|&c| [c; 4]).collect(), width, height, color: false })
+        };
+        if let Some(face) = &self.own[style.0 as usize]
+            && chars.iter().all(|&c| face.glyph(c).is_some() || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}'))
+        {
+            return draw(face);
+        }
+        // SAFETY: CoreText calls with valid arguments; the fallback font is released.
+        unsafe {
+            let cf = cfstring(text);
+            let length = text.encode_utf16().count() as isize;
+            let fallback = CTFontCreateForString(self.variants[style.0 as usize], cf, CFRange { location: 0, length });
+            CFRelease(cf);
+            if fallback.is_null() {
+                return None;
+            }
+            let raster = self.fallback_face(fallback, draw);
+            CFRelease(fallback);
+            raster
         }
     }
 
@@ -519,6 +756,74 @@ mod tests {
                 let diff: u64 = a.pixels.iter().zip(&b.pixels).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
                 let relative = diff as f64 / total as f64;
                 assert!(relative < 0.08, "{size} {c}: differs by {:.1}%", relative * 100.0);
+            }
+        }
+    }
+
+    /// Coding fonts' ligatures (contextual alternates): shaped by our GSUB
+    /// as by CoreText, and drawn alike. Skipped where the fonts aren't installed.
+    #[test]
+    fn ligatures_match_coretext() {
+        let texts = ["->", "a != b", "===", "<=>", "www", "/* x */", "|>", "::", "0x1F", "<!--", "a->b->c", "=>>", "fi", "plain"];
+        for name in ["JetBrainsMono-Regular", "FiraCode-Regular"] {
+            let theirs = Font::new(name, 28.0, FontBackend::CoreText);
+            // SAFETY: a live CTFont; the copied name is released.
+            let found = unsafe {
+                let ps = CTFontCopyPostScriptName(theirs.variants[0]);
+                let found = string_from_ns(ps as Id);
+                CFRelease(ps);
+                found
+            };
+            if found != name {
+                eprintln!("{name} isn't installed; skipped");
+                continue;
+            }
+            let ours = Font::new(name, 28.0, FontBackend::Mightty);
+            for style in STYLES {
+                for text in texts {
+                    let chars: Vec<char> = text.chars().collect();
+                    let (a, b) = (theirs.ligatures(&chars, style), ours.ligatures(&chars, style));
+                    assert_eq!(a, b, "{name} {style:?} {text}");
+                    for lig in &a {
+                        let (x, y) = (theirs.rasterize_ligature(&lig.glyphs, style, lig.cells as u32).unwrap(), ours.rasterize_ligature(&lig.glyphs, style, lig.cells as u32).unwrap());
+                        let total: u64 = x.pixels.iter().step_by(4).map(|&p| p as u64).sum();
+                        let diff: u64 = x.pixels.iter().zip(&y.pixels).step_by(4).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
+                        let limit = if ours.synthetic[style.0 as usize] & Style::BOLD != 0 { 0.2 } else { CLOSE.worst };
+                        assert!((diff as f64) < total as f64 * limit, "{name} {style:?} {text}: differs by {:.1}%", diff as f64 / total as f64 * 100.0);
+                    }
+                }
+            }
+            // An arrow: two cells drawn as one.
+            let arrow = ours.ligatures(&['-', '>'], Style::default());
+            assert_eq!((arrow.len(), arrow[0].start, arrow[0].cells), (1, 0, 2));
+            assert!(ours.ligatures(&"plain".chars().collect::<Vec<_>>(), Style::default()).is_empty());
+        }
+        // A font without them: none.
+        let menlo = Font::new("Menlo", 28.0, FontBackend::Mightty);
+        assert!(menlo.ligatures(&['-', '>', '!', '='], Style::default()).is_empty());
+    }
+
+    /// Clusters (a letter and its accents) shaped and placed by us in
+    /// OpenType fonts, by their anchors: drawn as CoreText draws them, give
+    /// or take its centring them a pixel over for the accents' widths.
+    /// Fonts composing with Apple's `morx` are left to CoreText.
+    #[test]
+    fn clusters_match_coretext() {
+        let texts = ["e\u{301}", "a\u{308}", "n\u{303}", "e\u{301}\u{302}", "A\u{30A}", "x\u{301}"];
+        for name in ["JetBrainsMono-Regular", "FiraCode-Regular", "Menlo"] {
+            let theirs = Font::new(name, 28.0, FontBackend::CoreText);
+            let ours = Font::new(name, 28.0, FontBackend::Mightty);
+            if ours.own[0].as_ref().and_then(|f| f.postscript_name()).as_deref() != Some(name) {
+                eprintln!("{name} isn't installed; skipped");
+                continue;
+            }
+            let morx = ours.own[0].as_ref().is_some_and(|f| f.uses_morx());
+            for text in texts {
+                assert_eq!(ours.draw_cluster_own(text, Style::default(), 1).is_some(), !morx, "{name} {text:?}");
+                let (a, b) = (theirs.rasterize_cluster(text, Style::default(), 1).unwrap(), ours.rasterize_cluster(text, Style::default(), 1).unwrap());
+                let total: u64 = a.pixels.iter().step_by(4).map(|&p| p as u64).sum();
+                let diff: u64 = a.pixels.iter().zip(&b.pixels).step_by(4).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
+                assert!((diff as f64) < total as f64 * 0.12, "{name} {text:?}: differs by {:.1}%", diff as f64 / total as f64 * 100.0);
             }
         }
     }

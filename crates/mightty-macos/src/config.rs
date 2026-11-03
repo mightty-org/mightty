@@ -36,6 +36,8 @@ pub struct Config {
     pub confirm_close: ConfirmClose,
     pub save_state: SaveState,
     pub font_backend: FontBackend,
+    /// Draw the font's ligatures and contextual alternates (`->` as an arrow).
+    pub ligatures: bool,
 }
 
 /// `font-backend`: who reads fonts and draws glyphs.
@@ -112,6 +114,7 @@ impl Default for Config {
             confirm_close: ConfirmClose::Running,
             save_state: SaveState::Default,
             font_backend: FontBackend::CoreText,
+            ligatures: true,
         }
     }
 }
@@ -152,6 +155,17 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.font_size.to_string()),
+    },
+    Setting {
+        name: "font-ligatures",
+        value: "BOOL",
+        help: "draw the font's ligatures, such as -> and != as arrows and signs, in fonts that have them",
+        color: false,
+        set: |c, v| {
+            c.ligatures = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.ligatures.to_string()),
     },
     Setting {
         name: "window-width",

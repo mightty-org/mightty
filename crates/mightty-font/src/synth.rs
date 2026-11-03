@@ -10,6 +10,16 @@ pub const OBLIQUE: f32 = 0.2126;
 /// em: strokes thicken by twice this.
 pub const EMBOLDEN: f32 = 1.0 / 48.0;
 
+/// Moves `outline` by (`dx`, `dy`).
+pub fn translate(outline: &mut [Segment], dx: f32, dy: f32) {
+    for segment in outline {
+        for p in points(segment) {
+            p.x += dx;
+            p.y += dy;
+        }
+    }
+}
+
 /// Slants `outline` right by `shear` (x moves by `shear` × y).
 pub fn oblique(outline: &mut [Segment], shear: f32) {
     for segment in outline {

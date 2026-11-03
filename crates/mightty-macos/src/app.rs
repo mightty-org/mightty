@@ -523,7 +523,7 @@ impl App {
     fn new_renderer(&self, scale: f64) -> Renderer {
         // SAFETY: main thread; documented signatures.
         let layer: Id = unsafe { msg!(msg!(class(c"CAMetalLayer"), c"layer"), c"retain") };
-        Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone(), self.config.vsync, self.config.font_backend)
+        Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone(), self.config.vsync, self.config.font_backend, self.config.ligatures)
     }
 
     /// Adds a view for `pane` to `window`, at `frame` of its content view

@@ -4,6 +4,7 @@
 //! every read is bounds-checked and a bad table is an error, not a panic.
 
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use crate::cff::Cff;
 use crate::color;
@@ -104,6 +105,14 @@ pub struct Face {
     /// The position set, normalized, one per axis; empty at the defaults.
     coords: Vec<f32>,
     color: color::Tables,
+    /// Substitution, positioning and glyph class tables.
+    gsub: Option<usize>,
+    gpos: Option<usize>,
+    gdef: Option<usize>,
+    /// Apple's own substitution table (AAT), which only CoreText reads.
+    morx: bool,
+    /// Worked out from GSUB the first time text is shaped, then shared.
+    starts: Arc<OnceLock<crate::shape::LookupStarts>>,
 }
 
 /// Where glyph outlines come from.
@@ -213,11 +222,34 @@ impl Face {
         let (avar, gvar, hvar, mvar) = (offset(b"avar"), offset(b"gvar"), offset(b"HVAR"), offset(b"MVAR"));
         let axes = offset(b"fvar").and_then(|at| var::axes(b, at)).unwrap_or_default();
         let color = color::Tables { sbix: table(b"sbix"), cblc: table(b"CBLC"), cbdt: table(b"CBDT"), colr: table(b"COLR"), cpal: table(b"CPAL") };
-        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), color, data })
+        let (gsub, gpos, gdef, morx) = (offset(b"GSUB"), offset(b"GPOS"), offset(b"GDEF"), table(b"morx").is_some());
+        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), color, gsub, gpos, gdef, morx, starts: Arc::default(), data })
     }
 
     pub(crate) fn bytes(&self) -> Bytes<'_> {
         Bytes(&self.data)
+    }
+
+    pub(crate) fn gsub_table(&self) -> Option<usize> {
+        self.gsub
+    }
+
+    pub(crate) fn lookup_starts(&self, build: impl FnOnce() -> crate::shape::LookupStarts) -> &crate::shape::LookupStarts {
+        self.starts.get_or_init(build)
+    }
+
+    pub(crate) fn gpos_table(&self) -> Option<usize> {
+        self.gpos
+    }
+
+    /// Whether the face composes characters with Apple's `morx` rather
+    /// than OpenType's GSUB: its clusters are only right through CoreText.
+    pub fn uses_morx(&self) -> bool {
+        self.morx && self.gsub.is_none()
+    }
+
+    pub(crate) fn gdef_table(&self) -> Option<usize> {
+        self.gdef
     }
 
     pub(crate) fn color_tables(&self) -> color::Tables {
