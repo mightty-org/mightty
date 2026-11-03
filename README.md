@@ -149,13 +149,19 @@ needs a permission, add a notification hook to `~/.claude/settings.json`:
 { "hooks": { "Notification": [{ "hooks": [{ "type": "command", "command": "mightty ctl notify 'Claude needs you'" }] }] } }
 ```
 
-**Shell integration** (zsh) loads automatically in every pane, with no
-dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
+**Shell integration** (zsh, bash 3.2 and later, fish 3.0 and later) loads
+automatically in every pane, with no dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
 OSC 633;E, OSC 7). That's what lets `run`, `commands` and `run_command`
 return exact output and exit codes. Marks carry a random per-shell nonce
 that child processes never see, and mightty ignores marks without it, so a
-program's output can't fake a finished command. To use it in another
-terminal, source `crates/mightty-mux/shell/mightty.zsh`.
+program's output can't fake a finished command. Each shell is pointed at a
+small bootstrap that runs your startup files as usual, then loads the
+integration: zsh through `ZDOTDIR`, bash through `--rcfile` (it then reads
+the login files, `/etc/profile` and the first of `~/.bash_profile`,
+`~/.bash_login`, `~/.profile`; bash-preexec users keep theirs), fish
+through `XDG_DATA_DIRS`. To use it in another terminal, source
+`crates/mightty-mux/shell/mightty.{zsh,bash}` or
+`crates/mightty-mux/shell/fish/vendor_conf.d/mightty.fish`.
 
 ## Performance
 
@@ -360,5 +366,5 @@ checks the header compiles as C++.
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; notification banners (app bundle: `scripts/bundle.sh`)
-6. bash/fish integration (config file ✅, native tabs ✅: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits ✅ (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory)
+6. ✅ bash and fish integration, config file, native tabs: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory
 7. Linux (raw Wayland protocol), own font rasterizer, Windows

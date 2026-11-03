@@ -6,30 +6,64 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::OnceLock;
 
 use crate::socket::private_dir;
 
-const ZSHENV: &str = include_str!("../shell/zsh/.zshenv");
-const ZSH_INTEGRATION: &str = include_str!("../shell/mightty.zsh");
+/// Script files, by their path in the integration directory.
+const FILES: &[(&str, &str)] = &[
+    ("zsh/.zshenv", include_str!("../shell/zsh/.zshenv")),
+    ("mightty.zsh", include_str!("../shell/mightty.zsh")),
+    ("bash/bootstrap.bash", include_str!("../shell/bash/bootstrap.bash")),
+    ("mightty.bash", include_str!("../shell/mightty.bash")),
+    ("fish/vendor_conf.d/mightty.fish", include_str!("../shell/fish/vendor_conf.d/mightty.fish")),
+];
 
-/// Hooks integration into `cmd` if `shell` is one we support (zsh for now),
-/// returning the nonce its marks will carry (see `Term::set_mark_nonce`).
+/// Hooks integration into `cmd` if `shell` is one we support (zsh, bash,
+/// fish), returning the nonce its marks will carry (see
+/// `Term::set_mark_nonce`). Each shell is pointed at a bootstrap that runs
+/// the user's startup files as usual and then loads the integration,
+/// without touching any of the user's files:
 ///
-/// zsh reads `$ZDOTDIR/.zshenv` first, so pointing ZDOTDIR at our bootstrap
-/// lets it restore the user's ZDOTDIR, run their startup files and then load
-/// the integration, without touching any of the user's files.
-pub fn integrate(cmd: &mut Command, shell: &str) -> Option<String> {
-    if Path::new(shell).file_name() != Some(OsStr::new("zsh")) {
+/// - zsh reads `$ZDOTDIR/.zshenv` first, so ZDOTDIR points at ours, which
+///   restores the user's ZDOTDIR.
+/// - bash reads `--rcfile` in place of ~/.bashrc, in an interactive shell
+///   that isn't a login shell (`--posix` with `$ENV`, which Ghostty uses,
+///   isn't read by macOS's bash 3.2), so it starts as one with ours, which
+///   reads the login shell's files.
+/// - fish loads `fish/vendor_conf.d` from each of `$XDG_DATA_DIRS`, so our
+///   directory goes first there, and takes itself back out.
+///
+/// bash and fish get it only when `interactive`: there's nothing to mark
+/// in a shell running a command.
+pub fn integrate(cmd: &mut Command, shell: &str, interactive: bool) -> Option<String> {
+    let name = Path::new(shell).file_name().and_then(OsStr::to_str)?;
+    if !(name == "zsh" || interactive && (name == "bash" || name == "fish")) {
         return None;
     }
     let dir = install()?;
     let nonce = nonce()?;
-    if let Some(original) = env::var_os("ZDOTDIR") {
-        cmd.env("MIGHTTY_ZDOTDIR", original);
+    match name {
+        "zsh" => {
+            if let Some(original) = env::var_os("ZDOTDIR") {
+                cmd.env("MIGHTTY_ZDOTDIR", original);
+            }
+            cmd.env("ZDOTDIR", dir.join("zsh"));
+        }
+        "bash" => {
+            // No leading dash: a login shell would skip the rcfile.
+            cmd.arg0("bash").arg("--rcfile").arg(dir.join("bash/bootstrap.bash")).env("MIGHTTY_BASH_LOGIN", "1");
+        }
+        _ => {
+            // The XDG default when unset.
+            let rest = env::var("XDG_DATA_DIRS").ok().filter(|d| !d.is_empty()).unwrap_or("/usr/local/share:/usr/share".into());
+            // fish looks in `<entry>/fish/vendor_conf.d`.
+            cmd.env("XDG_DATA_DIRS", format!("{}:{rest}", dir.display())).env("MIGHTTY_FISH_XDG_DATA_DIR", dir);
+        }
     }
-    cmd.env("ZDOTDIR", dir.join("zsh")).env("MIGHTTY_SHELL_INTEGRATION_DIR", dir).env("MIGHTTY_NONCE", &nonce);
+    cmd.env("MIGHTTY_SHELL_INTEGRATION_DIR", dir).env("MIGHTTY_NONCE", &nonce);
     Some(nonce)
 }
 
@@ -46,9 +80,11 @@ fn install() -> Option<&'static Path> {
         // Inside the checked private directory, so no one else can have
         // put anything here for the shell to run.
         let dir = private_dir().ok()?.join("shell");
-        fs::create_dir_all(dir.join("zsh")).ok()?;
-        fs::write(dir.join("zsh/.zshenv"), ZSHENV).ok()?;
-        fs::write(dir.join("mightty.zsh"), ZSH_INTEGRATION).ok()?;
+        for (path, text) in FILES {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent()?).ok()?;
+            fs::write(path, text).ok()?;
+        }
         Some(dir)
     })
     .as_deref()

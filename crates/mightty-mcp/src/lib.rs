@@ -254,7 +254,7 @@ fn tools() -> Value {
         ("list_panes", "List terminal panes with their id, command, title, working directory, whether they are still running, their status (idle, running, or for AI agents working / waiting), whether they need the user and why, and where they are shown: window, tab and whether the user is focused on it.", true, schema(vec![], &[])),
         (
             "run_command",
-            "Run a shell command and wait for it to finish; returns its output and exit code. Without `pane`, runs in a hidden shell kept for this session, so `cd` and exports persist between calls. Requires zsh.",
+            "Run a shell command and wait for it to finish; returns its output and exit code. Without `pane`, runs in a hidden shell kept for this session, so `cd` and exports persist between calls. Requires zsh, bash or fish.",
             false,
             schema(vec![
                 ("command", prop("string", "Shell command line.")),

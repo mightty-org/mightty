@@ -339,7 +339,7 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
             });
             if ready.is_none() {
                 mux.close(pane.id);
-                return Err(RpcError::failed("shell integration did not start (only zsh is supported so far)"));
+                return Err(RpcError::failed("shell integration did not start (it supports zsh, bash and fish)"));
             }
             pane
         }
