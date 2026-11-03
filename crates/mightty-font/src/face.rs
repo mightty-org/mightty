@@ -4,9 +4,10 @@
 //! every read is bounds-checked and a bad table is an error, not a panic.
 
 use std::fmt;
-use std::sync::Arc;
 
 use crate::cff::Cff;
+use crate::color;
+use crate::data::FontData;
 use crate::var::{self, Axis};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +84,7 @@ pub struct Metrics {
 /// faces of a collection.
 #[derive(Clone)]
 pub struct Face {
-    data: Arc<[u8]>,
+    data: FontData,
     /// Table offsets and lengths in `data`.
     hmtx: (usize, usize),
     name: Option<(usize, usize)>,
@@ -102,6 +103,7 @@ pub struct Face {
     mvar: Option<usize>,
     /// The position set, normalized, one per axis; empty at the defaults.
     coords: Vec<f32>,
+    color: color::Tables,
 }
 
 /// Where glyph outlines come from.
@@ -111,6 +113,8 @@ enum Outlines {
     Glyf { glyf: (usize, usize), loca: (usize, usize), long_loca: bool },
     /// PostScript: cubic curves as charstrings.
     Cff(Box<Cff>),
+    /// None: a font of colour bitmaps.
+    None,
 }
 
 /// Composite glyphs can contain composites; real fonts nest a few deep.
@@ -133,7 +137,7 @@ impl Face {
     }
 
     /// Face `index` of the font file `data`.
-    pub fn parse(data: Arc<[u8]>, index: u32) -> Result<Face, Error> {
+    pub fn parse(data: FontData, index: u32) -> Result<Face, Error> {
         let b = Bytes(&data);
         let start = match b.u32(0).ok_or(Error::Unsupported("too short"))? {
             0x7474_6366 => {
@@ -198,18 +202,31 @@ impl Face {
             Outlines::Cff(Box::new(cff))
         } else if table(b"CFF2").is_some() {
             return Err(Error::Unsupported("CFF2 outlines"));
+        } else if table(b"CBDT").is_some() || table(b"sbix").is_some() {
+            // Colour bitmaps only (Noto Color Emoji): glyphs have no outlines.
+            Outlines::None
         } else {
-            return Err(Error::Unsupported("no outlines (a bitmap-only font)"));
+            return Err(Error::Unsupported("no outlines in a form read here (glyf, CFF, colour bitmaps)"));
         };
         let name = table(b"name");
         let offset = |tag| table(tag).map(|t| t.0);
         let (avar, gvar, hvar, mvar) = (offset(b"avar"), offset(b"gvar"), offset(b"HVAR"), offset(b"MVAR"));
         let axes = offset(b"fvar").and_then(|at| var::axes(b, at)).unwrap_or_default();
-        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), data })
+        let color = color::Tables { sbix: table(b"sbix"), cblc: table(b"CBLC"), cbdt: table(b"CBDT"), colr: table(b"COLR"), cpal: table(b"CPAL") };
+        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), color, data })
     }
 
-    fn bytes(&self) -> Bytes<'_> {
+    pub(crate) fn bytes(&self) -> Bytes<'_> {
         Bytes(&self.data)
+    }
+
+    pub(crate) fn color_tables(&self) -> color::Tables {
+        self.color
+    }
+
+    /// How many glyphs the face has.
+    pub fn glyph_count(&self) -> u16 {
+        self.num_glyphs
     }
 
     /// Vertical metrics, at the variation set.
@@ -378,6 +395,7 @@ impl Face {
                 }
                 cff.outline(self.bytes(), glyph, &mut out)?;
             }
+            Outlines::None => {}
         }
         Ok(out)
     }

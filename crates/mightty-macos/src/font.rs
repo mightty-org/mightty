@@ -6,11 +6,10 @@
 //! Each glyph is drawn into a cell-sized (or two-cell) BGRA tile, so the
 //! renderer can place tiles on the grid without per-glyph metrics.
 
-use std::fs;
+use std::cell::RefCell;
 use std::ptr;
-use std::sync::Arc;
 
-use mightty_font::{EMBOLDEN, Face, OBLIQUE};
+use mightty_font::{EMBOLDEN, Face, FontData, OBLIQUE};
 
 use crate::config::FontBackend;
 use crate::ffi::*;
@@ -44,6 +43,12 @@ pub struct Font {
     own: [Option<Face>; 4],
     /// The `Style` bits each variant lacks and has made up.
     synthetic: [u8; 4],
+    /// With `font-backend = mightty`, the fallback fonts CoreText picked
+    /// (emoji, CJK) read by us, by PostScript name; `None` where we can't.
+    fallbacks: RefCell<Vec<(String, Option<Face>)>>,
+    /// Font files open, shared between faces (styles often share a .ttc).
+    files: RefCell<Vec<(String, FontData)>>,
+    backend: FontBackend,
     /// In pixels.
     size: f64,
     colorspace: CGColorSpaceRef,
@@ -89,9 +94,10 @@ impl Font {
                 }
             }
             let regular = variants[0];
+            let mut files = Vec::new();
             let own = match backend {
                 FontBackend::CoreText => [None, None, None, None],
-                FontBackend::Mightty => own_faces(&variants),
+                FontBackend::Mightty => variants.map(|font| own_face(font, &mut files)),
             };
             let (ascent, descent, leading, m_advance) = match &own[0] {
                 // Our reading of the same numbers.
@@ -120,6 +126,9 @@ impl Font {
                 variants,
                 own,
                 synthetic,
+                fallbacks: RefCell::new(Vec::new()),
+                files: RefCell::new(files),
+                backend,
                 size,
                 colorspace: CGColorSpaceCreateDeviceRGB(),
                 cell_width,
@@ -164,6 +173,14 @@ impl Font {
                 }
             }
             let font = if fallback.is_null() { base } else { fallback };
+            // Ours draws what CoreText picked, if it can read it.
+            if !fallback.is_null() && self.backend == FontBackend::Mightty {
+                let raster = self.fallback_face(fallback, |face| self.draw_own(face, glyphs[0], style, cells));
+                if let Some(raster) = raster {
+                    CFRelease(fallback);
+                    return Some(raster);
+                }
+            }
             let color = CTFontGetSymbolicTraits(font) & kCTFontTraitColorGlyphs != 0;
             let mut advance = CGSize::default();
             CTFontGetAdvancesForGlyphs(font, 0, glyphs.as_ptr(), &mut advance, 1);
@@ -217,14 +234,44 @@ impl Font {
         }
     }
 
+    /// `f` with our face for the fallback font CoreText picked, read once.
+    fn fallback_face<T>(&self, font: CTFontRef, f: impl FnOnce(&Face) -> Option<T>) -> Option<T> {
+        // SAFETY: a live CTFont; the copied name is released.
+        let name = unsafe {
+            let name = CTFontCopyPostScriptName(font);
+            let ps = string_from_ns(name as Id);
+            CFRelease(name);
+            ps
+        };
+        let mut fallbacks = self.fallbacks.borrow_mut();
+        let i = match fallbacks.iter().position(|(n, _)| *n == name) {
+            Some(i) => i,
+            None => {
+                let face = own_face(font, &mut self.files.borrow_mut());
+                fallbacks.push((name, face));
+                fallbacks.len() - 1
+            }
+        };
+        f(fallbacks[i].1.as_ref()?)
+    }
+
     /// `glyph` of `face` drawn by our rasterizer, placed as `draw` places
     /// CoreText's: on the baseline, centred when narrower than the tile.
+    /// In colour if the face has it so (emoji).
     fn draw_own(&self, face: &Face, glyph: u16, style: Style, cells: u32) -> Option<RasterGlyph> {
         let (width, height) = (self.cell_width * cells, self.cell_height);
         let em = face.metrics().units_per_em as f32;
         let scale = self.size as f32 / em;
         let advance = face.advance(glyph) * scale;
         let x = ((width as f32 - advance) / 2.0).max(0.0).round();
+        let baseline = self.baseline as f32;
+        if let Some(mut pixels) = mightty_font::draw_color(face, glyph, self.size as f32, x, baseline, width as usize, height as usize) {
+            // RGBA to BGRA.
+            for p in pixels.chunks_exact_mut(4) {
+                p.swap(0, 2);
+            }
+            return Some(RasterGlyph { pixels, width, height, color: true });
+        }
         let mut outline = face.outline(glyph).ok()?;
         let synthetic = self.synthetic[style.0 as usize];
         if synthetic & Style::ITALIC != 0 {
@@ -233,7 +280,7 @@ impl Font {
         if synthetic & Style::BOLD != 0 {
             mightty_font::embolden(&mut outline, EMBOLDEN * em);
         }
-        let coverage = mightty_font::rasterize(&outline, scale, x, self.baseline as f32, width as usize, height as usize);
+        let coverage = mightty_font::rasterize(&outline, scale, x, baseline, width as usize, height as usize);
         // White, premultiplied: every channel is the coverage.
         let pixels = coverage.iter().flat_map(|&c| [c; 4]).collect();
         Some(RasterGlyph { pixels, width, height, color: false })
@@ -279,14 +326,12 @@ impl Font {
     }
 }
 
-/// Our faces for CoreText's `fonts`: the face each one was loaded from,
-/// found by its file and PostScript name, and for a variable font set to
-/// the same position. `None` where we can't read it (CFF2 outlines, for
-/// one), which leaves that style to CoreText.
-fn own_faces(fonts: &[CTFontRef; 4]) -> [Option<Face>; 4] {
-    // Styles often share a file (a .ttc collection).
-    let mut files: Vec<(String, Arc<[u8]>)> = Vec::new();
-    fonts.map(|font| {
+/// Our face for CoreText's `font`: the face it was loaded from, found by
+/// its file (opened once, in `files`) and PostScript name, and for a
+/// variable font set to the same position. `None` where we can't read it
+/// (CFF2 outlines, for one), which leaves it to CoreText.
+fn own_face(font: CTFontRef, files: &mut Vec<(String, FontData)>) -> Option<Face> {
+    {
         // SAFETY: a live CTFont; copied objects are released here.
         let (path, name) = unsafe {
             let url = CTFontCopyAttribute(font, kCTFontURLAttribute);
@@ -303,7 +348,7 @@ fn own_faces(fonts: &[CTFontRef; 4]) -> [Option<Face>; 4] {
         let data = match files.iter().find(|f| f.0 == path) {
             Some((_, data)) => data.clone(),
             None => {
-                let data: Arc<[u8]> = fs::read(&path).ok()?.into();
+                let data = FontData::map(path.as_ref()).ok()?;
                 files.push((path.clone(), data.clone()));
                 data
             }
@@ -320,7 +365,7 @@ fn own_faces(fonts: &[CTFontRef; 4]) -> [Option<Face>; 4] {
             Some(_) => {}
         }
         face
-    })
+    }
 }
 
 /// `font`'s position on each variation axis it sets: (tag, value).
@@ -455,6 +500,26 @@ mod tests {
             compare("Monaco", size, &STYLES[..1], ascii(), CLOSE);
             compare("Monaco", size, &STYLES[2..3], ascii(), CLOSE);
             compare("Monaco", size, &[STYLES[1], STYLES[3]], ascii(), Limits { worst: 0.2, mean: 0.08, ..CLOSE });
+        }
+    }
+
+    /// Emoji from the fallback font CoreText picks (Apple Color Emoji),
+    /// drawn by us from its PNG images: the same colours in the same place,
+    /// scaled a little differently. CJK fallbacks are drawn by us too.
+    #[test]
+    fn matches_coretext_fallbacks() {
+        for size in [24.0, 33.0, 50.0] {
+            let theirs = Font::new("Menlo", size, FontBackend::CoreText);
+            let ours = Font::new("Menlo", size, FontBackend::Mightty);
+            for c in ['😀', '🍎', '👍', '🚀', '⌚', 'あ', '字'] {
+                let a = theirs.rasterize(c, Style(0), 2).unwrap();
+                let b = ours.rasterize(c, Style(0), 2).unwrap();
+                assert_eq!(a.color, b.color, "{c}");
+                let total: u64 = a.pixels.iter().map(|&p| p as u64).sum();
+                let diff: u64 = a.pixels.iter().zip(&b.pixels).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
+                let relative = diff as f64 / total as f64;
+                assert!(relative < 0.08, "{size} {c}: differs by {:.1}%", relative * 100.0);
+            }
         }
     }
 

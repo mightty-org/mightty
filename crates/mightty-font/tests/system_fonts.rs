@@ -1,11 +1,9 @@
 //! Against fonts macOS ships; each test is skipped where its font isn't installed.
 
-use std::sync::Arc;
+use mightty_font::{ColorGlyph, Face, FontData, Segment, draw_color, rasterize};
 
-use mightty_font::{Face, Segment, rasterize};
-
-fn load(path: &str) -> Option<Arc<[u8]>> {
-    std::fs::read(path).ok().map(Arc::from)
+fn load(path: &str) -> Option<FontData> {
+    FontData::map(path.as_ref()).ok()
 }
 
 #[test]
@@ -128,7 +126,7 @@ fn variable_fonts() {
 /// copy must be an error or a glyph, never a panic or a hang.
 fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)]) {
     let exercise = |bytes: Vec<u8>| {
-        let Ok(mut face) = Face::parse(Arc::from(bytes), 0) else { return };
+        let Ok(mut face) = Face::parse(FontData::from(bytes), 0) else { return };
         face.set_variations(variations);
         let _ = face.postscript_name();
         let _ = face.metrics();
@@ -186,6 +184,11 @@ fn damaged_files_dont_panic() {
 /// A minimal font: glyph 0 empty, then `glyphs` as given, with outlines
 /// from `glyf` or, if `cff` is given, from that CFF table.
 fn font(glyphs: &[Vec<u8>], cff: Option<Vec<u8>>) -> Vec<u8> {
+    font_with(glyphs, cff, Vec::new())
+}
+
+/// The same, with `extra` tables.
+fn font_with(glyphs: &[Vec<u8>], cff: Option<Vec<u8>>, extra: Vec<(&[u8; 4], Vec<u8>)>) -> Vec<u8> {
     let be16 = |v: u16| v.to_be_bytes();
     let count = cff.as_ref().map_or(glyphs.len() as u16 + 1, |_| 2);
     let mut head = vec![0u8; 54];
@@ -202,6 +205,7 @@ fn font(glyphs: &[Vec<u8>], cff: Option<Vec<u8>>) -> Vec<u8> {
     cmap.extend([be16(0xFFFF), be16(0), be16(0xFFFF), be16(1), be16(0)].concat());
     let hmtx = [be16(500), be16(0)].concat();
     let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"cmap", cmap), (b"head", head), (b"hhea", hhea), (b"hmtx", hmtx), (b"maxp", maxp)];
+    tables.extend(extra);
     let version = match cff {
         Some(cff) => {
             tables.push((b"CFF ", cff));
@@ -252,7 +256,7 @@ fn composite_glyph(of: u16, copies: usize) -> Vec<u8> {
 
 #[test]
 fn composites_are_expanded() {
-    let face = Face::parse(Arc::from(font(&[square_glyph(), composite_glyph(1, 2)], None)), 0).unwrap();
+    let face = Face::parse(FontData::from(font(&[square_glyph(), composite_glyph(1, 2)], None)), 0).unwrap();
     let moves = |g| face.outline(g).unwrap().iter().filter(|s| matches!(s, Segment::MoveTo(_))).count();
     assert_eq!((moves(1), moves(2)), (1, 2));
 }
@@ -266,7 +270,7 @@ fn composite_bombs_are_refused() {
     for n in 1..=8 {
         glyphs.push(composite_glyph(n, 100));
     }
-    let face = Face::parse(Arc::from(font(&glyphs, None)), 0).unwrap();
+    let face = Face::parse(FontData::from(font(&glyphs, None)), 0).unwrap();
     let started = std::time::Instant::now();
     assert!(face.outline(9).is_err());
     assert!(started.elapsed().as_secs() < 1);
@@ -306,7 +310,7 @@ fn cff(program: &[u8], subrs: &[Vec<u8>]) -> Vec<u8> {
 fn cff_charstrings_run() {
     // 100 100 rmoveto, 300 0 rlineto, 0 300 rlineto, endchar: a triangle.
     let program = [139 + 100, 139 + 100, 21, 247, 300u16.wrapping_sub(108) as u8, 139, 5, 139, 247, 300u16.wrapping_sub(108) as u8, 5, 14];
-    let face = Face::parse(Arc::from(font(&[], Some(cff(&program, &[])))), 0).unwrap();
+    let face = Face::parse(FontData::from(font(&[], Some(cff(&program, &[])))), 0).unwrap();
     let o = face.outline(1).unwrap();
     let p = |x, y| mightty_font::Point { x, y };
     assert_eq!(o, [Segment::MoveTo(p(100.0, 100.0)), Segment::LineTo(p(400.0, 100.0)), Segment::LineTo(p(400.0, 400.0)), Segment::Close]);
@@ -322,8 +326,146 @@ fn charstring_bombs_are_refused() {
     let mut subrs: Vec<Vec<u8>> = (0..9).map(|k| [call(k + 1).repeat(10), vec![11]].concat()).collect();
     subrs.push(vec![140, 140, 5, 11]);
     let program = [[139, 139, 21].as_slice(), &call(0), &[14]].concat();
-    let face = Face::parse(Arc::from(font(&[], Some(cff(&program, &subrs)))), 0).unwrap();
+    let face = Face::parse(FontData::from(font(&[], Some(cff(&program, &subrs)))), 0).unwrap();
     let started = std::time::Instant::now();
     assert!(face.outline(1).is_err());
     assert!(started.elapsed().as_secs() < 1);
+}
+
+/// A PNG of `width`×`height` pixels all `rgba`, stored without compression.
+fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let chunk = |kind: &[u8; 4], body: &[u8]| [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat();
+    let mut ihdr = [width.to_be_bytes(), height.to_be_bytes()].concat();
+    ihdr.extend([8, 6, 0, 0, 0]);
+    let mut rows = Vec::new();
+    for _ in 0..height {
+        rows.push(0);
+        rows.extend(rgba.repeat(width as usize));
+    }
+    let mut z = vec![0x78, 0x01, 1];
+    z.extend((rows.len() as u16).to_le_bytes());
+    z.extend((!(rows.len() as u16)).to_le_bytes());
+    z.extend(&rows);
+    z.extend([0; 4]);
+    [vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'], chunk(b"IHDR", &ihdr), chunk(b"IDAT", &z), chunk(b"IEND", &[])].concat()
+}
+
+/// Glyphs 1 and 2 as images in an sbix strike at 20 ppem: a red 4×2 image
+/// whose bottom left is at (1, 3), and a 'dupe' of it.
+fn sbix_font() -> Vec<u8> {
+    let image = [&1i16.to_be_bytes()[..], &3i16.to_be_bytes(), b"png ", &png(4, 2, [255, 0, 0, 255])].concat();
+    let dupe = [&0i16.to_be_bytes()[..], &0i16.to_be_bytes(), b"dupe", &1u16.to_be_bytes()].concat();
+    // Strike: ppem, ppi, offsets for glyphs 0..=2 and the end.
+    let start = 4 + 4 * 4;
+    let offsets = [start, start, start + image.len(), start + image.len() + dupe.len()];
+    let mut strike = [20u16.to_be_bytes(), 72u16.to_be_bytes()].concat();
+    offsets.iter().for_each(|&o| strike.extend((o as u32).to_be_bytes()));
+    strike.extend(&image);
+    strike.extend(&dupe);
+    let sbix = [&1u16.to_be_bytes()[..], &1u16.to_be_bytes(), &1u32.to_be_bytes(), &12u32.to_be_bytes(), &strike].concat();
+    font_with(&[vec![], vec![]], None, vec![(b"sbix", sbix)])
+}
+
+/// Glyph 1 as a CBDT image at 20 ppem: a green 3×3 image, left bearing
+/// 2, top bearing 15 (index format 1, image format 17).
+fn cbdt_font() -> Vec<u8> {
+    let image = png(3, 3, [0, 255, 0, 255]);
+    let mut cbdt = vec![0, 3, 0, 0];
+    cbdt.extend([3, 3, 2, 15, 3]); // small metrics: height, width, bearings, advance
+    cbdt.extend((image.len() as u32).to_be_bytes());
+    cbdt.extend(&image);
+    let end = cbdt.len() as u32;
+    // CBLC: header, one BitmapSize (48 bytes), its subtable array and subtable.
+    let mut cblc = vec![0, 3, 0, 0, 0, 0, 0, 1];
+    let array = 8 + 48;
+    let mut size = vec![0u8; 48];
+    size[0..4].copy_from_slice(&(array as u32).to_be_bytes());
+    size[8..12].copy_from_slice(&1u32.to_be_bytes());
+    size[40..42].copy_from_slice(&1u16.to_be_bytes());
+    size[42..44].copy_from_slice(&1u16.to_be_bytes());
+    size[44] = 20;
+    size[45] = 20;
+    size[46] = 32;
+    cblc.extend(size);
+    cblc.extend([0, 1, 0, 1, 0, 0, 0, 8]); // glyphs 1..=1, subtable 8 bytes on
+    cblc.extend([0, 1, 0, 17]); // index format 1, image format 17
+    cblc.extend(4u32.to_be_bytes()); // images start after CBDT's header
+    cblc.extend([0u32.to_be_bytes(), (end - 4).to_be_bytes()].concat());
+    font_with(&[vec![], vec![]], None, vec![(b"CBLC", cblc), (b"CBDT", cbdt)])
+}
+
+/// Glyph 2 as COLR layers of glyph 1 (a 100-unit square): palette entry 0
+/// (blue, half transparent), then the text's colour.
+fn colr_font() -> Vec<u8> {
+    let colr = [0u16.to_be_bytes(), 1u16.to_be_bytes()].concat().into_iter()
+        .chain(14u32.to_be_bytes()).chain(20u32.to_be_bytes()).chain(2u16.to_be_bytes())
+        .chain([0, 2, 0, 0, 0, 2]) // base glyph 2: layers 0, 1
+        .chain([0, 1, 0, 0, 0, 1, 0xFF, 0xFF])
+        .collect();
+    let cpal = [0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 14, 0, 0, 255, 0, 0, 128].to_vec();
+    font_with(&[square_glyph(), composite_glyph(1, 1)], None, vec![(b"COLR", colr), (b"CPAL", cpal)])
+}
+
+#[test]
+fn colour_glyphs() {
+    // sbix: the image and its duplicate, placed by the image's origin
+    // and drawn 1/8 em lower, as Apple's renderer does.
+    let face = Face::parse(FontData::from(sbix_font()), 0).unwrap();
+    for g in [1, 2] {
+        let Some(ColorGlyph::Bitmap { image, ppem, left, top }) = face.color_glyph(g, 20.0) else { panic!("glyph {g}") };
+        assert_eq!((image.width, image.height, ppem, left, top), (4, 2, 20.0, 1.0, 3.0 + 2.0 - 2.5));
+    }
+    // At 40 pixels, twice the size: 8×4 red, from x 2 and y 20 - 5.
+    let tile = draw_color(&face, 1, 40.0, 0.0, 20.0, 12, 24).unwrap();
+    let red = |x: usize, y: usize| tile[(y * 12 + x) * 4..][..4] == [255, 0, 0, 255];
+    assert!(red(2, 15) && red(9, 18) && !red(1, 15) && !red(10, 15) && !red(2, 14) && !red(2, 19));
+
+    // CBDT: bearings from the small metrics.
+    let face = Face::parse(FontData::from(cbdt_font()), 0).unwrap();
+    let Some(ColorGlyph::Bitmap { image, left, top, .. }) = face.color_glyph(1, 20.0) else { panic!() };
+    assert_eq!((image.pixels[..4].to_vec(), left, top), (vec![0, 255, 0, 255], 2.0, 15.0));
+    assert!(face.outline(1).unwrap().is_empty());
+
+    // COLR: a half-transparent blue square, then the text's colour (white) over it.
+    let face = Face::parse(FontData::from(colr_font()), 0).unwrap();
+    assert_eq!(face.color_glyph(2, 20.0), Some(ColorGlyph::Layers(vec![(1, Some([0, 0, 255, 128])), (1, None)])));
+    assert_eq!(face.color_glyph(1, 20.0), None);
+    let tile = draw_color(&face, 2, 100.0, 0.0, 10.0, 10, 10).unwrap();
+    assert_eq!(&tile[..4], [255, 255, 255, 255]);
+}
+
+#[test]
+fn damaged_colour_fonts_dont_panic() {
+    for bytes in [sbix_font(), cbdt_font(), colr_font()] {
+        for i in 0..bytes.len() {
+            for v in [0, 1, 0x7f, 0x80, 0xfe, 0xff] {
+                let mut d = bytes.clone();
+                d[i] = v;
+                let Ok(face) = Face::parse(FontData::from(d), 0) else { continue };
+                for g in 0..3 {
+                    let _ = face.color_glyph(g, 20.0);
+                    let _ = draw_color(&face, g, 30.0, 0.0, 20.0, 16, 24);
+                }
+            }
+        }
+    }
+}
+
+/// Apple Color Emoji: sbix strikes from 20 to 160 ppem, a 180 MB file read
+/// through a mapping.
+#[test]
+fn apple_color_emoji() {
+    let Some(data) = load("/System/Library/Fonts/Apple Color Emoji.ttc") else { return };
+    let face = Face::parse(data, 0).unwrap();
+    let g = face.glyph('😀').unwrap();
+    let Some(ColorGlyph::Bitmap { image, ppem, .. }) = face.color_glyph(g, 33.0) else { panic!() };
+    assert_eq!((image.width, image.height, ppem), (40, 40, 40.0));
+    // Every strike's image for a sample of glyphs decodes.
+    for g in (1..face.glyph_count()).step_by(97) {
+        for ppem in [20.0, 64.0, 160.0] {
+            if let Some(glyph) = face.color_glyph(g, ppem) {
+                assert!(matches!(glyph, ColorGlyph::Bitmap { .. }));
+            }
+        }
+    }
 }

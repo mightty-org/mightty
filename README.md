@@ -23,7 +23,7 @@ A fast, lean, GPU-rendered terminal built for the agent era.
 | `mightty-term` | Terminal state: grids, scrollback, cursor, modes, OSC 133 marks |
 | `mightty-pty` | PTY spawning via hand-written `openpty` FFI |
 | `mightty-render` | Platform-independent rendering: palette, procedural box drawing and block elements |
-| `mightty-font` | Font files and glyph rasterization in plain Rust (TrueType and CFF outlines, variable fonts, synthetic bold and italic), for platforms without CoreText |
+| `mightty-font` | Font files and glyph rasterization in plain Rust (TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji: sbix, CBDT and COLR with its own PNG and DEFLATE decoders), for platforms without CoreText |
 | `mightty-ffi` | **libmightty**: stable C ABI over the core (`include/mightty.h`) |
 | `mightty-json` | Minimal JSON value, parser and serializer |
 | `mightty-mux` | Pane multiplexer, JSON-RPC control socket, zsh, bash and fish shell integration |
@@ -75,7 +75,7 @@ cursor-color = #ff79c6
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
 | `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |
 | `confirm-close-surface` | `true` | Ask before closing a pane (⌘W), a window or tab, or mightty: `true` while a command or agent runs in it, `always`, or `false`, as in Ghostty |
-| `font-backend` | `coretext` | `mightty` draws glyphs with mightty's own rasterizer (`mightty-font`: TrueType and CFF fonts, variable fonts; CoreText still finds font files and draws emoji and clusters). For testing: the rasterizer is for platforms without CoreText |
+| `font-backend` | `coretext` | `mightty` draws glyphs with mightty's own rasterizer (`mightty-font`: TrueType and CFF fonts, variable fonts, colour emoji, and the fallback fonts CoreText picks; CoreText still finds fonts and draws clusters and fonts in Apple's private formats). For testing: the rasterizer is for platforms without CoreText |
 | `window-save-state` | `default` | Reopen windows, tabs and splits where they were, each pane a new shell in its old directory: `always`, `never`, or `default`, which follows macOS (only when "Close windows when quitting an application" is off in System Settings → Desktop & Dock), as in Ghostty. Saved in `~/Library/Application Support/mightty/session.json` |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
@@ -372,4 +372,4 @@ checks the header compiles as C++.
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; notification banners (app bundle: `scripts/bundle.sh`)
 6. ✅ bash and fish integration, config file, native tabs: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag or move with ⌘⌃ and an arrow, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory; windows, tabs and splits come back on relaunch (`window-save-state`)
-7. Linux (raw Wayland protocol), own font rasterizer (in progress: TrueType and CFF outlines, variable fonts, synthetic bold and italic ✅, matching CoreText within anti-aliasing; next emoji, shaping), Windows
+7. Linux (raw Wayland protocol), own font rasterizer (in progress: TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji ✅, matching CoreText within anti-aliasing; next shaping), Windows
