@@ -94,6 +94,11 @@ pub struct Face {
 
 /// Composite glyphs can contain composites; real fonts nest a few deep.
 const MAX_COMPONENT_DEPTH: u32 = 8;
+/// Components in one glyph, counting nested ones: a damaged or hostile font
+/// could otherwise fan out at every level and multiply into billions.
+const MAX_COMPONENTS: u32 = 1024;
+/// Segments in one glyph's outline; real glyphs have a few hundred.
+const MAX_SEGMENTS: usize = 1 << 16;
 
 impl Face {
     /// How many faces `data` holds: a collection (`.ttc`) holds several.
@@ -259,7 +264,8 @@ impl Face {
     /// `glyph`'s outline, in font units; empty for a blank glyph (space).
     pub fn outline(&self, glyph: u16) -> Result<Vec<Segment>, Error> {
         let mut out = Vec::new();
-        self.add_outline(glyph, Transform::IDENTITY, 0, &mut out)?;
+        let mut budget = MAX_COMPONENTS;
+        self.add_outline(glyph, Transform::IDENTITY, 0, &mut budget, &mut out)?;
         Ok(out)
     }
 
@@ -285,11 +291,16 @@ impl Face {
         Ok(Some(b.slice(self.glyf.0 + start, end - start).ok_or(Error::Damaged("glyf"))?))
     }
 
-    fn add_outline(&self, glyph: u16, transform: Transform, depth: u32, out: &mut Vec<Segment>) -> Result<(), Error> {
+    /// `budget` is how many more components the whole glyph may use.
+    fn add_outline(&self, glyph: u16, transform: Transform, depth: u32, budget: &mut u32, out: &mut Vec<Segment>) -> Result<(), Error> {
         let Some(g) = self.glyph_data(glyph)? else { return Ok(()) };
         let contours = g.i16(0).ok_or(Error::Damaged("glyph header"))?;
         if contours >= 0 {
-            return simple_glyph(g, contours as usize, transform, out).ok_or(Error::Damaged("simple glyph"));
+            simple_glyph(g, contours as usize, transform, out).ok_or(Error::Damaged("simple glyph"))?;
+            if out.len() > MAX_SEGMENTS {
+                return Err(Error::Damaged("glyph outline too large"));
+            }
+            return Ok(());
         }
         if depth >= MAX_COMPONENT_DEPTH {
             return Err(Error::Damaged("composite glyphs nest too deep"));
@@ -331,7 +342,8 @@ impl Face {
                 (1.0, 0.0, 0.0, 1.0)
             };
             let inner = Transform { a, b, c, d, dx, dy };
-            self.add_outline(component, transform.then(inner), depth + 1, out)?;
+            *budget = budget.checked_sub(1).ok_or(Error::Damaged("composite glyph has too many components"))?;
+            self.add_outline(component, transform.then(inner), depth + 1, budget, out)?;
             if flags & MORE == 0 {
                 return Ok(());
             }

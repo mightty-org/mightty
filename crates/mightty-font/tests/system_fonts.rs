@@ -99,3 +99,82 @@ fn damaged_files_dont_panic() {
         exercise(bytes);
     }
 }
+
+/// A minimal TrueType font: glyph 0 empty, then `glyphs` as given.
+fn font(glyphs: &[Vec<u8>]) -> Vec<u8> {
+    let be16 = |v: u16| v.to_be_bytes();
+    let count = glyphs.len() as u16 + 1;
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&be16(1000));
+    head[50..52].copy_from_slice(&be16(1)); // long loca
+    let mut hhea = vec![0u8; 36];
+    hhea[34..36].copy_from_slice(&be16(1));
+    let mut maxp = vec![0u8; 6];
+    maxp[4..6].copy_from_slice(&be16(count));
+    // cmap: one format 4 subtable mapping nothing but the final 0xFFFF segment.
+    let mut cmap = [be16(0), be16(1), be16(3), be16(1)].concat();
+    cmap.extend(12u32.to_be_bytes());
+    cmap.extend([be16(4), be16(24), be16(0), be16(2), be16(2), be16(0), be16(0)].concat());
+    cmap.extend([be16(0xFFFF), be16(0), be16(0xFFFF), be16(1), be16(0)].concat());
+    let hmtx = [be16(500), be16(0)].concat();
+    let (mut glyf, mut loca) = (Vec::new(), vec![0u8; 8]);
+    for g in glyphs {
+        glyf.extend(g);
+        loca.extend((glyf.len() as u32).to_be_bytes());
+    }
+    let tables: [(&[u8; 4], &[u8]); 7] =
+        [(b"cmap", &cmap), (b"glyf", &glyf), (b"head", &head), (b"hhea", &hhea), (b"hmtx", &hmtx), (b"loca", &loca), (b"maxp", &maxp)];
+    let mut out = [0x0001_0000u32.to_be_bytes().to_vec(), be16(tables.len() as u16).to_vec(), vec![0; 6]].concat();
+    let mut offset = 12 + 16 * tables.len();
+    let mut body: Vec<u8> = Vec::new();
+    for (tag, data) in tables {
+        out.extend(*tag);
+        out.extend([0u32.to_be_bytes(), (offset as u32).to_be_bytes(), (data.len() as u32).to_be_bytes()].concat());
+        body.extend(data);
+        offset += data.len();
+    }
+    out.extend(body);
+    out
+}
+
+/// A 100-unit square.
+fn square_glyph() -> Vec<u8> {
+    let mut g = [1i16, 0, 0, 100, 100, 3, 0].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+    g.extend([1u8; 4]); // on-curve points, word deltas
+    g.extend([0i16, 100, 0, -100, 0, 0, 100, 0].iter().flat_map(|v| v.to_be_bytes()));
+    g
+}
+
+/// `copies` references to glyph `of`, all at the origin.
+fn composite_glyph(of: u16, copies: usize) -> Vec<u8> {
+    let mut g = [-1i16, 0, 0, 100, 100].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+    for i in 0..copies {
+        let flags: u16 = if i + 1 < copies { 0x0022 } else { 0x0002 }; // MORE, ARGS_ARE_XY
+        g.extend(flags.to_be_bytes());
+        g.extend(of.to_be_bytes());
+        g.extend([0, 0]);
+    }
+    g
+}
+
+#[test]
+fn composites_are_expanded() {
+    let face = Face::parse(Arc::from(font(&[square_glyph(), composite_glyph(1, 2)])), 0).unwrap();
+    let moves = |g| face.outline(g).unwrap().iter().filter(|s| matches!(s, Segment::MoveTo(_))).count();
+    assert_eq!((moves(1), moves(2)), (1, 2));
+}
+
+/// Composites fanning out at every level would expand into 100⁸ squares:
+/// refused quickly instead.
+#[test]
+fn composite_bombs_are_refused() {
+    // Glyph 1 is the square; glyph n + 1 holds 100 copies of glyph n.
+    let mut glyphs = vec![square_glyph()];
+    for n in 1..=8 {
+        glyphs.push(composite_glyph(n, 100));
+    }
+    let face = Face::parse(Arc::from(font(&glyphs)), 0).unwrap();
+    let started = std::time::Instant::now();
+    assert!(face.outline(9).is_err());
+    assert!(started.elapsed().as_secs() < 1);
+}
