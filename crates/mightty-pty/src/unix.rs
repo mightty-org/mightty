@@ -46,6 +46,14 @@ unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn setsid() -> c_int;
+    fn tcgetpgrp(fd: c_int) -> c_int;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    // libproc, in libSystem.
+    fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -> c_int;
+    fn sysctl(name: *mut c_int, len: u32, old: *mut c_void, old_len: *mut usize, new: *mut c_void, new_len: usize) -> c_int;
 }
 
 pub struct Pty {
@@ -127,6 +135,65 @@ impl Pty {
     pub fn kill(&mut self) -> io::Result<()> {
         self.child.kill()
     }
+
+    /// The process the terminal's foreground belongs to: the shell, or the
+    /// program it's running. As the process describes itself, so only a hint.
+    pub fn foreground(&self) -> Option<Foreground> {
+        // SAFETY: a valid fd.
+        let group = unsafe { tcgetpgrp(self.master.as_raw_fd()) };
+        if group <= 0 {
+            return None;
+        }
+        Some(Foreground { name: process_name(group)?, args: process_args(group).unwrap_or_default() })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Foreground {
+    /// The executable's name (which may be a version, for a symlinked one).
+    pub name: String,
+    /// Its first arguments, starting with the name it was run by.
+    pub args: Vec<String>,
+}
+
+/// How many arguments `foreground` reads.
+const ARGS: usize = 2;
+
+#[cfg(target_os = "macos")]
+fn process_args(pid: c_int) -> Option<Vec<String>> {
+    const CTL_KERN: c_int = 1;
+    const KERN_PROCARGS2: c_int = 49;
+    let mut mib = [CTL_KERN, KERN_PROCARGS2, pid];
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut len = buf.len();
+    // SAFETY: `buf` is writable for `len` bytes.
+    if unsafe { sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut len, ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    // argc, the executable's path, padding, then the arguments, each NUL-terminated.
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
+    let mut fields = buf[4..len.min(buf.len())].split(|&b| b == 0).filter(|f| !f.is_empty()).skip(1);
+    Some(fields.by_ref().take(argc.min(ARGS)).map(|f| String::from_utf8_lossy(f).into_owned()).collect())
+}
+
+#[cfg(target_os = "linux")]
+fn process_args(pid: c_int) -> Option<Vec<String>> {
+    let line = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(line.split(|&b| b == 0).filter(|f| !f.is_empty()).take(ARGS).map(|f| String::from_utf8_lossy(f).into_owned()).collect())
+}
+
+#[cfg(target_os = "macos")]
+fn process_name(pid: c_int) -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is writable for its length.
+    let len = unsafe { proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (len > 0).then(|| String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn process_name(pid: c_int) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(name.trim_end().to_owned())
 }
 
 fn set_cloexec(fd: &OwnedFd) -> io::Result<()> {
@@ -141,6 +208,24 @@ fn set_cloexec(fd: &OwnedFd) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn foreground_process_is_named() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "exec sleep 5"]);
+        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        let mut found = None;
+        for _ in 0..100 {
+            found = pty.foreground();
+            if found.as_ref().is_some_and(|f| f.name == "sleep") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let found = found.unwrap();
+        assert_eq!((found.name.as_str(), found.args.as_slice()), ("sleep", &["sleep".to_owned(), "5".to_owned()][..]));
+        pty.kill().unwrap();
+    }
 
     #[test]
     fn child_sees_a_tty_with_our_size() {

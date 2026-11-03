@@ -7,6 +7,8 @@
 //! | `pane.list`       |                                                               |
 //! | `pane.spawn`      | `command?`, `shell?`, `cwd?`, `env?`, `cols?`, `rows?`, `visible?` (true), `placement?` (`window` / `tab` / `right` / `down`), `beside?` (a pane) |
 //! | `pane.focus`      | `pane`                                                        |
+//! | `pane.notify`     | `pane`, `text?`: the pane needs the user (unless they're looking at it) |
+//! | `attention.list`  | panes needing the user, the longest waiting first              |
 //! | `pane.send_text`  | `pane`, `text`, `enter?`                                      |
 //! | `pane.send_keys`  | `pane`, `keys` (names like `enter`, `ctrl-c`, `up`)           |
 //! | `pane.read`       | `pane`, `source?` (`screen` / `all`), `max_lines?`            |
@@ -22,7 +24,7 @@ use std::time::{Duration, Instant};
 use mightty_json::Value;
 use mightty_term::{CommandBlock, MarkKind, Term};
 
-use crate::{Location, Mux, Pane, PaneId, Placement, SpawnOptions, key_bytes};
+use crate::{Location, Mux, Pane, PaneId, Placement, Reason, SpawnOptions, key_bytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcError {
@@ -46,6 +48,10 @@ const DEFAULT_WAIT: Duration = Duration::from_secs(10);
 const DEFAULT_RUN_WAIT: Duration = Duration::from_secs(60);
 const MAX_WAIT: Duration = Duration::from_secs(600);
 const DEFAULT_MAX_OUTPUT: usize = 8000;
+/// `pane.send_text` with `enter`: how long to wait for the text's echo, and
+/// the gap after it before pressing Enter.
+const ENTER_WAIT: Duration = Duration::from_millis(500);
+const ENTER_GAP: Duration = Duration::from_millis(50);
 
 pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
     match method {
@@ -63,6 +69,18 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
             let pane = spawn(mux, params)?;
             Ok(info(&pane, location(&mux.host().locations(), pane.id)))
         }
+        "pane.notify" => {
+            let pane = pane(mux, params)?;
+            let text = params["text"].as_str().unwrap_or("Needs your attention");
+            if pane.request_attention(Reason::Asked(text.chars().take(512).collect())) {
+                mux.host().pane_status(pane.id);
+            }
+            Ok(Value::Null)
+        }
+        "attention.list" => {
+            let locations = mux.host().locations();
+            Ok(Value::Array(mux.attention_queue().iter().map(|p| info(p, location(&locations, p.id))).collect()))
+        }
         "pane.focus" => {
             let pane = pane(mux, params)?;
             if !mux.host().focus_pane(pane.id) {
@@ -72,11 +90,17 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
         }
         "pane.send_text" => {
             let pane = pane(mux, params)?;
-            let mut text = params["text"].as_str().ok_or_else(|| RpcError::invalid("`text` is required"))?.to_owned();
-            if params["enter"].as_bool() == Some(true) {
-                text.push('\r');
-            }
+            let text = params["text"].as_str().ok_or_else(|| RpcError::invalid("`text` is required"))?;
+            let seen = pane.generation();
             write(&pane, text.as_bytes())?;
+            if params["enter"].as_bool() == Some(true) {
+                // Enter as a key press of its own: in the same burst as the
+                // text, apps that detect pastes (Claude Code) take it as a
+                // newline in the pasted text. Wait for the echo, then a beat.
+                pane.wait_output(seen, ENTER_WAIT);
+                std::thread::sleep(ENTER_GAP);
+                write(&pane, b"\r")?;
+            }
             Ok(Value::Null)
         }
         "pane.send_keys" => {
@@ -165,6 +189,18 @@ fn info(pane: &Pane, location: Option<Location>) -> Value {
         ("exit_code", exit.flatten().into()),
         ("visible", pane.is_visible().into()),
         ("shell_integration", (!term.marks().is_empty()).into()),
+        ("status", pane.status().name().into()),
+        (
+            "attention",
+            match pane.attention() {
+                Some(a) => Value::object([
+                    ("reason", a.reason.name().into()),
+                    ("message", a.reason.message().into()),
+                    ("waiting_ms", (a.since.elapsed().as_millis() as u64).into()),
+                ]),
+                None => Value::Null,
+            },
+        ),
     ]);
     if let Some(at) = location {
         info.insert("window", at.window);

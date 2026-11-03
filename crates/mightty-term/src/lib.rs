@@ -114,6 +114,18 @@ pub enum MarkKind {
     CommandEnd { exit_code: Option<i32> },
 }
 
+/// A desktop notification a program asked for (OSC 9, OSC 777).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+}
+
+/// Notifications kept until taken; older ones are dropped.
+const MAX_NOTIFICATIONS: usize = 16;
+/// Longest title and body kept, in characters.
+const MAX_NOTIFICATION_TEXT: usize = 512;
+
 /// One command run by the shell: prompt, command line, output, exit code.
 /// Line numbers are absolute (see [`Term::line`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -196,6 +208,9 @@ pub struct Term {
     colors: [(u8, u8, u8); 2],
     responses: Vec<u8>,
     bell: bool,
+    /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
+    bells: u64,
+    notifications: Vec<Notification>,
     styles: Styles,
     /// Style ids of the pen and of blanks erased with it (BCE), interned on
     /// first use after SGR changes the pen.
@@ -258,6 +273,8 @@ impl Term {
             colors: [DEFAULT_FG, DEFAULT_BG],
             responses: Vec::new(),
             bell: false,
+            bells: 0,
+            notifications: Vec::new(),
             styles: Styles::new(),
             pen_id: None,
             erased_id: None,
@@ -290,6 +307,33 @@ impl Term {
     /// Returns and clears the bell flag.
     pub fn take_bell(&mut self) -> bool {
         mem::take(&mut self.bell)
+    }
+
+    /// How many times the bell has rung.
+    pub fn bells(&self) -> u64 {
+        self.bells
+    }
+
+    /// Notifications asked for since the last call, oldest first.
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        mem::take(&mut self.notifications)
+    }
+
+    /// The command line of the command running now, from shell integration.
+    pub fn running_command(&self) -> Option<String> {
+        // Cheap check first: this is polled.
+        if self.marks.last().is_none_or(|m| m.kind != MarkKind::OutputStart) {
+            return None;
+        }
+        self.command_blocks().pop()?.command
+    }
+
+    fn notify(&mut self, title: &[u8], body: &[u8]) {
+        let text = |b: &[u8]| String::from_utf8_lossy(b).chars().filter(|c| !c.is_control()).take(MAX_NOTIFICATION_TEXT).collect();
+        if self.notifications.len() == MAX_NOTIFICATIONS {
+            self.notifications.remove(0);
+        }
+        self.notifications.push(Notification { title: text(title), body: text(body) });
     }
 
     pub fn cols(&self) -> usize {
@@ -1517,6 +1561,11 @@ impl Term {
                     self.pen_changed();
                 }
             }
+            // ConEmu's OSC 9 ; n ; … (progress and others), not a notification.
+            [b"9", n, ..] if (1..=2).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => {}
+            // iTerm2's notification: OSC 9 ; text.
+            [b"9", text @ ..] => self.notify(b"", &text.join(&b';')),
+            [b"777", b"notify", title, body @ ..] => self.notify(title, &body.join(&b';')),
             [b"0" | b"2", rest @ ..] => {
                 self.title = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
             }
@@ -1599,7 +1648,10 @@ impl Perform for Term {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            0x07 => self.bell = true,
+            0x07 => {
+                self.bell = true;
+                self.bells += 1;
+            }
             0x08 => self.move_back(1),
             0x09 => self.tab_forward(1),
             0x0A..=0x0C => {

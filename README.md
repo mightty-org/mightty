@@ -100,6 +100,8 @@ mightty ctl run --pane 1 -- make test             # types it, waits, prints outp
 P=$(mightty ctl spawn -- npm run dev)             # new window
 mightty ctl spawn --right -- cargo watch          # split right of this pane (--down, --tab; --beside N)
 mightty ctl focus $P                              # bring it to the front
+mightty ctl attention                             # panes needing you, longest waiting first
+mightty ctl notify "Approve the migration?"       # flag this pane as needing you
 mightty ctl wait $P --text "ready" && mightty ctl read $P
 mightty ctl keys $P ctrl-c
 ```
@@ -112,12 +114,28 @@ claude mcp add mightty -- mightty mcp
 
 Tools: `run_command` (output + exit code; reuses a hidden shell so `cd`
 persists), `open_pane`, `read_pane`, `list_commands`, `wait_for`,
-`send_text`, `send_keys`, `list_panes`, `focus_pane`, `close_pane`. Panes an
+`send_text`, `send_keys`, `list_panes`, `focus_pane`, `notify_user`, `close_pane`. Panes an
 agent opens go in a split beside the agent's own pane, further ones stacking
 below the first, without taking the keyboard from you (`placement` asks for
 a tab or window instead), and stay open after they exit. `list_panes` says
 which window and tab each pane is in and which one you're focused on. With
 no mightty running, `mightty mcp` hosts headless panes itself.
+
+**Agents that need you** are easy to miss in a background tab. mightty
+recognizes agents it runs (`claude`, `codex`, `gemini`, `aider`, `opencode`,
+…, by command name) and tells **working** (output flowing: their spinner)
+from **waiting** (gone quiet after working). A pane you aren't looking at
+needs you when its agent stops working, it rings the bell, or it asks for a
+notification (OSC 9, OSC 777, `mightty ctl notify`, `notify_user`). It gets
+an orange border and a ● on its tab or window title, the Dock icon shows how
+many panes need you (bouncing once while mightty is in the background), and
+⌘⇧A jumps to the one that has waited longest. `list_panes` reports all of
+this, so agents can watch each other. For Claude Code to say exactly when it
+needs a permission, add a notification hook to `~/.claude/settings.json`:
+
+```json
+{ "hooks": { "Notification": [{ "hooks": [{ "type": "command", "command": "mightty ctl notify 'Claude needs you'" }] }] } }
+```
 
 **Shell integration** (zsh) loads automatically in every pane, with no
 dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
@@ -329,6 +347,6 @@ checks the header compiles as C++.
    - ✅ Links: hold Cmd to underline an OSC 8 hyperlink or a URL in the text and see where it goes; Cmd-click opens web and mail links and local documents, media and folders (anything else, such as apps, scripts and executables, is shown in Finder instead); other schemes are ignored
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
-5. Agent status detection (working / waiting for you), attention queue, notifications
+5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; next: macOS notification banners (needs an app bundle)
 6. bash/fish integration (config file ✅, native tabs ✅: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits ✅ (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory)
 7. Linux (raw Wayland protocol), own font rasterizer, Windows

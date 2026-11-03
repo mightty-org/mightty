@@ -7,6 +7,7 @@ mod keys;
 mod rpc;
 mod shell;
 mod socket;
+mod status;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -16,9 +17,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mightty_pty::{Pty, WindowSize};
 use mightty_term::{Term, TermOptions};
@@ -26,6 +27,8 @@ use mightty_term::{Term, TermOptions};
 pub use keys::key_bytes;
 pub use rpc::{RpcError, handle};
 pub use socket::{CallError, Client, listen, runtime_dir};
+pub use status::{AGENTS, Attention, Reason, Status, is_agent};
+use status::Activity;
 
 pub type PaneId = u64;
 
@@ -38,6 +41,8 @@ pub trait Host: Send + Sync {
     fn pane_exited(&self, _id: PaneId) {}
     /// The pane was closed through the API; drop any window showing it.
     fn pane_closed(&self, _id: PaneId) {}
+    /// Its status or attention changed (see [`Pane::status`], [`Pane::attention`]).
+    fn pane_status(&self, _id: PaneId) {}
     /// Shows the pane, where `placement` says. Returns false if the host has no UI.
     fn show_pane(&self, _id: PaneId, _placement: Placement) -> bool {
         false
@@ -138,6 +143,9 @@ pub struct Pane {
     visible: AtomicBool,
     /// Output generation counter, bumped after every read, for waiters.
     changed: (Mutex<u64>, Condvar),
+    activity: Mutex<Activity>,
+    /// The user is looking at it: it can't need them.
+    focused: AtomicBool,
 }
 
 impl Pane {
@@ -172,6 +180,43 @@ impl Pane {
 
     pub fn set_visible(&self, visible: bool) {
         self.visible.store(visible, Ordering::Relaxed);
+    }
+
+    pub fn status(&self) -> Status {
+        self.activity.lock().unwrap().status
+    }
+
+    /// Why it needs the user, if it does.
+    pub fn attention(&self) -> Option<Attention> {
+        self.activity.lock().unwrap().attention.clone()
+    }
+
+    /// Whether the user is looking at it. Looking clears its attention;
+    /// returns whether that changed.
+    pub fn set_focused(&self, focused: bool) -> bool {
+        self.focused.store(focused, Ordering::Relaxed);
+        focused && self.activity.lock().unwrap().clear()
+    }
+
+    /// Asks for the user, unless they're looking at it. Returns whether it changed anything.
+    pub fn request_attention(&self, reason: Reason) -> bool {
+        !self.focused.load(Ordering::Relaxed) && self.activity.lock().unwrap().raise(reason, Instant::now())
+    }
+
+    /// Re-derives the status (see [`status`]). Returns whether it or attention changed.
+    fn update_status(&self) -> bool {
+        let (running, integrated) = {
+            let term = self.term.lock().unwrap();
+            (term.running_command(), !term.marks().is_empty())
+        };
+        // Without shell integration, whatever is in the foreground other than the shell.
+        let foreground = if running.is_some() || !integrated { self.pty.lock().unwrap().foreground() } else { None };
+        let busy = running.is_some() || (!integrated && foreground.as_ref().is_some_and(|f| f.name != self.command));
+        // A pane started with a command line is running that, at first.
+        let command = running.as_deref().or((!integrated).then_some(self.command.as_str()));
+        let agent = is_agent(command, foreground.as_ref());
+        let focused = self.focused.load(Ordering::Relaxed);
+        self.activity.lock().unwrap().update(Instant::now(), !self.is_alive(), busy, agent, focused)
     }
 
     /// Current output generation.
@@ -209,7 +254,16 @@ impl Mux {
     }
 
     pub fn with_options(host: Arc<dyn Host>, options: TermOptions) -> Arc<Self> {
-        Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(), options })
+        let mux = Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(), options });
+        spawn_monitor(Arc::downgrade(&mux));
+        mux
+    }
+
+    /// Panes needing the user, the longest waiting first.
+    pub fn attention_queue(&self) -> Vec<Arc<Pane>> {
+        let mut waiting: Vec<_> = self.panes().into_iter().filter_map(|p| Some((p.attention()?.since, p))).collect();
+        waiting.sort_by_key(|w| w.0);
+        waiting.into_iter().map(|w| w.1).collect()
     }
 
     /// The control socket, once `listen` has bound it.
@@ -258,6 +312,8 @@ impl Mux {
             exit: Mutex::new(None),
             visible: AtomicBool::new(false),
             changed: (Mutex::new(0), Condvar::new()),
+            activity: Mutex::new(Activity::new()),
+            focused: AtomicBool::new(false),
         });
         self.panes.lock().unwrap().insert(id, pane.clone());
         spawn_reader(pane.clone(), reader, self.host.clone());
@@ -290,6 +346,27 @@ impl Mux {
     }
 }
 
+/// How often statuses are re-derived: agents going quiet produce no event.
+const STATUS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Keeps pane statuses current while `mux` lives.
+fn spawn_monitor(mux: Weak<Mux>) {
+    thread::Builder::new()
+        .name("pane-status".into())
+        .spawn(move || {
+            while let Some(mux) = mux.upgrade() {
+                for pane in mux.panes() {
+                    if pane.update_status() {
+                        mux.host.pane_status(pane.id);
+                    }
+                }
+                drop(mux);
+                thread::sleep(STATUS_INTERVAL);
+            }
+        })
+        .expect("failed to spawn status thread");
+}
+
 fn default_shell() -> String {
     env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
@@ -311,20 +388,27 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                     // EIO once the child side closes (Linux).
                     Err(_) => break,
                 };
-                let replies = {
+                let (replies, bells, notifications) = {
                     let mut term = pane.term.lock().unwrap();
                     term.feed(&buf[..n]);
-                    term.take_responses()
+                    (term.take_responses(), term.bells(), term.take_notifications())
                 };
                 if !replies.is_empty() {
                     let _ = pane.write(&replies);
                 }
                 pane.notify();
                 host.pane_output(pane.id);
+                let focused = pane.focused.load(Ordering::Relaxed);
+                if pane.activity.lock().unwrap().output(Instant::now(), bells, notifications, focused) {
+                    host.pane_status(pane.id);
+                }
             }
             let code = pane.pty.lock().unwrap().wait().ok().and_then(|status| status.code());
             *pane.exit.lock().unwrap() = Some(code);
             pane.notify();
+            if pane.update_status() {
+                host.pane_status(pane.id);
+            }
             host.pane_exited(pane.id);
         })
         .expect("failed to spawn pane reader thread");

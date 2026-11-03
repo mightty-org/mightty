@@ -20,7 +20,9 @@ code. For long-running processes (dev servers, watchers, REPLs) use open_pane, t
 read_pane to follow them, send_text/send_keys to interact, and close_pane when done. Panes opened \
 here are visible to the user: by default in a split beside your own pane, stacking further ones \
 below the last; open_pane's placement can ask for a tab or window instead. focus_pane brings a \
-pane to the front when you want the user to look at it.";
+pane to the front when you want the user to look at it, and notify_user flags your pane (or another) \
+as needing them without taking their keyboard. list_panes shows each pane's status: agents are \
+working or waiting, and panes needing the user carry an attention reason.";
 
 pub enum Backend {
     /// A running mightty, over its control socket.
@@ -132,6 +134,7 @@ impl Server {
             "list_panes" => self.call("pane.list", args).map(|v| v.to_string()),
             "open_pane" => self.open_pane(args),
             "focus_pane" => self.call("pane.focus", args).map(|_| "focused".into()),
+            "notify_user" => self.notify_user(args),
             "run_command" => self.run_command(args),
             "send_text" => self.call("pane.send_text", args).map(|_| "sent".into()),
             "send_keys" => self.call("pane.send_keys", args).map(|_| "sent".into()),
@@ -182,6 +185,15 @@ impl Server {
             self.last_split = pane["id"].as_u64();
         }
         Ok(pane.to_string())
+    }
+
+    /// Flags a pane (by default the agent's own) as needing the user.
+    fn notify_user(&mut self, mut args: Value) -> Result<String, String> {
+        if args["pane"].is_null() {
+            let own = self.own_pane.ok_or("no pane given, and this agent isn't running in mightty")?;
+            args.insert("pane", own);
+        }
+        self.call("pane.notify", args).map(|_| "the user will see it".into())
     }
 
     fn run_command(&mut self, mut args: Value) -> Result<String, String> {
@@ -239,7 +251,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 fn tools() -> Value {
     let pane = || ("pane", prop("integer", "Pane id, from list_panes or open_pane."));
     let defs: Vec<(&str, &str, bool, Value)> = vec![
-        ("list_panes", "List terminal panes with their id, command, title, working directory, whether they are still running, and where they are shown: window, tab and whether the user is focused on it.", true, schema(vec![], &[])),
+        ("list_panes", "List terminal panes with their id, command, title, working directory, whether they are still running, their status (idle, running, or for AI agents working / waiting), whether they need the user and why, and where they are shown: window, tab and whether the user is focused on it.", true, schema(vec![], &[])),
         (
             "run_command",
             "Run a shell command and wait for it to finish; returns its output and exit code. Without `pane`, runs in a hidden shell kept for this session, so `cd` and exports persist between calls. Requires zsh.",
@@ -311,6 +323,15 @@ fn tools() -> Value {
             "Bring a pane to the front and give it the keyboard, to show the user something in it.",
             false,
             schema(vec![pane()], &["pane"]),
+        ),
+        (
+            "notify_user",
+            "Tell the user a pane needs them (by default your own): it's marked in mightty and the Dock, and they can jump to it. Nothing happens if they're already looking at it.",
+            false,
+            schema(vec![
+                ("text", prop("string", "What you need, e.g. \"Approve the migration?\".")),
+                ("pane", prop("integer", "Pane that needs them (default: yours).")),
+            ], &["text"]),
         ),
         ("close_pane", "Close a pane, ending its process.", false, schema(vec![pane()], &["pane"])),
     ];

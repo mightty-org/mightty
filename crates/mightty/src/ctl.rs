@@ -20,6 +20,9 @@ usage: mightty ctl <command> [args]
   commands N [--limit N]                recent commands in pane N with output and exit codes
   wait N [--text T] [--command] [--exit] [--timeout MS]
   focus N                               bring pane N to the front
+  notify [N] [TEXT]                     mark pane N (default: this one) as needing you,
+                                        e.g. from an agent's notification hook
+  attention                             panes needing you, the longest waiting first
   close N                               close pane N
   call METHOD [JSON]                    raw JSON-RPC call
 
@@ -40,10 +43,12 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             println!("{:<4} {:<8} {:<9} {:<30} CWD", "ID", "STATE", "WINDOW", "COMMAND");
             for p in panes.as_array().unwrap_or_default() {
                 let state = match (p["alive"].as_bool(), p["exit_code"].as_i64()) {
-                    (Some(true), _) => "running".to_owned(),
+                    (Some(true), _) => p["status"].as_str().unwrap_or("running").to_owned(),
                     (_, Some(code)) => format!("exit {code}"),
                     _ => "exited".to_owned(),
                 };
+                // ! when it needs you.
+                let state = if p["attention"].is_null() { state } else { format!("{state}!") };
                 // Window number, tab, and * where keys go.
                 let window = match p["window"].as_u64() {
                     Some(w) => format!("{w}/{}{}", p["tab"], if p["focused"].as_bool() == Some(true) { "*" } else { "" }),
@@ -152,6 +157,26 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             print_json(&result);
             if result["matched"].is_null() {
                 return Ok(ExitCode::from(124));
+            }
+        }
+        "notify" => {
+            // A leading number is the pane; otherwise the one this runs in.
+            let pane = match opts.args.first().filter(|a| a.parse::<u64>().is_ok()) {
+                Some(_) => opts.pane()?,
+                None => number(&std::env::var("MIGHTTY_PANE_ID").map_err(|_| "notify needs a pane id outside mightty")?)?,
+            };
+            let mut params = obj(pane, []);
+            if let Some(text) = opts.positional() {
+                params.insert("text", text);
+            }
+            opts.finish()?;
+            client.call("pane.notify", params)?;
+        }
+        "attention" => {
+            opts.finish()?;
+            for p in client.call("attention.list", Value::Null)?.as_array().unwrap_or_default() {
+                let seconds = p["attention"]["waiting_ms"].as_u64().unwrap_or(0) / 1000;
+                println!("{:<4} {:>5}s  {}", p["id"].to_string(), seconds, p["attention"]["message"].as_str().unwrap_or(""));
             }
         }
         "focus" => {

@@ -493,3 +493,19 @@ fn full_link_table_stays_consistent() {
     assert_eq!(t.lines()[row].cells[col - 1].c, 'c');
     assert_eq!(t.link_at(t.lines_scrolled() + row as u64, col - 1), None);
 }
+
+#[test]
+fn notifications_and_bells() {
+    let mut t = term(20, 3, "\x1b]9;Build done; 3 warnings\x07\x07\x1b]777;notify;Claude;Waiting for you\x1b\\");
+    let n = t.take_notifications();
+    assert_eq!(n.len(), 2);
+    assert_eq!((n[0].title.as_str(), n[0].body.as_str()), ("", "Build done; 3 warnings"));
+    assert_eq!((n[1].title.as_str(), n[1].body.as_str()), ("Claude", "Waiting for you"));
+    assert!(t.take_notifications().is_empty());
+    // The OSC's terminating BEL isn't a bell; the lone one is.
+    assert_eq!(t.bells(), 1);
+    assert!(t.take_bell());
+    // ConEmu progress (OSC 9;4) isn't a notification; control characters are dropped.
+    t.feed("\x1b]9;4;1;50\x07\x1b]9;a\u{85}b\x07".as_bytes());
+    assert_eq!(t.take_notifications().iter().map(|n| n.body.as_str()).collect::<Vec<_>>(), ["ab"]);
+}

@@ -39,6 +39,8 @@ struct App {
     config: Config,
     /// Where the next window's top-left corner goes.
     cascade: CGPoint,
+    /// Panes needing the user at the last count, to bounce the Dock icon for new ones.
+    attention_count: usize,
 }
 
 /// Points between split panes, drawn as a divider.
@@ -47,6 +49,10 @@ const GAP: f64 = 1.0;
 const GRAB: f64 = 3.0;
 /// Panes are never made smaller than this by dragging, in points.
 const MIN_PANE: f64 = 60.0;
+/// NSWindowOcclusionStateVisible.
+const NS_WINDOW_OCCLUSION_STATE_VISIBLE: usize = 1 << 1;
+/// Around a pane that needs the user, in points.
+const ATTENTION_BORDER: f64 = 2.0;
 /// Panes keys aren't going to are dimmed toward the background (as in Ghostty).
 const UNFOCUSED_OPACITY: f32 = 0.7;
 
@@ -105,6 +111,8 @@ struct Surface {
     hint: Option<LinkHint>,
     /// The pane keys go to in its window (it shows the window's title).
     active: bool,
+    /// Some pane in its window needs the user (see `App::refresh_attention`).
+    window_attention: bool,
 }
 
 /// An open search bar and what it found.
@@ -286,6 +294,14 @@ impl Host for GuiHost {
     fn pane_closed(&self, id: PaneId) {
         run_on_main_with(id as usize, on_pane_closed);
     }
+
+    fn pane_status(&self, id: PaneId) {
+        run_on_main_with(id as usize, on_pane_status);
+    }
+}
+
+extern "C" fn on_pane_status(_: *mut c_void) {
+    with_app(App::refresh_attention);
 }
 
 /// How long after a key press output is gathered before drawing it: enough
@@ -400,6 +416,7 @@ pub fn run(config: Config) -> io::Result<()> {
             split_class: register_split_class(),
             config,
             cascade: CGPoint::default(),
+            attention_count: 0,
         };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| app.open_window(pane, false));
@@ -541,6 +558,7 @@ impl App {
                 hover: None,
                 hint: None,
                 active,
+                window_attention: false,
             });
             view
         }
@@ -673,6 +691,61 @@ impl App {
         out
     }
 
+    /// Shows which panes need the user: a border on the pane, a mark on its
+    /// window's title, a count on the Dock icon. A new one while mightty is
+    /// in the background bounces the Dock icon once.
+    fn refresh_attention(&mut self) {
+        let mut windows = Vec::new();
+        for surface in &mut self.surfaces {
+            let attention = surface.pane.attention().is_some();
+            // SAFETY: main thread; documented signatures.
+            unsafe {
+                let layer: Id = msg!(surface.container, c"layer");
+                call!(layer, c"setBorderWidth:", if attention { ATTENTION_BORDER } else { 0.0 });
+                if attention {
+                    let orange: Id = msg!(class(c"NSColor"), c"systemOrangeColor");
+                    let orange: Id = msg!(orange, c"CGColor");
+                    call!(layer, c"setBorderColor:", orange);
+                }
+            }
+            if attention {
+                windows.push(surface.window);
+            }
+        }
+        for surface in &mut self.surfaces {
+            let marked = windows.contains(&surface.window);
+            if surface.window_attention != marked {
+                surface.window_attention = marked;
+                surface.title.clear();
+                surface.render();
+            }
+        }
+        let count = self.mux.attention_queue().len();
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+            let tile: Id = msg!(ns_app, c"dockTile");
+            call!(tile, c"setBadgeLabel:", if count == 0 { NIL } else { nsstring(&count.to_string()) });
+            let active: Bool = msg!(ns_app, c"isActive");
+            if count > self.attention_count && active == NO {
+                let _: isize = msg!(ns_app, c"requestUserAttention:", 10usize); // informational: one bounce
+            }
+        }
+        self.attention_count = count;
+    }
+
+    /// ⌘⇧A: the pane that has needed the user longest.
+    fn jump_to_attention(&mut self) {
+        let shown = self.mux.attention_queue().into_iter().find(|p| self.surfaces.iter().any(|s| s.pane.id == p.id));
+        match shown {
+            Some(pane) => {
+                self.focus_pane(pane.id);
+            }
+            // SAFETY: plain AppKit call.
+            None => unsafe { NSBeep() },
+        }
+    }
+
     /// Brings pane `id`'s window (or tab) to the front, keys going to it.
     fn focus_pane(&mut self, id: PaneId) -> bool {
         let Some((window, view)) = self.surfaces.iter().find(|s| s.pane.id == id).map(|s| (s.window, s.view)) else {
@@ -691,8 +764,14 @@ impl App {
         for w in &self.windows {
             // SAFETY: main thread; documented signature.
             let key: Bool = unsafe { msg!(w.window, c"isKeyWindow") };
-            if let Some(s) = self.surfaces.iter_mut().find(|s| s.view == w.active && s.renderer.focused != (key != NO)) {
-                s.set_focused(key != NO);
+            let key = key != NO;
+            for s in self.surfaces.iter_mut().filter(|s| s.window == w.window) {
+                let focused = key && s.view == w.active;
+                if s.renderer.focused != focused && s.view == w.active {
+                    s.set_focused(focused);
+                } else if s.pane.set_focused(focused) {
+                    run_on_main_with(0, on_pane_status);
+                }
             }
         }
     }
@@ -799,6 +878,14 @@ impl App {
             call!(window, c"invalidateCursorRectsForView:", w.root);
         }
         self.dim(window);
+    }
+
+    /// Draws all of `window`'s panes again, at its current size.
+    fn redraw_window(&mut self, window: Id) {
+        self.layout(window, false);
+        for surface in self.surfaces.iter_mut().filter(|s| s.window == window) {
+            surface.render();
+        }
     }
 
     /// Dims the panes keys aren't going to, when there are several.
@@ -909,7 +996,10 @@ impl Surface {
                 if let Some(code) = self.pane.exit_status() {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
                 }
-                // The window shows its active pane's title.
+                // The window shows its active pane's title, marked if any of its panes needs the user.
+                if self.window_attention {
+                    title.insert_str(0, "● ");
+                }
                 if self.active && title != self.title {
                     call!(self.window, c"setTitle:", nsstring(&title));
                     self.title = title;
@@ -1202,6 +1292,10 @@ impl Surface {
 
     fn set_focused(&mut self, focused: bool) {
         self.renderer.focused = focused;
+        // Looking at a pane answers whatever it needed the user for.
+        if self.pane.set_focused(focused) {
+            run_on_main_with(self.pane.id as usize, on_pane_status);
+        }
         if self.pane.term.lock().unwrap().modes().focus_events {
             let _ = self.pane.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
         }
@@ -1644,6 +1738,16 @@ unsafe fn register_delegate_class() -> Id {
             app.surfaces.iter_mut().find(|s| s.view == active).map(|s| s.set_focused(key))
         });
     }
+    /// A tab coming to the front, a window uncovered: what it last showed may
+    /// be gone (hidden tabs drop it), and it may have been resized meanwhile.
+    extern "C" fn did_change_occlusion(_: Id, _: Sel, notification: Id) {
+        let window = window_of(notification);
+        // SAFETY: an NSWindow; documented signature.
+        let state: usize = unsafe { msg!(window, c"occlusionState") };
+        if state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0 {
+            with_app(|app| app.redraw_window(window));
+        }
+    }
     extern "C" fn did_become_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, true);
     }
@@ -1685,6 +1789,9 @@ unsafe fn register_delegate_class() -> Id {
         let direction = [Direction::Left, Direction::Right, Direction::Up, Direction::Down][tag as usize % 4];
         with_app(|app| app.select_split_toward(direction));
     }
+    extern "C" fn jump_to_attention(_: Id, _: Sel, _sender: Id) {
+        with_app(App::jump_to_attention);
+    }
     extern "C" fn toggle_zoom(_: Id, _: Sel, _sender: Id) {
         with_app(App::toggle_zoom);
     }
@@ -1722,6 +1829,7 @@ unsafe fn register_delegate_class() -> Id {
             (c"windowDidResize:", action(did_resize), c"v@:@"),
             (c"windowDidChangeBackingProperties:", action(did_resize), c"v@:@"),
             (c"windowDidBecomeKey:", action(did_become_key), c"v@:@"),
+            (c"windowDidChangeOcclusionState:", action(did_change_occlusion), c"v@:@"),
             (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
             (c"windowWillClose:", action(will_close), c"v@:@"),
             (c"newWindow:", action(new_window), c"v@:@"),
@@ -1735,6 +1843,7 @@ unsafe fn register_delegate_class() -> Id {
             (c"selectSplitToward:", action(select_split_toward), c"v@:@"),
             (c"toggleSplitZoom:", action(toggle_zoom), c"v@:@"),
             (c"equalizeSplits:", action(equalize), c"v@:@"),
+            (c"jumpToAttention:", action(jump_to_attention), c"v@:@"),
         ])
     }
 }
@@ -1793,6 +1902,8 @@ unsafe fn install_menu(ns_app: Id) {
         // AppKit adds the tab items (Show Tab Bar, Move Tab to New Window, …) here.
         let window_menu = submenu(bar, "Window");
         add_item(window_menu, "Minimize", c"performMiniaturize:", "m");
+        separator(window_menu);
+        add_item(window_menu, "Jump to Pane Needing You", c"jumpToAttention:", "A");
         separator(window_menu);
         let item = add_item(window_menu, "Zoom Split", c"toggleSplitZoom:", "\r");
         call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
