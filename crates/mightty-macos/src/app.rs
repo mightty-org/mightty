@@ -6,7 +6,7 @@
 //! libdispatch. The mux also serves the control socket, so `mightty ctl` and
 //! AI agents can open, drive and read panes; panes they open get windows.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_void};
 use std::fs;
 use std::io;
@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions};
+use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
 use mightty_term::{MouseMode, Term};
 
-use crate::config::{Config, OptionAsAlt};
+use crate::config::{Config, ConfirmClose, OptionAsAlt};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
@@ -839,6 +839,26 @@ impl App {
         None
     }
 
+    /// What to tell the user before closing `views`' panes, or `None` to
+    /// close without asking (see `confirm-close-surface`).
+    fn close_question(&self, views: &[Id]) -> Option<String> {
+        let panes: Vec<&Arc<Pane>> = self.surfaces.iter().filter(|s| views.contains(&s.view)).map(|s| &s.pane).collect();
+        let running: Vec<String> = panes
+            .iter()
+            .filter(|p| p.is_alive() && !matches!(p.status(), Status::Idle | Status::Exited))
+            .map(|p| program(p))
+            .collect();
+        match (self.config.confirm_close, running.as_slice()) {
+            (ConfirmClose::Never, _) | (ConfirmClose::Running, []) => None,
+            (ConfirmClose::Always, []) => Some(String::new()),
+            (_, [one]) => Some(format!("“{one}” is still running. Closing ends it.")),
+            (_, [first, rest @ ..]) => {
+                let others = if rest.len() == 1 { "1 other".to_owned() } else { format!("{} others", rest.len()) };
+                Some(format!("“{first}” and {others} are still running. Closing ends them."))
+            }
+        }
+    }
+
     /// Ends `closed`'s pane unless another surface shows it.
     fn release_pane(&self, closed: &Surface) {
         if !self.surfaces.iter().any(|s| s.pane.id == closed.pane.id) {
@@ -990,6 +1010,68 @@ impl App {
         w.tree.set_ratio(&divider.path, ratio);
         let window = w.window;
         self.layout(window, false);
+    }
+}
+
+/// What runs in `pane`, by name: the program of its command line.
+fn program(pane: &Pane) -> String {
+    let line = pane.term.lock().unwrap().running_command().unwrap_or_else(|| pane.command.clone());
+    let word = line.split_whitespace().find(|w| !w.contains('=')).unwrap_or(&line);
+    word.rsplit('/').next().unwrap_or(word).to_owned()
+}
+
+/// What a confirmed close sheet closes.
+#[derive(Clone, Copy)]
+enum Closing {
+    Pane(Id),
+    Window(Id),
+}
+
+thread_local! {
+    /// The close waiting on a sheet's answer: global blocks capture nothing.
+    static CLOSING: Cell<Option<Closing>> = const { Cell::new(None) };
+}
+
+/// NSAlertFirstButtonReturn: "Close".
+const ALERT_FIRST_BUTTON: isize = 1000;
+
+/// An alert asking `title`, explained by `detail`, with Close and Cancel.
+unsafe fn close_alert(title: &str, detail: &str) -> Id {
+    unsafe {
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(alert, c"setMessageText:", nsstring(title));
+        call!(alert, c"setInformativeText:", nsstring(detail));
+        let close: Id = msg!(alert, c"addButtonWithTitle:", nsstring(if title.starts_with("Quit") { "Quit" } else { "Close" }));
+        call!(close, c"setHasDestructiveAction:", YES);
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
+        alert
+    }
+}
+
+/// Asks on a sheet over `window` before carrying out `closing`.
+fn confirm(window: Id, closing: Closing, title: &str, detail: &str) {
+    static ANSWERED: Block = Block::with_response(answered);
+    unsafe extern "C" fn answered(_: *const Block, response: isize) {
+        let Some(closing) = CLOSING.with(Cell::take) else { return };
+        if response != ALERT_FIRST_BUTTON {
+            return;
+        }
+        match closing {
+            Closing::Pane(view) => close_surfaces(vec![view]),
+            // `close` skips windowShouldClose:, which asked already.
+            // SAFETY: main thread; a live NSWindow.
+            Closing::Window(window) => unsafe { call!(window, c"close") },
+        }
+    }
+    // SAFETY: main thread; documented signatures; the handler is a global block.
+    unsafe {
+        let sheet: Id = msg!(window, c"attachedSheet");
+        if !sheet.is_null() {
+            return; // already asking
+        }
+        CLOSING.with(|c| c.set(Some(closing)));
+        let alert = close_alert(title, detail);
+        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
     }
 }
 
@@ -1822,10 +1904,44 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn split_down(_: Id, _: Sel, _sender: Id) {
         with_app(|app| app.split(Axis::Column));
     }
-    /// ⌘W: the active pane, and the window with its last.
+    /// ⌘W: the active pane, and the window with its last; asking first if
+    /// something runs in it (`confirm-close-surface`).
     extern "C" fn close_split(_: Id, _: Sel, _sender: Id) {
-        let active = with_app(|app| app.key_window()).flatten();
-        close_surfaces(active.map(|(_, view)| vec![view]).unwrap_or_default());
+        let Some((window, view)) = with_app(|app| app.key_window()).flatten() else { return };
+        match with_app(|app| app.close_question(&[view])).flatten() {
+            Some(running) => confirm(window, Closing::Pane(view), "Close this pane?", &running),
+            None => close_surfaces(vec![view]),
+        }
+    }
+    /// The close button, ⌘⇧W and a tab's ×.
+    extern "C" fn should_close(_: Id, _: Sel, window: Id) -> Bool {
+        let question = with_app(|app| {
+            let views: Vec<Id> = app.surfaces.iter().filter(|s| s.window == window).map(|s| s.view).collect();
+            app.close_question(&views)
+        });
+        match question.flatten() {
+            Some(running) => {
+                confirm(window, Closing::Window(window), "Close this window?", &running);
+                NO
+            }
+            None => YES,
+        }
+    }
+    /// ⌘Q.
+    extern "C" fn should_terminate(_: Id, _: Sel, _: Id) -> usize {
+        const TERMINATE_CANCEL: usize = 0;
+        const TERMINATE_NOW: usize = 1;
+        let question = with_app(|app| {
+            let views: Vec<Id> = app.surfaces.iter().map(|s| s.view).collect();
+            app.close_question(&views)
+        });
+        let Some(running) = question.flatten() else { return TERMINATE_NOW };
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let alert = close_alert("Quit mightty?", &running.replace("Closing", "Quitting"));
+            let response: isize = msg!(alert, c"runModal");
+            if response == ALERT_FIRST_BUTTON { TERMINATE_NOW } else { TERMINATE_CANCEL }
+        }
     }
     /// ⌘[ / ⌘]: the menu item's tag is the step.
     extern "C" fn select_split(_: Id, _: Sel, sender: Id) {
@@ -1888,6 +2004,12 @@ unsafe fn register_delegate_class() -> Id {
             ),
             (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
             (c"windowWillClose:", action(will_close), c"v@:@"),
+            (c"windowShouldClose:", should_close as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void, c"c@:@"),
+            (
+                c"applicationShouldTerminate:",
+                should_terminate as extern "C" fn(Id, Sel, Id) -> usize as *const c_void,
+                c"Q@:@",
+            ),
             (c"newWindow:", action(new_window), c"v@:@"),
             (c"newTab:", action(new_tab), c"v@:@"),
             (c"newWindowForTab:", action(new_tab), c"v@:@"),

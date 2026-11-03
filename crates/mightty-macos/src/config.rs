@@ -33,6 +33,17 @@ pub struct Config {
     /// Which Option keys act as Alt (Meta) instead of typing special
     /// characters; `None`: decided by the keyboard layout.
     pub option_as_alt: Option<OptionAsAlt>,
+    pub confirm_close: ConfirmClose,
+}
+
+/// `confirm-close-surface`, as in Ghostty: when closing a pane, window or
+/// mightty asks first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmClose {
+    Never,
+    /// When a command or agent is running in it.
+    Running,
+    Always,
 }
 
 /// `macos-option-as-alt`, as in Ghostty.
@@ -76,6 +87,7 @@ impl Default for Config {
             scrollback_lines: DEFAULT_SCROLLBACK,
             vsync: true,
             option_as_alt: None,
+            confirm_close: ConfirmClose::Running,
         }
     }
 }
@@ -187,6 +199,32 @@ const SETTINGS: &[Setting] = &[
                 }
                 .into()
             })
+        },
+    },
+    Setting {
+        name: "confirm-close-surface",
+        value: "WHEN",
+        help: "true, false or always: ask before closing a pane, window or mightty \
+               (true: only while a command or agent runs in it)",
+        color: false,
+        set: |c, v| {
+            c.confirm_close = match v {
+                "true" => ConfirmClose::Running,
+                "false" => ConfirmClose::Never,
+                "always" => ConfirmClose::Always,
+                _ => return Err("expects true, false or always".into()),
+            };
+            Ok(())
+        },
+        get: |c| {
+            Some(
+                match c.confirm_close {
+                    ConfirmClose::Running => "true",
+                    ConfirmClose::Never => "false",
+                    ConfirmClose::Always => "always",
+                }
+                .into(),
+            )
         },
     },
     Setting {
@@ -560,6 +598,17 @@ mod tests {
         assert_eq!((c.cols, c.rows, c.font.as_str(), c.font_size, c.vsync), (120, 40, "SF Mono", 13.5, false));
         c.apply_args(&args(&["--macos-option-as-alt=left"])).unwrap();
         assert_eq!(c.option_as_alt, Some(OptionAsAlt::Left));
+    }
+
+    #[test]
+    fn confirm_close_values() {
+        let mut c = Config::default();
+        assert_eq!(c.confirm_close, ConfirmClose::Running);
+        for (value, expected) in [("always", ConfirmClose::Always), ("false", ConfirmClose::Never), ("true", ConfirmClose::Running)] {
+            c.apply_args(&args(&[&format!("--confirm-close-surface={value}")])).unwrap();
+            assert_eq!(c.confirm_close, expected);
+        }
+        assert!(c.apply_args(&args(&["--confirm-close-surface=sometimes"])).is_err());
     }
 
     #[test]

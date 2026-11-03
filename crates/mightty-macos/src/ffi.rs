@@ -150,6 +150,11 @@ impl Block {
         Self::with_invoke(invoke as *const c_void)
     }
 
+    /// `void (^)(NSInteger)`, as for an alert's response.
+    pub const fn with_response(invoke: unsafe extern "C" fn(*const Block, isize)) -> Self {
+        Self::with_invoke(invoke as *const c_void)
+    }
+
     const fn with_invoke(invoke: *const c_void) -> Self {
         const BLOCK_IS_GLOBAL: i32 = 1 << 28;
         static DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() };
