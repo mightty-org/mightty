@@ -6,8 +6,9 @@
 
 use crate::face::{Point, Segment};
 
-/// Curves are flattened into lines no further than this from them, in pixels.
-const TOLERANCE: f32 = 0.1;
+/// Curves are flattened into lines no further than this from them, in
+/// pixels: as coarse as CoreText's, whose glyphs ours should match.
+const TOLERANCE: f32 = 0.2;
 
 /// Coverage (0–255) of `outline`, in font units scaled by `scale` pixels per
 /// unit, with its origin at pixel (`x`, `y`) of a `width`×`height` image whose
@@ -33,6 +34,11 @@ pub fn rasterize(outline: &[Segment], scale: f32, x: f32, y: f32, width: usize, 
             Segment::QuadTo(c, p) => {
                 let (c, p) = (to_pixels(c), to_pixels(p));
                 acc.quad(pen, c, p);
+                pen = p;
+            }
+            Segment::CubicTo(c1, c2, p) => {
+                let (c1, c2, p) = (to_pixels(c1), to_pixels(c2), to_pixels(p));
+                acc.cubic(pen, c1, c2, p);
                 pen = p;
             }
             Segment::Close => {
@@ -74,6 +80,26 @@ impl Accumulator {
             let t = i as f32 / n as f32;
             let u = 1.0 - t;
             let to = Point { x: u * u * p0.x + 2.0 * u * t * p1.x + t * t * p2.x, y: u * u * p0.y + 2.0 * u * t * p1.y + t * t * p2.y };
+            self.line(from, to);
+            from = to;
+        }
+    }
+
+    fn cubic(&mut self, p0: Point, p1: Point, p2: Point, p3: Point) {
+        // Lines n to a curve stray at most ¾·d/n² from it, d the larger
+        // second difference of its points.
+        let second = |a: Point, b: Point, c: Point| {
+            let (dx, dy) = (a.x - 2.0 * b.x + c.x, a.y - 2.0 * b.y + c.y);
+            (dx * dx + dy * dy).sqrt()
+        };
+        let d = second(p0, p1, p2).max(second(p1, p2, p3));
+        let n = ((0.75 * d / TOLERANCE).sqrt().ceil() as usize).clamp(1, 64);
+        let mut from = p0;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            let (a, b, c, e) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            let to = Point { x: a * p0.x + b * p1.x + c * p2.x + e * p3.x, y: a * p0.y + b * p1.y + c * p2.y + e * p3.y };
             self.line(from, to);
             from = to;
         }
@@ -247,5 +273,19 @@ mod tests {
         let total: f32 = rasterize(&disc, 1.0, 0.0, 8.0, 8, 8).iter().map(|&c| c as f32 / 255.0).sum();
         // Quadratic arcs bulge past a true circle: between the circle and the square.
         assert!((50.0..58.0).contains(&total), "{total}");
+
+        // Cubic arcs with the usual 0.5523 handles are within 0.03% of a
+        // circle; flattening loses up to 5% at this size.
+        let k = 4.0 * 0.5523;
+        let disc = vec![
+            Segment::MoveTo(p(8.0, 4.0)),
+            Segment::CubicTo(p(8.0, 4.0 + k), p(4.0 + k, 8.0), p(4.0, 8.0)),
+            Segment::CubicTo(p(4.0 - k, 8.0), p(0.0, 4.0 + k), p(0.0, 4.0)),
+            Segment::CubicTo(p(0.0, 4.0 - k), p(4.0 - k, 0.0), p(4.0, 0.0)),
+            Segment::CubicTo(p(4.0 + k, 0.0), p(8.0, 4.0 - k), p(8.0, 4.0)),
+            Segment::Close,
+        ];
+        let total: f32 = rasterize(&disc, 1.0, 0.0, 8.0, 8, 8).iter().map(|&c| c as f32 / 255.0).sum();
+        assert!((47.7..50.4).contains(&total), "{total}");
     }
 }

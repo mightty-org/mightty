@@ -36,6 +36,18 @@ pub struct CGRect {
     pub size: CGSize,
 }
 
+/// x' = a·x + c·y + tx, y' = b·x + d·y + ty.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CGAffineTransform {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub tx: f64,
+    pub ty: f64,
+}
+
 /// `NSRange`, in UTF-16 code units.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -200,7 +212,10 @@ pub const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 pub const kCTFontTraitItalic: u32 = 1 << 0;
 pub const kCTFontTraitBold: u32 = 1 << 1;
 pub const kCTFontTraitColorGlyphs: u32 = 1 << 13;
+pub const kCFNumberSInt64Type: isize = 4;
+pub const kCFNumberFloat64Type: isize = 6;
 pub const kCGImageAlphaPremultipliedFirst: u32 = 2;
+pub const kCGTextFillStroke: i32 = 2;
 pub const kCGBitmapByteOrder32Little: u32 = 2 << 12;
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -223,6 +238,9 @@ unsafe extern "C" {
         value_callbacks: *const c_void,
     ) -> CFTypeRef;
     pub fn CFAttributedStringCreate(alloc: *const c_void, string: CFStringRef, attributes: CFTypeRef) -> CFTypeRef;
+    pub fn CFDictionaryGetCount(dict: CFTypeRef) -> isize;
+    pub fn CFDictionaryGetKeysAndValues(dict: CFTypeRef, keys: *mut CFTypeRef, values: *mut CFTypeRef);
+    pub fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
     pub static kCFTypeDictionaryKeyCallBacks: [u8; 0];
     pub static kCFTypeDictionaryValueCallBacks: [u8; 0];
     pub static kCFBooleanTrue: CFTypeRef;
@@ -238,6 +256,12 @@ unsafe extern "C" {
         value: u32,
         mask: u32,
     ) -> CTFontRef;
+    pub fn CTFontCreateCopyWithAttributes(
+        font: CTFontRef,
+        size: f64,
+        matrix: *const CGAffineTransform,
+        attributes: CFTypeRef,
+    ) -> CTFontRef;
     pub fn CTFontCreateForString(current: CTFontRef, string: CFStringRef, range: CFRange) -> CTFontRef;
     pub fn CTFontGetAscent(font: CTFontRef) -> f64;
     pub fn CTFontGetDescent(font: CTFontRef) -> f64;
@@ -245,6 +269,7 @@ unsafe extern "C" {
     pub fn CTFontGetSymbolicTraits(font: CTFontRef) -> u32;
     pub fn CTFontCopyAttribute(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef;
     pub fn CTFontCopyPostScriptName(font: CTFontRef) -> CFStringRef;
+    pub fn CTFontCopyVariation(font: CTFontRef) -> CFTypeRef;
     pub static kCTFontURLAttribute: CFStringRef;
     pub fn CTFontGetGlyphsForCharacters(font: CTFontRef, chars: *const u16, glyphs: *mut u16, count: isize) -> bool;
     pub fn CTFontGetAdvancesForGlyphs(
@@ -277,6 +302,9 @@ unsafe extern "C" {
     ) -> CGContextRef;
     pub fn CGContextRelease(ctx: CGContextRef);
     pub fn CGContextSetRGBFillColor(ctx: CGContextRef, r: f64, g: f64, b: f64, a: f64);
+    pub fn CGContextSetRGBStrokeColor(ctx: CGContextRef, r: f64, g: f64, b: f64, a: f64);
+    pub fn CGContextSetLineWidth(ctx: CGContextRef, width: f64);
+    pub fn CGContextSetTextDrawingMode(ctx: CGContextRef, mode: i32);
     pub fn CGContextSetTextPosition(ctx: CGContextRef, x: f64, y: f64);
     pub fn CGContextSetAllowsFontSmoothing(ctx: CGContextRef, allows: bool);
     pub fn CGContextSetShouldSmoothFonts(ctx: CGContextRef, should: bool);
