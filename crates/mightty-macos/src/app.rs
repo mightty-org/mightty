@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use mightty_mux::{Host, Mux, Pane, PaneId, SpawnOptions};
+use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions};
 use mightty_term::{MouseMode, Term};
 
 use crate::config::{Config, OptionAsAlt};
@@ -271,9 +271,16 @@ impl Host for GuiHost {
         run_on_main_with(id as usize, on_pane_exited);
     }
 
-    fn show_pane(&self, id: PaneId) -> bool {
-        run_on_main_with(id as usize, on_show_pane);
-        true
+    fn show_pane(&self, id: PaneId, placement: Placement) -> bool {
+        run_on_main_sync(|| with_app(|app| app.show_pane(id, placement)).unwrap_or(false))
+    }
+
+    fn locations(&self) -> Vec<(PaneId, Location)> {
+        run_on_main_sync(|| with_app(|app| app.locations()).unwrap_or_default())
+    }
+
+    fn focus_pane(&self, id: PaneId) -> bool {
+        run_on_main_sync(|| with_app(|app| app.focus_pane(id)).unwrap_or(false))
     }
 
     fn pane_closed(&self, id: PaneId) {
@@ -356,15 +363,6 @@ fn close_surfaces(views: Vec<Id>) {
     }
 }
 
-extern "C" fn on_show_pane(context: *mut c_void) {
-    let id = context as PaneId;
-    with_app(|app| {
-        if let Some(pane) = app.mux.pane(id) {
-            app.open_window(pane, true);
-        }
-    });
-}
-
 /// Opens the first window and runs the Cocoa event loop. Returns only on setup errors.
 pub fn run(config: Config) -> io::Result<()> {
     // SAFETY: AppKit calls on the main thread with their documented signatures.
@@ -413,11 +411,12 @@ pub fn run(config: Config) -> io::Result<()> {
 
 impl App {
     fn open_window(&mut self, pane: Arc<Pane>, hold: bool) {
-        self.open_window_in(pane, hold, NIL);
+        self.open_window_in(pane, hold, NIL, true);
     }
 
-    /// Opens a window for `pane`, as a new tab of `tab_of` unless that's nil.
-    fn open_window_in(&mut self, pane: Arc<Pane>, hold: bool, tab_of: Id) {
+    /// Opens a window for `pane`, as a new tab of `tab_of` unless that's nil;
+    /// it becomes the key window with `focus` (a tab is otherwise added behind).
+    fn open_window_in(&mut self, pane: Arc<Pane>, hold: bool, tab_of: Id, focus: bool) {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
@@ -457,7 +456,7 @@ impl App {
             call!(msg!(root, c"layer"), c"setBackgroundColor:", divider);
             call!(window, c"setContentView:", root);
             call!(root, c"release");
-            let view = self.add_surface(window, content, renderer, pane, hold);
+            let view = self.add_surface(window, content, renderer, pane, hold, true);
             self.windows.push(Window { window, root, tree: Node::Leaf(view), active: view, zoomed: false, dragging: None });
             call!(window, c"makeFirstResponder:", view);
             if self.windows.len() == 1 {
@@ -470,8 +469,11 @@ impl App {
             } else {
                 call!(tab_of, c"addTabbedWindow:ordered:", window, 1isize); // above: just after it
             }
-            call!(window, c"makeKeyAndOrderFront:", NIL);
+            if focus || tab_of.is_null() {
+                call!(window, c"makeKeyAndOrderFront:", NIL);
+            }
             self.layout(window, true);
+            self.sync_key_focus();
         }
     }
 
@@ -482,8 +484,8 @@ impl App {
     }
 
     /// Adds a view for `pane` to `window`, at `frame` of its content view
-    /// until the next layout. Returns the view.
-    fn add_surface(&mut self, window: Id, frame: CGRect, renderer: Renderer, pane: Arc<Pane>, hold: bool) -> Id {
+    /// until the next layout; `active` if keys are to go to it. Returns the view.
+    fn add_surface(&mut self, window: Id, frame: CGRect, mut renderer: Renderer, pane: Arc<Pane>, hold: bool, active: bool) -> Id {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let layer = renderer.layer();
@@ -516,6 +518,7 @@ impl App {
             call!(view, c"release");
 
             pane.set_visible(true);
+            renderer.focused = active;
             self.surfaces.push(Surface {
                 window,
                 container,
@@ -537,7 +540,7 @@ impl App {
                 search: None,
                 hover: None,
                 hint: None,
-                active: true,
+                active,
             });
             view
         }
@@ -571,7 +574,7 @@ impl App {
         let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd: cwd.clone(), ..Default::default() };
         match self.mux.spawn(opts) {
             Ok(pane) => {
-                self.open_window_in(pane, false, tab_of);
+                self.open_window_in(pane, false, tab_of, true);
                 if let Some(surface) = self.surfaces.last_mut() {
                     surface.start_dir = cwd;
                 }
@@ -587,7 +590,7 @@ impl App {
         let Some(current) = self.surfaces.iter().find(|s| s.view == active) else { return };
         let cwd = self.cwd_of(current);
         // SAFETY: main thread; documented signatures.
-        let (frame, scale) = unsafe { (send_rect(current.container, c"frame"), msg!(window, c"backingScaleFactor")) };
+        let (frame, scale): (CGRect, f64) = unsafe { (send_rect(current.container, c"frame"), msg!(window, c"backingScaleFactor")) };
         // The new pane gets about half: start the shell at that size.
         let mut size = frame.size;
         match axis {
@@ -600,16 +603,98 @@ impl App {
             Ok(pane) => pane,
             Err(e) => return eprintln!("mightty: could not start a shell: {e}"),
         };
-        let renderer = self.new_renderer(scale);
-        let view = self.add_surface(window, frame, renderer, pane, false);
-        if let Some(surface) = self.surfaces.last_mut() {
+        let view = self.insert_split(active, pane, axis, false, true);
+        if let Some(surface) = self.surfaces.iter_mut().find(|s| Some(s.view) == view) {
             surface.start_dir = cwd;
         }
-        let Some(w) = self.windows.iter_mut().find(|w| w.window == window) else { return };
-        w.tree.split(active, view, axis);
+    }
+
+    /// Splits `at`'s space with a view for `pane` (right of or below it),
+    /// which keys go to with `focus`. Returns the view.
+    fn insert_split(&mut self, at: Id, pane: Arc<Pane>, axis: Axis, hold: bool, focus: bool) -> Option<Id> {
+        let current = self.surfaces.iter().find(|s| s.view == at)?;
+        let window = current.window;
+        // SAFETY: main thread; documented signatures.
+        let (frame, scale): (CGRect, f64) = unsafe { (send_rect(current.container, c"frame"), msg!(window, c"backingScaleFactor")) };
+        let renderer = self.new_renderer(scale);
+        let view = self.add_surface(window, frame, renderer, pane, hold, focus);
+        let w = self.windows.iter_mut().find(|w| w.window == window)?;
+        w.tree.split(at, view, axis);
         w.zoomed = false;
-        self.focus(view);
+        if focus {
+            self.focus(view);
+        }
         self.layout(window, false);
+        Some(view)
+    }
+
+    /// Shows pane `id` for an agent, kept open after it exits so its output
+    /// stays readable. Splits and tabs leave the keyboard where it is: the
+    /// user may be typing to the agent.
+    fn show_pane(&mut self, id: PaneId, placement: Placement) -> bool {
+        let Some(pane) = self.mux.pane(id) else { return false };
+        // Next to `beside`, else the pane the user is in.
+        let near = |app: &Self, beside: Option<PaneId>| {
+            let shown = beside.and_then(|id| app.surfaces.iter().find(|s| s.pane.id == id).map(|s| s.view));
+            shown.or_else(|| app.key_window().map(|k| k.1)).or_else(|| app.windows.first().map(|w| w.active))
+        };
+        let near = match placement {
+            Placement::Window => None,
+            Placement::Tab { beside } | Placement::Split { beside, .. } => near(self, beside),
+        };
+        let window = near.and_then(|view| self.surfaces.iter().find(|s| s.view == view)).map(|s| s.window);
+        match (placement, near, window) {
+            (Placement::Split { down, .. }, Some(view), _) => {
+                let axis = if down { Axis::Column } else { Axis::Row };
+                self.insert_split(view, pane, axis, true, false);
+            }
+            (Placement::Tab { .. }, _, Some(window)) => self.open_window_in(pane, true, window, false),
+            _ => self.open_window(pane, true),
+        }
+        true
+    }
+
+    /// Where each shown pane is, for `pane.list`.
+    fn locations(&self) -> Vec<(PaneId, Location)> {
+        let mut out = Vec::new();
+        for w in &self.windows {
+            // SAFETY: main thread; documented signatures.
+            let (number, tab, key) = unsafe {
+                let number: isize = msg!(w.window, c"windowNumber");
+                let tabs: Id = msg!(w.window, c"tabbedWindows");
+                let tab: usize = if tabs.is_null() { 0 } else { msg!(tabs, c"indexOfObject:", w.window) };
+                let key: Bool = msg!(w.window, c"isKeyWindow");
+                (number, if tab == NS_NOT_FOUND { 0 } else { tab }, key != NO)
+            };
+            for s in self.surfaces.iter().filter(|s| s.window == w.window) {
+                out.push((s.pane.id, Location { window: number as u64, tab, focused: key && s.active }));
+            }
+        }
+        out
+    }
+
+    /// Brings pane `id`'s window (or tab) to the front, keys going to it.
+    fn focus_pane(&mut self, id: PaneId) -> bool {
+        let Some((window, view)) = self.surfaces.iter().find(|s| s.pane.id == id).map(|s| (s.window, s.view)) else {
+            return false;
+        };
+        // SAFETY: main thread; documented signature.
+        unsafe { call!(window, c"makeKeyAndOrderFront:", NIL) };
+        self.focus(view);
+        self.sync_key_focus();
+        true
+    }
+
+    /// Updates which panes show as focused after key-window changes made
+    /// inside `with_app`, which the window delegate couldn't see.
+    fn sync_key_focus(&mut self) {
+        for w in &self.windows {
+            // SAFETY: main thread; documented signature.
+            let key: Bool = unsafe { msg!(w.window, c"isKeyWindow") };
+            if let Some(s) = self.surfaces.iter_mut().find(|s| s.view == w.active && s.renderer.focused != (key != NO)) {
+                s.set_focused(key != NO);
+            }
+        }
     }
 
     /// Closes `view`'s pane. If it was its window's last, returns the window

@@ -5,7 +5,8 @@
 //! |-------------------|---------------------------------------------------------------|
 //! | `app.info`        |                                                               |
 //! | `pane.list`       |                                                               |
-//! | `pane.spawn`      | `command?`, `shell?`, `cwd?`, `env?`, `cols?`, `rows?`, `visible?` (true) |
+//! | `pane.spawn`      | `command?`, `shell?`, `cwd?`, `env?`, `cols?`, `rows?`, `visible?` (true), `placement?` (`window` / `tab` / `right` / `down`), `beside?` (a pane) |
+//! | `pane.focus`      | `pane`                                                        |
 //! | `pane.send_text`  | `pane`, `text`, `enter?`                                      |
 //! | `pane.send_keys`  | `pane`, `keys` (names like `enter`, `ctrl-c`, `up`)           |
 //! | `pane.read`       | `pane`, `source?` (`screen` / `all`), `max_lines?`            |
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 use mightty_json::Value;
 use mightty_term::{CommandBlock, MarkKind, Term};
 
-use crate::{Mux, Pane, SpawnOptions, key_bytes};
+use crate::{Location, Mux, Pane, PaneId, Placement, SpawnOptions, key_bytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcError {
@@ -54,8 +55,21 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
             ("pid", process::id().into()),
             ("socket", mux.socket_path().map(|p| p.display().to_string()).into()),
         ])),
-        "pane.list" => Ok(Value::Array(mux.panes().iter().map(|p| info(p)).collect())),
-        "pane.spawn" => spawn(mux, params).map(|p| info(&p)),
+        "pane.list" => {
+            let locations = mux.host().locations();
+            Ok(Value::Array(mux.panes().iter().map(|p| info(p, location(&locations, p.id))).collect()))
+        }
+        "pane.spawn" => {
+            let pane = spawn(mux, params)?;
+            Ok(info(&pane, location(&mux.host().locations(), pane.id)))
+        }
+        "pane.focus" => {
+            let pane = pane(mux, params)?;
+            if !mux.host().focus_pane(pane.id) {
+                return Err(RpcError::failed(format!("pane {} isn't shown in a window", pane.id)));
+            }
+            Ok(Value::Null)
+        }
         "pane.send_text" => {
             let pane = pane(mux, params)?;
             let mut text = params["text"].as_str().ok_or_else(|| RpcError::invalid("`text` is required"))?.to_owned();
@@ -133,10 +147,14 @@ fn tail(text: &str, max_chars: usize) -> (String, bool) {
     (text.chars().skip(count - max_chars).collect(), true)
 }
 
-fn info(pane: &Pane) -> Value {
+fn location(locations: &[(PaneId, Location)], id: PaneId) -> Option<Location> {
+    locations.iter().find(|l| l.0 == id).map(|l| l.1)
+}
+
+fn info(pane: &Pane, location: Option<Location>) -> Value {
     let term = pane.term.lock().unwrap();
     let exit = pane.exit_status();
-    Value::object([
+    let mut info = Value::object([
         ("id", pane.id.into()),
         ("command", pane.command.as_str().into()),
         ("title", term.title().into()),
@@ -147,7 +165,13 @@ fn info(pane: &Pane) -> Value {
         ("exit_code", exit.flatten().into()),
         ("visible", pane.is_visible().into()),
         ("shell_integration", (!term.marks().is_empty()).into()),
-    ])
+    ]);
+    if let Some(at) = location {
+        info.insert("window", at.window);
+        info.insert("tab", at.tab);
+        info.insert("focused", at.focused);
+    }
+    info
 }
 
 fn block_info(term: &Term, block: &CommandBlock, max_output: usize) -> Value {
@@ -173,6 +197,12 @@ fn spawn(mux: &Mux, params: &Value) -> Result<Arc<Pane>> {
         cols: params["cols"].as_u64().map_or(120, |n| n.clamp(10, 1000) as u16),
         rows: params["rows"].as_u64().map_or(40, |n| n.clamp(4, 1000) as u16),
         visible: params["visible"].as_bool().unwrap_or(true),
+        placement: {
+            let beside = params["beside"].as_u64();
+            let name = params["placement"].as_str().unwrap_or("window");
+            Placement::parse(name, beside)
+                .ok_or_else(|| RpcError::invalid(format!("unknown placement `{name}` (window, tab, right, down)")))?
+        },
     };
     mux.spawn(opts).map_err(|e| RpcError::failed(format!("spawn failed: {e}")))
 }

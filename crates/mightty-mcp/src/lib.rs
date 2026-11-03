@@ -18,7 +18,9 @@ const INSTRUCTIONS: &str = "\
 Terminal panes in mightty. Use run_command for one-off shell commands: it returns output and exit \
 code. For long-running processes (dev servers, watchers, REPLs) use open_pane, then wait_for and \
 read_pane to follow them, send_text/send_keys to interact, and close_pane when done. Panes opened \
-here are visible to the user in mightty windows.";
+here are visible to the user: by default in a split beside your own pane, stacking further ones \
+below the last; open_pane's placement can ask for a tab or window instead. focus_pane brings a \
+pane to the front when you want the user to look at it.";
 
 pub enum Backend {
     /// A running mightty, over its control socket.
@@ -42,11 +44,20 @@ struct Server {
     /// Hidden shell reused by `run_command` calls that don't name a pane,
     /// so `cd` and environment changes carry over between calls.
     default_pane: Option<u64>,
+    /// The pane the agent runs in, when that's in this mightty
+    /// (`MIGHTTY_PANE_ID`): panes it opens go beside it.
+    own_pane: Option<u64>,
+    /// The last pane opened in a split by default: the next one stacks below it.
+    last_split: Option<u64>,
 }
 
 /// Serves MCP over newline-delimited JSON-RPC until `input` closes.
 pub fn serve(backend: Backend, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
-    let mut server = Server { backend, default_pane: None };
+    let own_pane = match &backend {
+        Backend::Remote(_) => std::env::var("MIGHTTY_PANE_ID").ok().and_then(|id| id.parse().ok()),
+        Backend::Local(_) => None,
+    };
+    let mut server = Server { backend, default_pane: None, own_pane, last_split: None };
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -73,7 +84,8 @@ impl Server {
             Err(CallError::Disconnected(_)) => {
                 let fresh = Client::discover().map_err(|_| "mightty was closed; reopen it to use its panes".to_owned())?;
                 *client = fresh;
-                self.default_pane = None;
+                // Pane ids were for the old instance.
+                (self.default_pane, self.own_pane, self.last_split) = (None, None, None);
                 if !params["pane"].is_null() {
                     return Err("mightty was restarted and pane ids changed; call list_panes".into());
                 }
@@ -118,7 +130,8 @@ impl Server {
         let args = if args.is_null() { Value::object::<&str>([]) } else { args.clone() };
         let outcome = match name {
             "list_panes" => self.call("pane.list", args).map(|v| v.to_string()),
-            "open_pane" => self.call("pane.spawn", args).map(|v| v.to_string()),
+            "open_pane" => self.open_pane(args),
+            "focus_pane" => self.call("pane.focus", args).map(|_| "focused".into()),
             "run_command" => self.run_command(args),
             "send_text" => self.call("pane.send_text", args).map(|_| "sent".into()),
             "send_keys" => self.call("pane.send_keys", args).map(|_| "sent".into()),
@@ -139,6 +152,36 @@ impl Server {
         };
         let content = Value::object([("type", "text".into()), ("text", text.into())]);
         Value::object([("content", vec![content].into()), ("isError", is_error.into())])
+    }
+
+    /// Without a placement, a visible pane goes in a split: below the last
+    /// one opened that way while it's shown, else right of the agent's pane.
+    /// Not knowing either, in a window.
+    fn open_pane(&mut self, mut args: Value) -> Result<String, String> {
+        let default = args["placement"].is_null() && args["visible"].as_bool() != Some(false);
+        if default {
+            let shown: Vec<u64> = self.call("pane.list", Value::Null)?.as_array().unwrap_or_default().iter()
+                .filter(|p| p["window"].as_u64().is_some())
+                .filter_map(|p| p["id"].as_u64())
+                .collect();
+            let stack = self.last_split.filter(|id| shown.contains(id));
+            match (stack, self.own_pane.filter(|id| shown.contains(id))) {
+                (Some(last), _) => {
+                    args.insert("placement", "down");
+                    args.insert("beside", last);
+                }
+                (None, Some(own)) => {
+                    args.insert("placement", "right");
+                    args.insert("beside", own);
+                }
+                (None, None) => {}
+            }
+        }
+        let pane = self.call("pane.spawn", args.clone())?;
+        if default && !args["placement"].is_null() {
+            self.last_split = pane["id"].as_u64();
+        }
+        Ok(pane.to_string())
     }
 
     fn run_command(&mut self, mut args: Value) -> Result<String, String> {
@@ -196,7 +239,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 fn tools() -> Value {
     let pane = || ("pane", prop("integer", "Pane id, from list_panes or open_pane."));
     let defs: Vec<(&str, &str, bool, Value)> = vec![
-        ("list_panes", "List terminal panes with their id, command, title, working directory and whether they are still running.", true, schema(vec![], &[])),
+        ("list_panes", "List terminal panes with their id, command, title, working directory, whether they are still running, and where they are shown: window, tab and whether the user is focused on it.", true, schema(vec![], &[])),
         (
             "run_command",
             "Run a shell command and wait for it to finish; returns its output and exit code. Without `pane`, runs in a hidden shell kept for this session, so `cd` and exports persist between calls. Requires zsh.",
@@ -209,12 +252,18 @@ fn tools() -> Value {
         ),
         (
             "open_pane",
-            "Open a new terminal pane, visible to the user in a mightty window. Use for long-running processes such as dev servers, watchers or REPLs.",
+            "Open a new terminal pane, visible to the user in mightty. Use for long-running processes such as dev servers, watchers or REPLs. By default it goes in a split beside your own pane, further ones stacking below it; it doesn't take the keyboard from the user.",
             false,
             schema(vec![
                 ("command", prop("string", "Shell command to run; the pane ends when it exits. Omit for an interactive shell.")),
                 ("cwd", prop("string", "Working directory (default: home).")),
-                ("visible", prop("boolean", "Show it in a window (default true).")),
+                ("visible", prop("boolean", "Show it to the user (default true).")),
+                ("placement", Value::object([
+                    ("type", "string".into()),
+                    ("enum", vec!["right".into(), "down".into(), "tab".into(), "window".into()].into()),
+                    ("description", "Where to show it: a split right of or below `beside`, a new tab beside it, or its own window.".into()),
+                ])),
+                ("beside", prop("integer", "Pane to open it next to (default: the pane the user is in).")),
             ], &[]),
         ),
         (
@@ -256,6 +305,12 @@ fn tools() -> Value {
             "Press keys in a pane, e.g. [\"ctrl-c\"], [\"up\", \"enter\"], [\"escape\", \":\", \"q\"]. Names: enter, tab, escape, backspace, space, up, down, left, right, home, end, pageup, pagedown, delete, f1-f12, ctrl-<key>, alt-<key>.",
             false,
             schema(vec![pane(), ("keys", Value::object([("type", "array".into()), ("items", Value::object([("type", "string".into())]))]))], &["pane", "keys"]),
+        ),
+        (
+            "focus_pane",
+            "Bring a pane to the front and give it the keyboard, to show the user something in it.",
+            false,
+            schema(vec![pane()], &["pane"]),
         ),
         ("close_pane", "Close a pane, ending its process.", false, schema(vec![pane()], &["pane"])),
     ];

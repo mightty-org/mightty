@@ -38,10 +38,55 @@ pub trait Host: Send + Sync {
     fn pane_exited(&self, _id: PaneId) {}
     /// The pane was closed through the API; drop any window showing it.
     fn pane_closed(&self, _id: PaneId) {}
-    /// Shows the pane in a window. Returns false if the host has no UI.
-    fn show_pane(&self, _id: PaneId) -> bool {
+    /// Shows the pane, where `placement` says. Returns false if the host has no UI.
+    fn show_pane(&self, _id: PaneId, _placement: Placement) -> bool {
         false
     }
+    /// Where each shown pane is.
+    fn locations(&self) -> Vec<(PaneId, Location)> {
+        Vec::new()
+    }
+    /// Brings the pane to the front and gives it the keyboard. False if it isn't shown.
+    fn focus_pane(&self, _id: PaneId) -> bool {
+        false
+    }
+}
+
+/// Where to show a new pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// A window of its own.
+    #[default]
+    Window,
+    /// A tab of the window `beside` is in.
+    Tab { beside: Option<PaneId> },
+    /// A split next to `beside`: to its right, or with `down` below it.
+    Split { beside: Option<PaneId>, down: bool },
+}
+
+impl Placement {
+    /// From its name in the API (`window`, `tab`, `right`, `down`); `beside`
+    /// defaults to the pane the user is in.
+    pub fn parse(name: &str, beside: Option<PaneId>) -> Option<Self> {
+        Some(match name {
+            "window" => Placement::Window,
+            "tab" => Placement::Tab { beside },
+            "right" => Placement::Split { beside, down: false },
+            "down" => Placement::Split { beside, down: true },
+            _ => return None,
+        })
+    }
+}
+
+/// Where a shown pane is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Location {
+    /// The window (or tab) it is in, by the window server's number.
+    pub window: u64,
+    /// Its tab's position in the window's tab bar, from 0.
+    pub tab: usize,
+    /// Keys go to it.
+    pub focused: bool,
 }
 
 /// A host with no UI: the MCP server's fallback, and tests.
@@ -61,13 +106,23 @@ pub struct SpawnOptions {
     pub env: Vec<(String, String)>,
     pub cols: u16,
     pub rows: u16,
-    /// Ask the host to show the pane in a window.
+    /// Ask the host to show the pane, at `placement`.
     pub visible: bool,
+    pub placement: Placement,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
-        Self { command: None, shell: None, cwd: None, env: Vec::new(), cols: 100, rows: 30, visible: false }
+        Self {
+            command: None,
+            shell: None,
+            cwd: None,
+            env: Vec::new(),
+            cols: 100,
+            rows: 30,
+            visible: false,
+            placement: Placement::Window,
+        }
     }
 }
 
@@ -207,13 +262,17 @@ impl Mux {
         self.panes.lock().unwrap().insert(id, pane.clone());
         spawn_reader(pane.clone(), reader, self.host.clone());
         if opts.visible {
-            pane.set_visible(self.host.show_pane(id));
+            pane.set_visible(self.host.show_pane(id, opts.placement));
         }
         Ok(pane)
     }
 
     pub fn pane(&self, id: PaneId) -> Option<Arc<Pane>> {
         self.panes.lock().unwrap().get(&id).cloned()
+    }
+
+    pub fn host(&self) -> &dyn Host {
+        &*self.host
     }
 
     pub fn panes(&self) -> Vec<Arc<Pane>> {
@@ -269,4 +328,36 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
             host.pane_exited(pane.id);
         })
         .expect("failed to spawn pane reader thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placements_by_name() {
+        assert_eq!(Placement::parse("window", Some(3)), Some(Placement::Window));
+        assert_eq!(Placement::parse("tab", Some(3)), Some(Placement::Tab { beside: Some(3) }));
+        assert_eq!(Placement::parse("right", None), Some(Placement::Split { beside: None, down: false }));
+        assert_eq!(Placement::parse("down", Some(1)), Some(Placement::Split { beside: Some(1), down: true }));
+        assert_eq!(Placement::parse("left", None), None);
+    }
+
+    /// Without a UI, a visible pane isn't shown, wherever it was asked for.
+    #[test]
+    fn headless_spawns_stay_hidden() {
+        let mux = Mux::new(Arc::new(Headless));
+        let params = mightty_json::parse(r#"{"command":"sleep 5","placement":"right","beside":1}"#).unwrap();
+        let pane = handle(&mux, "pane.spawn", &params).unwrap();
+        assert_eq!(pane["visible"].as_bool(), Some(false));
+        assert!(pane["window"].is_null());
+        let bad = mightty_json::parse(r#"{"command":"true","placement":"sideways"}"#).unwrap();
+        assert!(handle(&mux, "pane.spawn", &bad).unwrap_err().message.contains("unknown placement"));
+        assert!(handle(&mux, "pane.focus", &pane_param(pane["id"].as_u64().unwrap())).is_err());
+        mux.close(pane["id"].as_u64().unwrap());
+    }
+
+    fn pane_param(id: u64) -> mightty_json::Value {
+        mightty_json::Value::object([("pane", id.into())])
+    }
 }

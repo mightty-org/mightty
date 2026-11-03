@@ -10,13 +10,16 @@ usage: mightty ctl <command> [args]
 
   info                                  version, pid and socket of the running mightty
   list                                  list panes
-  spawn [--hidden] [--cwd DIR] [-- CMD] open a pane (an interactive shell without CMD)
+  spawn [--hidden] [--cwd DIR] [--tab | --right | --down] [--beside N] [-- CMD]
+                                        open a pane (an interactive shell without CMD), in a
+                                        window, a tab or a split beside pane N (default: this one)
   run [--pane N] [--timeout MS] -- CMD  run CMD in a shell pane; prints output, exits with its code
   send N TEXT [--enter]                 type TEXT into pane N
   keys N KEY...                         press keys: enter, ctrl-c, up, f5, alt-b, ...
   read N [--all] [--lines N]            print pane N's screen (or all scrollback)
   commands N [--limit N]                recent commands in pane N with output and exit codes
   wait N [--text T] [--command] [--exit] [--timeout MS]
+  focus N                               bring pane N to the front
   close N                               close pane N
   call METHOD [JSON]                    raw JSON-RPC call
 
@@ -34,23 +37,36 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
         "info" => print_json(&client.call("app.info", Value::Null)?),
         "list" => {
             let panes = client.call("pane.list", Value::Null)?;
-            println!("{:<4} {:<8} {:<7} {:<30} CWD", "ID", "STATE", "WINDOW", "COMMAND");
+            println!("{:<4} {:<8} {:<9} {:<30} CWD", "ID", "STATE", "WINDOW", "COMMAND");
             for p in panes.as_array().unwrap_or_default() {
                 let state = match (p["alive"].as_bool(), p["exit_code"].as_i64()) {
                     (Some(true), _) => "running".to_owned(),
                     (_, Some(code)) => format!("exit {code}"),
                     _ => "exited".to_owned(),
                 };
-                let window = if p["visible"].as_bool() == Some(true) { "yes" } else { "-" };
+                // Window number, tab, and * where keys go.
+                let window = match p["window"].as_u64() {
+                    Some(w) => format!("{w}/{}{}", p["tab"], if p["focused"].as_bool() == Some(true) { "*" } else { "" }),
+                    None if p["visible"].as_bool() == Some(true) => "yes".to_owned(),
+                    None => "-".to_owned(),
+                };
                 let title = p["title"].as_str().filter(|t| !t.is_empty()).or(p["command"].as_str()).unwrap_or("");
                 let cwd = p["cwd"].as_str().unwrap_or("");
-                println!("{:<4} {:<8} {:<7} {:<30} {cwd}", p["id"].to_string(), state, window, truncate(title, 30));
+                println!("{:<4} {:<8} {:<9} {:<30} {cwd}", p["id"].to_string(), state, window, truncate(title, 30));
             }
         }
         "spawn" => {
             let mut params = Value::object([("visible", (!opts.flag("--hidden")).into())]);
             if let Some(cwd) = opts.value("--cwd") {
                 params.insert("cwd", cwd);
+            }
+            if let Some(placement) = ["tab", "right", "down"].into_iter().find(|p| opts.flag(&format!("--{p}"))) {
+                params.insert("placement", placement);
+                // Beside the pane this runs in, unless told otherwise.
+                let beside = opts.value("--beside").or_else(|| std::env::var("MIGHTTY_PANE_ID").ok());
+                if let Some(beside) = beside {
+                    params.insert("beside", number(&beside)?);
+                }
             }
             if let Some(cmd) = opts.command() {
                 params.insert("command", cmd);
@@ -137,6 +153,11 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             if result["matched"].is_null() {
                 return Ok(ExitCode::from(124));
             }
+        }
+        "focus" => {
+            let pane = opts.pane()?;
+            opts.finish()?;
+            client.call("pane.focus", obj(pane, []))?;
         }
         "close" => {
             let pane = opts.pane()?;

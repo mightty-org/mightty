@@ -273,6 +273,26 @@ unsafe extern "C" {
     fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
     fn dispatch_after_f(when: u64, queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
     fn dispatch_time(when: u64, delta: i64) -> u64;
+    fn dispatch_sync_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn pthread_main_np() -> i32;
+}
+
+/// Runs `work` on the main thread and waits for its result (at once, when
+/// this is the main thread). The main thread must not be waiting on the caller.
+pub fn run_on_main_sync<F: FnOnce() -> R + Send, R: Send>(work: F) -> R {
+    // SAFETY: plain query.
+    if unsafe { pthread_main_np() } != 0 {
+        return work();
+    }
+    extern "C" fn trampoline<F: FnOnce() -> R, R>(context: *mut c_void) {
+        // SAFETY: `context` is the slot below, alive until dispatch_sync_f returns.
+        let slot = unsafe { &mut *context.cast::<(Option<F>, Option<R>)>() };
+        slot.1 = slot.0.take().map(|work| work());
+    }
+    let mut slot = (Some(work), None);
+    // SAFETY: dispatch_sync_f returns only after `trampoline` has run.
+    unsafe { dispatch_sync_f((&raw const _dispatch_main_q).cast(), (&raw mut slot).cast(), trampoline::<F, R>) };
+    slot.1.expect("main-thread work ran")
 }
 
 /// Schedules `work` on the main thread's run loop.

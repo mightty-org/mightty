@@ -95,9 +95,11 @@ Every mightty serves a JSON-RPC control socket (per-user directory, mode
 the protocol can open, drive and read them.
 
 ```sh
-mightty ctl list                                  # panes, state, cwd
+mightty ctl list                                  # panes, state, window/tab (* where keys go), cwd
 mightty ctl run --pane 1 -- make test             # types it, waits, prints output, exits with its code
 P=$(mightty ctl spawn -- npm run dev)             # new window
+mightty ctl spawn --right -- cargo watch          # split right of this pane (--down, --tab; --beside N)
+mightty ctl focus $P                              # bring it to the front
 mightty ctl wait $P --text "ready" && mightty ctl read $P
 mightty ctl keys $P ctrl-c
 ```
@@ -110,9 +112,12 @@ claude mcp add mightty -- mightty mcp
 
 Tools: `run_command` (output + exit code; reuses a hidden shell so `cd`
 persists), `open_pane`, `read_pane`, `list_commands`, `wait_for`,
-`send_text`, `send_keys`, `list_panes`, `close_pane`. Panes an agent opens
-appear as windows and stay open after they exit. With no mightty running,
-`mightty mcp` hosts headless panes itself.
+`send_text`, `send_keys`, `list_panes`, `focus_pane`, `close_pane`. Panes an
+agent opens go in a split beside the agent's own pane, further ones stacking
+below the first, without taking the keyboard from you (`placement` asks for
+a tab or window instead), and stay open after they exit. `list_panes` says
+which window and tab each pane is in and which one you're focused on. With
+no mightty running, `mightty mcp` hosts headless panes itself.
 
 **Shell integration** (zsh) loads automatically in every pane, with no
 dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
@@ -325,5 +330,5 @@ checks the header compiles as C++.
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. Agent status detection (working / waiting for you), attention queue, notifications
-6. bash/fish integration (config file ✅, native tabs ✅: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits ✅: ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory)
+6. bash/fish integration (config file ✅, native tabs ✅: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits ✅ (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory)
 7. Linux (raw Wayland protocol), own font rasterizer, Windows
