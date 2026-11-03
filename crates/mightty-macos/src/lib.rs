@@ -14,6 +14,7 @@ mod linkhint;
 mod notify;
 mod open;
 mod renderer;
+mod session;
 mod snapshot;
 mod split;
 

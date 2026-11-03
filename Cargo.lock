@@ -29,6 +29,7 @@ version = "0.1.0"
 name = "mightty-macos"
 version = "0.1.0"
 dependencies = [
+ "mightty-json",
  "mightty-mux",
  "mightty-render",
  "mightty-term",

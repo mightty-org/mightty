@@ -34,6 +34,18 @@ pub struct Config {
     /// characters; `None`: decided by the keyboard layout.
     pub option_as_alt: Option<OptionAsAlt>,
     pub confirm_close: ConfirmClose,
+    pub save_state: SaveState,
+}
+
+/// `window-save-state`, as in Ghostty: whether windows, tabs and splits
+/// come back the next time mightty opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveState {
+    /// As macOS does for apps: unless "Close windows when quitting an
+    /// application" is on (System Settings → Desktop & Dock).
+    Default,
+    Never,
+    Always,
 }
 
 /// `confirm-close-surface`, as in Ghostty: when closing a pane, window or
@@ -88,6 +100,7 @@ impl Default for Config {
             vsync: true,
             option_as_alt: None,
             confirm_close: ConfirmClose::Running,
+            save_state: SaveState::Default,
         }
     }
 }
@@ -222,6 +235,32 @@ const SETTINGS: &[Setting] = &[
                     ConfirmClose::Running => "true",
                     ConfirmClose::Never => "false",
                     ConfirmClose::Always => "always",
+                }
+                .into(),
+            )
+        },
+    },
+    Setting {
+        name: "window-save-state",
+        value: "WHEN",
+        help: "default, never or always: reopen windows, tabs and splits in their directories \
+               (default: unless \"Close windows when quitting an application\" is on in System Settings)",
+        color: false,
+        set: |c, v| {
+            c.save_state = match v {
+                "default" => SaveState::Default,
+                "never" => SaveState::Never,
+                "always" => SaveState::Always,
+                _ => return Err("expects default, never or always".into()),
+            };
+            Ok(())
+        },
+        get: |c| {
+            Some(
+                match c.save_state {
+                    SaveState::Default => "default",
+                    SaveState::Never => "never",
+                    SaveState::Always => "always",
                 }
                 .into(),
             )
@@ -609,6 +648,15 @@ mod tests {
             assert_eq!(c.confirm_close, expected);
         }
         assert!(c.apply_args(&args(&["--confirm-close-surface=sometimes"])).is_err());
+    }
+
+    #[test]
+    fn save_state_values() {
+        let mut c = Config::default();
+        assert_eq!(c.save_state, SaveState::Default);
+        c.apply_args(&args(&["--window-save-state=always"])).unwrap();
+        assert_eq!(c.save_state, SaveState::Always);
+        assert!(c.apply_args(&args(&["--window-save-state=sometimes"])).is_err());
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
 use mightty_term::{MouseMode, Term};
 
-use crate::config::{Config, ConfirmClose, OptionAsAlt};
+use crate::config::{Config, ConfirmClose, OptionAsAlt, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
@@ -26,6 +26,7 @@ use crate::latency;
 use crate::open;
 use crate::linkhint::{self, LinkHint};
 use crate::notify;
+use crate::session::{self, Layout, Session};
 use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
 use crate::split::{self, Axis, Direction, Divider, Node, Rect};
 
@@ -44,6 +45,8 @@ struct App {
     attention_count: usize,
     /// Panes with a banner up, and since when they needed the user.
     banners: Vec<(PaneId, Instant)>,
+    /// The session last written (see `window-save-state`).
+    saved: String,
 }
 
 /// Points between split panes, drawn as a divider.
@@ -305,6 +308,15 @@ impl Host for GuiHost {
     }
 }
 
+/// How often the session is saved, when it changed: directories change
+/// without any event mightty watches.
+const SAVE_INTERVAL: Duration = Duration::from_secs(5);
+
+extern "C" fn on_save_tick(_: *mut c_void) {
+    with_app(App::save_session);
+    run_on_main_after(SAVE_INTERVAL, on_save_tick);
+}
+
 extern "C" fn on_pane_status(_: *mut c_void) {
     with_app(App::refresh_attention);
 }
@@ -403,7 +415,7 @@ pub fn run(config: Config) -> io::Result<()> {
         if let Err(e) = mightty_mux::listen(mux.clone()) {
             eprintln!("mightty: control socket unavailable: {e}");
         }
-        let pane = mux.spawn(SpawnOptions {
+        let first = SpawnOptions {
             command: config.command.clone(),
             // A command runs under plain sh, not the user's login shell and profile.
             shell: config.command.as_ref().map(|_| "/bin/sh".into()),
@@ -411,7 +423,9 @@ pub fn run(config: Config) -> io::Result<()> {
             cols: config.cols,
             rows: config.rows,
             ..Default::default()
-        })?;
+        };
+        // A window running a command (-e) is opened alone; otherwise the last session's come back.
+        let restore = config.command.is_none();
 
         let app = App {
             mux,
@@ -424,9 +438,14 @@ pub fn run(config: Config) -> io::Result<()> {
             cascade: CGPoint::default(),
             attention_count: 0,
             banners: Vec::new(),
+            saved: String::new(),
         };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
-        with_app(|app| app.open_window(pane, false));
+        if !(restore && with_app(App::restore) == Some(true)) {
+            let pane = with_app(|app| app.mux.spawn(first)).expect("the app was just set")?;
+            with_app(|app| app.open_window(pane, false));
+        }
+        run_on_main_after(SAVE_INTERVAL, on_save_tick);
         call!(ns_app, c"activateIgnoringOtherApps:", YES);
         call!(ns_app, c"run");
     }
@@ -841,6 +860,185 @@ impl App {
         None
     }
 
+    /// Whether windows are kept for the next launch (`window-save-state`).
+    fn save_enabled(&self) -> bool {
+        match self.config.save_state {
+            SaveState::Always => true,
+            SaveState::Never => false,
+            // SAFETY: documented signatures. The key is set (true) when
+            // "Close windows when quitting an application" is off.
+            SaveState::Default => unsafe {
+                let defaults: Id = msg!(class(c"NSUserDefaults"), c"standardUserDefaults");
+                let keep: Bool = msg!(defaults, c"boolForKey:", nsstring("NSQuitAlwaysKeepsWindows"));
+                keep != NO
+            },
+        }
+    }
+
+    /// Writes the session if it changed; forgets it when saving is off.
+    fn save_session(&mut self) {
+        if !self.save_enabled() {
+            if !self.saved.is_empty() || session::path().is_some_and(|p| p.exists()) {
+                session::remove();
+                self.saved.clear();
+            }
+            return;
+        }
+        let text = self.capture().to_json();
+        if text != self.saved {
+            match session::save(&text) {
+                Ok(()) => self.saved = text,
+                Err(e) => eprintln!("mightty: could not save windows: {e}"),
+            }
+        }
+    }
+
+    /// The windows as they are: each window with its tabs, in the order
+    /// they were stacked, the front one last.
+    fn capture(&self) -> Session {
+        let mut groups = Vec::new();
+        let mut seen = Vec::new();
+        let mut front = None;
+        for w in &self.windows {
+            if seen.contains(&w.window) {
+                continue;
+            }
+            // SAFETY: main thread; documented signatures.
+            let (tabs, selected, frame, key) = unsafe {
+                let group: Id = msg!(w.window, c"tabbedWindows");
+                let count: usize = if group.is_null() { 0 } else { msg!(group, c"count") };
+                let mut tabs: Vec<Id> = (0..count).map(|i| msg!(group, c"objectAtIndex:", i)).collect();
+                if tabs.is_empty() {
+                    tabs.push(w.window);
+                }
+                tabs.retain(|t| self.windows.iter().any(|w| w.window == *t));
+                let tab_group: Id = msg!(w.window, c"tabGroup");
+                let selected: Id = if tab_group.is_null() { w.window } else { msg!(tab_group, c"selectedWindow") };
+                let frame = send_rect(selected, c"frame");
+                let key = tabs.iter().any(|&t| {
+                    let key: Bool = msg!(t, c"isKeyWindow");
+                    key != NO
+                });
+                (tabs, selected, frame, key)
+            };
+            seen.extend(&tabs);
+            let index = tabs.iter().position(|&t| t == selected).unwrap_or(0);
+            let tabs: Vec<session::Tab> = tabs.iter().filter_map(|&t| self.capture_tab(t)).collect();
+            if tabs.is_empty() {
+                continue;
+            }
+            if key {
+                front = Some(groups.len());
+            }
+            let f = frame;
+            groups.push(session::Group { frame: [f.origin.x, f.origin.y, f.size.width, f.size.height], tabs, selected: index });
+        }
+        if let Some(i) = front {
+            let group = groups.remove(i);
+            groups.push(group);
+        }
+        Session { groups }
+    }
+
+    fn capture_tab(&self, window: Id) -> Option<session::Tab> {
+        let w = self.windows.iter().find(|w| w.window == window)?;
+        let layout = self.capture_layout(&w.tree);
+        let focused = w.tree.leaves().iter().position(|&v| v == w.active).unwrap_or(0);
+        Some(session::Tab { layout, focused, zoomed: w.zoomed })
+    }
+
+    fn capture_layout(&self, node: &Node<Id>) -> Layout {
+        match node {
+            Node::Leaf(view) => {
+                let cwd = self.surfaces.iter().find(|s| s.view == *view).and_then(|s| self.cwd_of(s));
+                Layout::Pane { cwd: cwd.map(|d| d.display().to_string()) }
+            }
+            Node::Split { axis, ratio, first, second } => Layout::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(self.capture_layout(first)),
+                second: Box::new(self.capture_layout(second)),
+            },
+        }
+    }
+
+    /// Reopens the last session's windows, each pane a new shell in its old
+    /// directory. Returns whether any window opened.
+    fn restore(&mut self) -> bool {
+        if !self.save_enabled() {
+            return false;
+        }
+        let Some(saved) = session::load() else { return false };
+        let mut any = false;
+        for group in &saved.groups {
+            let mut windows: Vec<Id> = Vec::new();
+            for tab in &group.tabs {
+                let tab_of = windows.last().copied().unwrap_or(NIL);
+                if let Some(window) = self.restore_tab(tab, tab_of) {
+                    if windows.is_empty() {
+                        place(window, group.frame);
+                    }
+                    windows.push(window);
+                }
+            }
+            if let Some(&window) = windows.get(group.selected).or(windows.last()) {
+                // SAFETY: main thread; a live NSWindow.
+                unsafe { call!(window, c"makeKeyAndOrderFront:", NIL) };
+            }
+            any |= !windows.is_empty();
+        }
+        self.sync_key_focus();
+        any
+    }
+
+    /// A window (a tab of `tab_of` unless nil) laid out as `tab`. Returns it.
+    fn restore_tab(&mut self, tab: &session::Tab, tab_of: Id) -> Option<Id> {
+        let pane = self.spawn_shell(tab.layout.first_cwd())?;
+        self.open_window_in(pane, false, tab_of, tab_of.is_null());
+        let (window, first) = self.windows.last().map(|w| (w.window, w.active))?;
+        self.started_in(first, tab.layout.first_cwd());
+        self.restore_split(&tab.layout, first);
+        let w = self.windows.iter_mut().find(|w| w.window == window)?;
+        copy_ratios(&mut w.tree, &tab.layout);
+        let order = w.tree.leaves();
+        let focused = order[tab.focused.min(order.len() - 1)];
+        w.zoomed = tab.zoomed && order.len() > 1;
+        self.focus(focused);
+        self.layout(window, false);
+        Some(window)
+    }
+
+    /// Splits `view`'s space as `layout` says, a new shell in each new pane.
+    fn restore_split(&mut self, layout: &Layout, view: Id) {
+        let Layout::Split { axis, first, second, .. } = layout else { return };
+        let Some(pane) = self.spawn_shell(second.first_cwd()) else { return };
+        let Some(new) = self.insert_split(view, pane, *axis, false, false) else { return };
+        self.started_in(new, second.first_cwd());
+        self.restore_split(first, view);
+        self.restore_split(second, new);
+    }
+
+    /// A login shell in `cwd` if it still exists, else home.
+    fn spawn_shell(&mut self, cwd: Option<&str>) -> Option<Arc<Pane>> {
+        let cwd = cwd.map(PathBuf::from).filter(|d| d.is_dir());
+        let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd, ..Default::default() };
+        match self.mux.spawn(opts) {
+            Ok(pane) => Some(pane),
+            Err(e) => {
+                eprintln!("mightty: could not start a shell: {e}");
+                None
+            }
+        }
+    }
+
+    /// Remembers where `view`'s shell started, for new tabs and splits
+    /// until it reports its directory itself.
+    fn started_in(&mut self, view: Id, cwd: Option<&str>) {
+        if let Some(surface) = self.surfaces.iter_mut().find(|s| s.view == view) {
+            surface.start_dir = cwd.map(PathBuf::from).filter(|d| d.is_dir());
+        }
+    }
+
     /// What to tell the user before closing `views`' panes, or `None` to
     /// close without asking (see `confirm-close-surface`).
     fn close_question(&self, views: &[Id]) -> Option<String> {
@@ -1029,6 +1227,36 @@ impl App {
         w.tree.set_ratio(&divider.path, ratio);
         let window = w.window;
         self.layout(window, false);
+    }
+}
+
+/// Moves `window` to `frame` (x, y, width, height), if that's still
+/// mostly on a screen: displays come and go between launches.
+fn place(window: Id, [x, y, width, height]: [f64; 4]) {
+    let frame = CGRect { origin: CGPoint { x, y }, size: CGSize { width, height } };
+    // SAFETY: main thread; documented signatures.
+    unsafe {
+        let screens: Id = msg!(class(c"NSScreen"), c"screens");
+        let count: usize = msg!(screens, c"count");
+        let visible = (0..count).any(|i| {
+            let screen: Id = msg!(screens, c"objectAtIndex:", i);
+            let area = send_rect(screen, c"visibleFrame");
+            let overlap_x = (x + width).min(area.origin.x + area.size.width) - x.max(area.origin.x);
+            let overlap_y = (y + height).min(area.origin.y + area.size.height) - y.max(area.origin.y);
+            overlap_x >= width.min(area.size.width) / 2.0 && overlap_y >= height.min(area.size.height) / 2.0
+        });
+        if visible && width >= 100.0 && height >= 100.0 {
+            call!(window, c"setFrame:display:", frame, YES);
+        }
+    }
+}
+
+/// Gives `tree`'s splits `layout`'s ratios: they have the same shape.
+fn copy_ratios(tree: &mut Node<Id>, layout: &Layout) {
+    if let (Node::Split { ratio, first, second, .. }, Layout::Split { ratio: saved, first: f, second: s, .. }) = (tree, layout) {
+        *ratio = *saved;
+        copy_ratios(first, f);
+        copy_ratios(second, s);
     }
 }
 
@@ -1862,6 +2090,7 @@ unsafe fn register_delegate_class() -> Id {
     }
     extern "C" fn will_terminate(_: Id, _: Sel, _: Id) {
         with_app(|app| {
+            app.save_session();
             if let Some(socket) = app.mux.socket_path() {
                 let _ = fs::remove_file(socket);
             }

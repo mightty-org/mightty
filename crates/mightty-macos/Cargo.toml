@@ -9,6 +9,7 @@ license.workspace = true
 mightty-term.workspace = true
 mightty-mux.workspace = true
 mightty-render.workspace = true
+mightty-json.workspace = true
 
 [lints]
 workspace = true

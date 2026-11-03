@@ -74,6 +74,7 @@ cursor-color = #ff79c6
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
 | `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |
 | `confirm-close-surface` | `true` | Ask before closing a pane (⌘W), a window or tab, or mightty: `true` while a command or agent runs in it, `always`, or `false`, as in Ghostty |
+| `window-save-state` | `default` | Reopen windows, tabs and splits where they were, each pane a new shell in its old directory: `always`, `never`, or `default`, which follows macOS (only when "Close windows when quitting an application" is off in System Settings → Desktop & Dock), as in Ghostty. Saved in `~/Library/Application Support/mightty/session.json` |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
@@ -367,5 +368,5 @@ checks the header compiles as C++.
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
 5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; notification banners (app bundle: `scripts/bundle.sh`)
-6. ✅ bash and fish integration, config file, native tabs: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag or move with ⌘⌃ and an arrow, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory
+6. ✅ bash and fish integration, config file, native tabs: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag or move with ⌘⌃ and an arrow, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory; windows, tabs and splits come back on relaunch (`window-save-state`)
 7. Linux (raw Wayland protocol), own font rasterizer, Windows
