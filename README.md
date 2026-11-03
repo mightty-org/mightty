@@ -39,6 +39,17 @@ cargo run --release -- run -- ls -la    # headless: run, print the final screen
 cargo test
 ```
 
+As an app, with an icon in the Dock and banners when a pane needs you while
+you're elsewhere (macOS delivers notifications only to app bundles):
+
+```sh
+scripts/bundle.sh                       # target/release/mightty.app, signed ad hoc
+scripts/bundle.sh --install             # copied to ~/Applications
+```
+
+Clicking a banner brings its pane to the front. The icon is drawn by
+`scripts/make-icon.py` (`scripts/make-icon.sh` rebuilds `assets/mightty.icns`).
+
 Settings live in `~/.config/mightty/config` (or `$XDG_CONFIG_HOME/mightty/config`),
 one `name = value` per line, `#` for comments. Every setting also works as a
 `--name=value` flag, which wins over the file. Names are Ghostty's where the
@@ -128,7 +139,8 @@ from **waiting** (gone quiet after working). A pane you aren't looking at
 needs you when its agent stops working, it rings the bell, or it asks for a
 notification (OSC 9, OSC 777, `mightty ctl notify`, `notify_user`). It gets
 an orange border and a ● on its tab or window title, the Dock icon shows how
-many panes need you (bouncing once while mightty is in the background), and
+many panes need you (bouncing once while mightty is in the background; the
+app bundle also shows a banner), and
 ⌘⇧A jumps to the one that has waited longest. `list_panes` reports all of
 this, so agents can watch each other. For Claude Code to say exactly when it
 needs a permission, add a notification hook to `~/.claude/settings.json`:
@@ -347,6 +359,6 @@ checks the header compiles as C++.
    - ✅ Links: hold Cmd to underline an OSC 8 hyperlink or a URL in the text and see where it goes; Cmd-click opens web and mail links and local documents, media and folders (anything else, such as apps, scripts and executables, is shown in Finder instead); other schemes are ignored
 3. ✅ libmightty C ABI, pkg-config, install script
 4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
-5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; next: macOS notification banners (needs an app bundle)
+5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; notification banners (app bundle: `scripts/bundle.sh`)
 6. bash/fish integration (config file ✅, native tabs ✅: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9; splits ✅ (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory)
 7. Linux (raw Wayland protocol), own font rasterizer, Windows

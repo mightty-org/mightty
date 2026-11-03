@@ -367,8 +367,40 @@ fn spawn_monitor(mux: Weak<Mux>) {
         .expect("failed to spawn status thread");
 }
 
+/// `$SHELL`, else the account's shell (apps opened from Finder may not
+/// get `$SHELL`), else sh.
 fn default_shell() -> String {
-    env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
+    env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(account_shell).unwrap_or_else(|| "/bin/sh".into())
+}
+
+fn account_shell() -> Option<String> {
+    use std::ffi::{CStr, c_char};
+    #[repr(C)]
+    struct Passwd {
+        name: *const c_char,
+        passwd: *const c_char,
+        uid: u32,
+        gid: u32,
+        #[cfg(target_os = "macos")]
+        change: i64,
+        #[cfg(target_os = "macos")]
+        class: *const c_char,
+        gecos: *const c_char,
+        dir: *const c_char,
+        shell: *const c_char,
+    }
+    unsafe extern "C" {
+        fn getuid() -> u32;
+        fn getpwuid(uid: u32) -> *const Passwd;
+    }
+    // SAFETY: getpwuid returns null or a valid entry, read before any other call.
+    unsafe {
+        let entry = getpwuid(getuid());
+        if entry.is_null() || (*entry).shell.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr((*entry).shell).to_string_lossy().into_owned()).filter(|s| !s.is_empty())
+    }
 }
 
 /// Reads and parses on one thread. macOS hands out at most 1 KiB per PTY
@@ -417,6 +449,12 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_shell_exists() {
+        let shell = account_shell().expect("an account shell");
+        assert!(Path::new(&shell).exists(), "{shell}");
+    }
 
     #[test]
     fn placements_by_name() {

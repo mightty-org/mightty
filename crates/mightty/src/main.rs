@@ -22,7 +22,8 @@ behind (scrollback + screen, or just the screen with --screen).
 Add mightty to an agent, e.g. Claude Code:  claude mcp add mightty -- mightty mcp";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // Older macOS passes a process serial number to apps opened from Finder.
+    let args: Vec<String> = env::args().skip(1).filter(|a| !a.starts_with("-psn_")).collect();
     let result = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("ctl") => ctl::main(&args[1..]).map_err(io::Error::other),

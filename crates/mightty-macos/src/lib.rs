@@ -11,6 +11,7 @@ mod font;
 mod keys;
 mod latency;
 mod linkhint;
+mod notify;
 mod open;
 mod renderer;
 mod snapshot;

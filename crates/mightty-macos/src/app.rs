@@ -25,6 +25,7 @@ use crate::keys::{self, Mods, MouseAction};
 use crate::latency;
 use crate::open;
 use crate::linkhint::{self, LinkHint};
+use crate::notify;
 use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
 use crate::split::{self, Axis, Direction, Divider, Node, Rect};
 
@@ -41,6 +42,8 @@ struct App {
     cascade: CGPoint,
     /// Panes needing the user at the last count, to bounce the Dock icon for new ones.
     attention_count: usize,
+    /// Panes with a banner up, and since when they needed the user.
+    banners: Vec<(PaneId, Instant)>,
 }
 
 /// Points between split panes, drawn as a divider.
@@ -390,6 +393,7 @@ pub fn run(config: Config) -> io::Result<()> {
         install_menu(ns_app);
         let delegate: Id = msg!(register_delegate_class(), c"new");
         call!(ns_app, c"setDelegate:", delegate);
+        notify::set_delegate(delegate);
 
         let host = Arc::new(GuiHost::default());
         let _ = HOST.set(host.clone());
@@ -417,6 +421,7 @@ pub fn run(config: Config) -> io::Result<()> {
             config,
             cascade: CGPoint::default(),
             attention_count: 0,
+            banners: Vec::new(),
         };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| app.open_window(pane, false));
@@ -720,9 +725,10 @@ impl App {
                 surface.render();
             }
         }
-        let count = self.mux.attention_queue().len();
+        let queue = self.mux.attention_queue();
+        let count = queue.len();
         // SAFETY: main thread; documented signatures.
-        unsafe {
+        let active = unsafe {
             let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
             let tile: Id = msg!(ns_app, c"dockTile");
             call!(tile, c"setBadgeLabel:", if count == 0 { NIL } else { nsstring(&count.to_string()) });
@@ -730,8 +736,40 @@ impl App {
             if count > self.attention_count && active == NO {
                 let _: isize = msg!(ns_app, c"requestUserAttention:", 10usize); // informational: one bounce
             }
-        }
+            active != NO
+        };
         self.attention_count = count;
+        self.update_banners(&queue, active);
+    }
+
+    /// A banner for each pane that started needing the user while they were
+    /// in another app (in mightty, the marks above are enough), taken back
+    /// once it no longer does.
+    fn update_banners(&mut self, queue: &[Arc<Pane>], active: bool) {
+        let current: Vec<(PaneId, Instant)> = queue.iter().filter_map(|p| Some((p.id, p.attention()?.since))).collect();
+        self.banners.retain(|banner| {
+            let kept = current.contains(banner);
+            if !kept {
+                notify::remove(banner.0);
+            }
+            kept
+        });
+        if active {
+            return;
+        }
+        for pane in queue {
+            let Some(attention) = pane.attention() else { continue };
+            if self.banners.contains(&(pane.id, attention.since)) {
+                continue;
+            }
+            let title = {
+                let term = pane.term.lock().unwrap();
+                let title = term.title().trim();
+                if title.is_empty() { pane.command.clone() } else { title.to_owned() }
+            };
+            notify::post(pane.id, &title, &attention.reason.message());
+            self.banners.push((pane.id, attention.since));
+        }
     }
 
     /// ⌘⇧A: the pane that has needed the user longest.
@@ -1748,6 +1786,19 @@ unsafe fn register_delegate_class() -> Id {
             with_app(|app| app.redraw_window(window));
         }
     }
+    /// A banner was clicked: show its pane.
+    extern "C" fn notification_clicked(_: Id, _: Sel, _center: Id, response: Id, done: Id) {
+        if let Some(pane) = notify::pane_of(response) {
+            with_app(|app| app.focus_pane(pane));
+            // SAFETY: main thread; documented signatures.
+            unsafe {
+                let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+                call!(ns_app, c"activateIgnoringOtherApps:", YES);
+            }
+        }
+        // SAFETY: the completion handler AppKit passed, taking no arguments.
+        unsafe { call_block(done) };
+    }
     extern "C" fn did_become_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, true);
     }
@@ -1830,6 +1881,11 @@ unsafe fn register_delegate_class() -> Id {
             (c"windowDidChangeBackingProperties:", action(did_resize), c"v@:@"),
             (c"windowDidBecomeKey:", action(did_become_key), c"v@:@"),
             (c"windowDidChangeOcclusionState:", action(did_change_occlusion), c"v@:@"),
+            (
+                c"userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:",
+                notification_clicked as extern "C" fn(Id, Sel, Id, Id, Id) as *const c_void,
+                c"v@:@@@?",
+            ),
             (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
             (c"windowWillClose:", action(will_close), c"v@:@"),
             (c"newWindow:", action(new_window), c"v@:@"),

@@ -125,7 +125,8 @@ pub struct Block {
     isa: *const c_void,
     flags: i32,
     reserved: i32,
-    invoke: unsafe extern "C" fn(*const Block, Id),
+    /// Its signature is the one the block was made for.
+    invoke: *const c_void,
     descriptor: &'static BlockDescriptor,
 }
 
@@ -141,10 +142,34 @@ unsafe impl Sync for Block {}
 impl Block {
     /// A block whose single argument is an object, as in `void (^)(id)`.
     pub const fn new(invoke: unsafe extern "C" fn(*const Block, Id)) -> Self {
+        Self::with_invoke(invoke as *const c_void)
+    }
+
+    /// `void (^)(BOOL, id)`, as for completion handlers reporting success and an error.
+    pub const fn with_flag(invoke: unsafe extern "C" fn(*const Block, Bool, Id)) -> Self {
+        Self::with_invoke(invoke as *const c_void)
+    }
+
+    const fn with_invoke(invoke: *const c_void) -> Self {
         const BLOCK_IS_GLOBAL: i32 = 1 << 28;
         static DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() };
         // Only the address of the runtime's class object is taken.
         Self { isa: (&raw const _NSConcreteGlobalBlock).cast(), flags: BLOCK_IS_GLOBAL, reserved: 0, invoke, descriptor: &DESCRIPTOR }
+    }
+}
+
+/// Calls `block`, a `void (^)(void)` handed to us (a completion handler).
+///
+/// # Safety
+/// `block` must be a live block taking no arguments.
+pub unsafe fn call_block(block: Id) {
+    if block.is_null() {
+        return;
+    }
+    // SAFETY: every block starts with the layout of `Block`.
+    unsafe {
+        let invoke: unsafe extern "C" fn(Id) = std::mem::transmute((*block.cast::<Block>()).invoke);
+        invoke(block);
     }
 }
 
