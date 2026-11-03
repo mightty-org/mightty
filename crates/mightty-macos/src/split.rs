@@ -123,6 +123,49 @@ impl<T: Copy + PartialEq> Node<T> {
         }
     }
 
+    /// Moves the divider of the split nearest `leaf` along `axis` by
+    /// `points` (toward the right or bottom when positive), keeping each
+    /// part at least `min` points. Returns whether it moved.
+    pub fn move_divider(&mut self, leaf: T, axis: Axis, points: f64, bounds: Rect, gap: f64, min: f64) -> bool {
+        let Some(path) = self.ancestor(leaf, axis) else { return false };
+        let Some(divider) = self.dividers(bounds, gap).into_iter().find(|d| d.path == path) else { return false };
+        let available = match axis {
+            Axis::Row => divider.span.width,
+            Axis::Column => divider.span.height,
+        } - gap;
+        let Some(current) = self.ratio(&path) else { return false };
+        let (low, high) = (min / available, 1.0 - min / available);
+        if available <= 0.0 || low > high {
+            return false;
+        }
+        let ratio = (current + points / available).clamp(low, high);
+        self.set_ratio(&path, ratio);
+        ratio != current
+    }
+
+    /// The path to the innermost split along `axis` that holds `leaf`.
+    fn ancestor(&self, leaf: T, axis: Axis) -> Option<Vec<bool>> {
+        let Node::Split { axis: own, first, second, .. } = self else { return None };
+        for (side, child) in [(false, first), (true, second)] {
+            if child.leaves().contains(&leaf) {
+                let inner = child.ancestor(leaf, axis).map(|mut rest| {
+                    rest.insert(0, side);
+                    rest
+                });
+                return inner.or_else(|| (*own == axis).then(Vec::new));
+            }
+        }
+        None
+    }
+
+    fn ratio(&self, path: &[bool]) -> Option<f64> {
+        match (self, path.split_first()) {
+            (Node::Split { ratio, .. }, None) => Some(*ratio),
+            (Node::Split { first, second, .. }, Some((&side, rest))) => if side { second } else { first }.ratio(rest),
+            (Node::Leaf(_), _) => None,
+        }
+    }
+
     /// Sizes every pane alike along each direction.
     pub fn equalize(&mut self) {
         if let Node::Split { axis, ratio, first, second } = self {
@@ -261,6 +304,26 @@ mod tests {
         tree.split(1, 2, Axis::Column);
         let divider = &tree.dividers(BOUNDS, 1.0)[0];
         assert_eq!(ratio_at(divider, 0.0, 450.5, 1.0, 50.0), 0.25);
+    }
+
+    #[test]
+    fn dividers_move_by_keyboard() {
+        // 1 | (2 / 3)
+        let mut tree = Node::Leaf(1);
+        tree.split(1, 2, Axis::Row);
+        tree.split(2, 3, Axis::Column);
+        let width = |t: &Node<i32>, leaf| t.frames(BOUNDS, 1.0).into_iter().find(|f| f.0 == leaf).unwrap().1;
+        // From 3, right/left moves the outer divider; down moves the one between 2 and 3.
+        assert!(tree.move_divider(3, Axis::Row, 10.0, BOUNDS, 1.0, 50.0));
+        assert_eq!(width(&tree, 1).width, 410.0);
+        assert!(tree.move_divider(3, Axis::Column, 20.0, BOUNDS, 1.0, 50.0));
+        assert_eq!((width(&tree, 2).height, width(&tree, 3).height), (320.0, 280.0));
+        // Pane 1 has no split above or below it.
+        assert!(!tree.move_divider(1, Axis::Column, 10.0, BOUNDS, 1.0, 50.0));
+        // Never past the minimum.
+        assert!(tree.move_divider(1, Axis::Row, -1000.0, BOUNDS, 1.0, 50.0));
+        assert_eq!(width(&tree, 1).width, 50.0);
+        assert!(!tree.move_divider(1, Axis::Row, -10.0, BOUNDS, 1.0, 50.0));
     }
 
     #[test]

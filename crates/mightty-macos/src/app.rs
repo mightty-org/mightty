@@ -50,6 +50,8 @@ struct App {
 const GAP: f64 = 1.0;
 /// How far either side of a divider grabs it.
 const GRAB: f64 = 3.0;
+/// How far ⌘⌃ and an arrow moves a divider, in points (as in Ghostty).
+const RESIZE_STEP: f64 = 10.0;
 /// Panes are never made smaller than this by dragging, in points.
 const MIN_PANE: f64 = 60.0;
 /// NSWindowOcclusionStateVisible.
@@ -975,6 +977,23 @@ impl App {
         let bounds = to_rect(unsafe { send_rect(w.root, c"bounds") });
         if let Some(next) = split::neighbor(&w.tree.frames(bounds, GAP), active, direction) {
             self.focus(next);
+        }
+    }
+
+    /// ⌘⌃ and an arrow: moves the nearest divider that way (as Ghostty's `resize_split`).
+    fn move_divider(&mut self, direction: Direction) {
+        let Some((window, active)) = self.key_window() else { return };
+        let Some(w) = self.windows.iter_mut().find(|w| w.window == window).filter(|w| !w.zoomed) else { return };
+        let (axis, points) = match direction {
+            Direction::Left => (Axis::Row, -RESIZE_STEP),
+            Direction::Right => (Axis::Row, RESIZE_STEP),
+            Direction::Up => (Axis::Column, -RESIZE_STEP),
+            Direction::Down => (Axis::Column, RESIZE_STEP),
+        };
+        // SAFETY: main thread; documented signature.
+        let bounds = to_rect(unsafe { send_rect(w.root, c"bounds") });
+        if w.tree.move_divider(active, axis, points, bounds, GAP, MIN_PANE) {
+            self.layout(window, false);
         }
     }
 
@@ -1959,6 +1978,13 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn jump_to_attention(_: Id, _: Sel, _sender: Id) {
         with_app(App::jump_to_attention);
     }
+    /// ⌘⌃ and an arrow: the tag is the `Direction`.
+    extern "C" fn move_divider(_: Id, _: Sel, sender: Id) {
+        // SAFETY: `sender` is the menu item.
+        let tag: isize = unsafe { msg!(sender, c"tag") };
+        let direction = [Direction::Left, Direction::Right, Direction::Up, Direction::Down][tag as usize % 4];
+        with_app(|app| app.move_divider(direction));
+    }
     extern "C" fn toggle_zoom(_: Id, _: Sel, _sender: Id) {
         with_app(App::toggle_zoom);
     }
@@ -2020,6 +2046,7 @@ unsafe fn register_delegate_class() -> Id {
             (c"selectSplit:", action(select_split), c"v@:@"),
             (c"selectSplitToward:", action(select_split_toward), c"v@:@"),
             (c"toggleSplitZoom:", action(toggle_zoom), c"v@:@"),
+            (c"moveDivider:", action(move_divider), c"v@:@"),
             (c"equalizeSplits:", action(equalize), c"v@:@"),
             (c"jumpToAttention:", action(jump_to_attention), c"v@:@"),
         ])
@@ -2096,6 +2123,11 @@ unsafe fn install_menu(ns_app: Id) {
         for (tag, (title, key)) in arrows.into_iter().enumerate() {
             let item = add_item(window_menu, &format!("Select Split {title}"), c"selectSplitToward:", key);
             call!(item, c"setKeyEquivalentModifierMask:", CMD | ALT);
+            call!(item, c"setTag:", tag as isize);
+        }
+        for (tag, (title, key)) in [("Left", "\u{F702}"), ("Right", "\u{F703}"), ("Up", "\u{F700}"), ("Down", "\u{F701}")].into_iter().enumerate() {
+            let item = add_item(window_menu, &format!("Move Divider {title}"), c"moveDivider:", key);
+            call!(item, c"setKeyEquivalentModifierMask:", CMD | CTRL);
             call!(item, c"setTag:", tag as isize);
         }
         separator(window_menu);
