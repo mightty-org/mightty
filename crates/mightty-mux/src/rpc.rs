@@ -16,6 +16,8 @@
 //! | `pane.wait`       | `pane`, any of `text` / `command_finished` / `exited`, `timeout_ms?` |
 //! | `pane.run`        | `pane?`, `command`, `timeout_ms?`, `max_output?`              |
 //! | `pane.close`      | `pane`                                                        |
+//! | `events.subscribe`   | `events?`: names, `pane.*` or `*` (all, the default); replaces the last call's. Socket only; see [`crate::events`] |
+//! | `events.unsubscribe` | Socket only                                                 |
 
 use std::process;
 use std::sync::Arc;
@@ -24,7 +26,7 @@ use std::time::{Duration, Instant};
 use mightty_json::Value;
 use mightty_term::{CommandBlock, MarkKind, Term};
 
-use crate::{Location, Mux, Pane, PaneId, Placement, Reason, SpawnOptions, key_bytes};
+use crate::{Attention, Location, Mux, Pane, PaneId, Placement, Reason, SpawnOptions, key_bytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcError {
@@ -175,6 +177,17 @@ fn location(locations: &[(PaneId, Location)], id: PaneId) -> Option<Location> {
     locations.iter().find(|l| l.0 == id).map(|l| l.1)
 }
 
+pub(crate) fn attention(attention: Option<&Attention>) -> Value {
+    match attention {
+        Some(a) => Value::object([
+            ("reason", a.reason.name().into()),
+            ("message", a.reason.message().into()),
+            ("waiting_ms", (a.since.elapsed().as_millis() as u64).into()),
+        ]),
+        None => Value::Null,
+    }
+}
+
 fn info(pane: &Pane, location: Option<Location>) -> Value {
     let term = pane.term.lock().unwrap();
     let exit = pane.exit_status();
@@ -190,17 +203,7 @@ fn info(pane: &Pane, location: Option<Location>) -> Value {
         ("visible", pane.is_visible().into()),
         ("shell_integration", (!term.marks().is_empty()).into()),
         ("status", pane.status().name().into()),
-        (
-            "attention",
-            match pane.attention() {
-                Some(a) => Value::object([
-                    ("reason", a.reason.name().into()),
-                    ("message", a.reason.message().into()),
-                    ("waiting_ms", (a.since.elapsed().as_millis() as u64).into()),
-                ]),
-                None => Value::Null,
-            },
-        ),
+        ("attention", attention(pane.attention().as_ref())),
     ]);
     if let Some(at) = location {
         info.insert("window", at.window);

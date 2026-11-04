@@ -196,6 +196,14 @@ fn command_blocks_from_shell_integration() {
     assert_eq!(blocks[1].command.as_deref(), Some("sleep 9"));
     assert_eq!(blocks[1].end_line, None);
     assert_eq!(t.block_output(&blocks[1]), "zzz");
+
+    let started = |c: &str| CommandEvent::Started { command: Some(c.into()) };
+    let finished = CommandEvent::Finished { command: Some("echo hi; false".into()), exit_code: Some(1) };
+    assert_eq!(t.take_command_events(), [started("echo hi; false"), finished, started("sleep 9")]);
+    // An empty command line (prompt, then the next prompt) is no command.
+    t.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;D\x07\x1b]133;A\x07$ ");
+    let finished = CommandEvent::Finished { command: Some("sleep 9".into()), exit_code: Some(0) };
+    assert_eq!(t.take_command_events(), [finished]);
 }
 
 #[test]

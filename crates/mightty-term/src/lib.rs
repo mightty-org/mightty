@@ -141,7 +141,14 @@ pub struct Notification {
     pub body: String,
 }
 
-/// Notifications kept until taken; older ones are dropped.
+/// A command starting or finishing, from shell-integration marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandEvent {
+    Started { command: Option<String> },
+    Finished { command: Option<String>, exit_code: Option<i32> },
+}
+
+/// Notifications and command events kept until taken; older ones are dropped.
 const MAX_NOTIFICATIONS: usize = 16;
 /// Longest title and body kept, in characters.
 const MAX_NOTIFICATION_TEXT: usize = 512;
@@ -231,6 +238,7 @@ pub struct Term {
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
     bells: u64,
     notifications: Vec<Notification>,
+    command_events: Vec<CommandEvent>,
     clipboard: Vec<ClipboardRequest>,
     styles: Styles,
     /// Style ids of the pen and of blanks erased with it (BCE), interned on
@@ -307,6 +315,7 @@ impl Term {
             bell: false,
             bells: 0,
             notifications: Vec::new(),
+            command_events: Vec::new(),
             clipboard: Vec::new(),
             styles: Styles::new(),
             pen_id: None,
@@ -350,6 +359,18 @@ impl Term {
     /// Notifications asked for since the last call, oldest first.
     pub fn take_notifications(&mut self) -> Vec<Notification> {
         mem::take(&mut self.notifications)
+    }
+
+    /// Commands started and finished since the last call, oldest first.
+    pub fn take_command_events(&mut self) -> Vec<CommandEvent> {
+        mem::take(&mut self.command_events)
+    }
+
+    fn command_event(&mut self, event: CommandEvent) {
+        if self.command_events.len() == MAX_NOTIFICATIONS {
+            self.command_events.remove(0);
+        }
+        self.command_events.push(event);
     }
 
     /// The command line of the command running now, from shell integration.
@@ -1666,6 +1687,12 @@ impl Term {
                     self.commands.retain(|(line, _)| *line >= oldest_kept);
                 }
                 let line = self.lines_scrolled + self.cursor.row as u64;
+                if let MarkKind::CommandEnd { exit_code } = kind
+                    && let Some(&Mark { kind: MarkKind::OutputStart, line: started }) = self.marks.last()
+                {
+                    let command = self.commands.iter().rfind(|(l, _)| *l == started).map(|(_, c)| c.clone());
+                    self.command_event(CommandEvent::Finished { command, exit_code });
+                }
                 self.marks.push(Mark { kind, line });
                 if kind == MarkKind::OutputStart
                     && let Some(command) = self.pending_command.take()
@@ -1676,6 +1703,10 @@ impl Term {
                         self.commands.drain(..MAX_MARKS / 2);
                     }
                     self.commands.push((line, command));
+                }
+                if kind == MarkKind::OutputStart {
+                    let command = self.commands.last().filter(|(l, _)| *l == line).map(|(_, c)| c.clone());
+                    self.command_event(CommandEvent::Started { command });
                 }
             }
             // VS Code's command-line report; `\\` and `\xNN` escapes.

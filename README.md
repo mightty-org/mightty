@@ -178,7 +178,17 @@ mightty ctl attention                             # panes needing you, longest w
 mightty ctl notify "Approve the migration?"       # flag this pane as needing you
 mightty ctl wait $P --text "ready" && mightty ctl read $P
 mightty ctl keys $P ctrl-c
+mightty ctl watch command.finished pane.title      # events as JSON lines (default: all)
 ```
+
+**Events.** A connection that calls `events.subscribe` (`{"events":
+["pane.*", "command.finished"]}`, or no params for all) is sent JSON-RPC
+notifications named after the event: `pane.opened`, `pane.closed`,
+`pane.exited` (`exit_code`), `pane.focused`, `pane.title`, `pane.cwd`,
+`pane.status` (`status`, `attention`), and with shell integration
+`command.started` and `command.finished` (`command`, `exit_code`,
+`duration_ms`). Each carries the `pane` id. Replies and events share one
+writer per connection, so a slow listener holds up only itself.
 
 **AI agents** connect through MCP:
 

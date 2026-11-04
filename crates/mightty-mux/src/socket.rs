@@ -9,12 +9,15 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::{process, thread};
 
 use mightty_json::{self as json, Value};
 
-use crate::{Mux, rpc};
+use crate::{EVENTS, Mux, RpcError, rpc};
 
 unsafe extern "C" {
     fn getuid() -> u32;
@@ -69,24 +72,44 @@ pub fn listen(mux: Arc<Mux>) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Numbers connections, for event subscriptions.
+static CONNECTIONS: AtomicU64 = AtomicU64::new(1);
+
+/// Replies and events go out through one writer thread, so a slow client
+/// holds up neither its own requests nor the panes emitting events.
 fn serve(mux: &Arc<Mux>, stream: UnixStream) {
     let Ok(read_half) = stream.try_clone() else { return };
+    let connection = CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+    let (to, outbox) = mpsc::channel::<Value>();
     let mut writer = stream;
+    let sent = thread::Builder::new().name("control-writer".into()).spawn(move || {
+        for message in outbox {
+            if writeln!(writer, "{message}").is_err() {
+                let _ = writer.shutdown(std::net::Shutdown::Both);
+                return;
+            }
+        }
+    });
+    if sent.is_err() {
+        return;
+    }
     for line in BufReader::new(read_half).lines() {
-        let Ok(line) = line else { return };
+        let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = respond(mux, &line)
-            && writeln!(writer, "{reply}").is_err()
+        if let Some(reply) = respond(mux, &line, connection, &to)
+            && to.send(reply).is_err()
         {
-            return;
+            break;
         }
     }
+    mux.events().unsubscribe(connection);
 }
 
-/// Handles one JSON-RPC message. Returns `None` for notifications.
-pub fn respond(mux: &Arc<Mux>, line: &str) -> Option<Value> {
+/// Handles one JSON-RPC message from `connection`, whose events go `to`.
+/// Returns `None` for notifications.
+fn respond(mux: &Arc<Mux>, line: &str, connection: u64, to: &Sender<Value>) -> Option<Value> {
     let request = match json::parse(line) {
         Ok(request) => request,
         Err(e) => return Some(error_reply(Value::Null, -32700, &format!("parse error: {e}"))),
@@ -95,12 +118,33 @@ pub fn respond(mux: &Arc<Mux>, line: &str) -> Option<Value> {
     let Some(method) = request["method"].as_str() else {
         return Some(error_reply(id.unwrap_or_default(), -32600, "invalid request"));
     };
-    let result = rpc::handle(mux, method, &request["params"]);
+    let params = &request["params"];
+    let result = match method {
+        "events.subscribe" => subscribe(mux, connection, to, params),
+        "events.unsubscribe" => {
+            mux.events().unsubscribe(connection);
+            Ok(Value::Null)
+        }
+        _ => rpc::handle(mux, method, params),
+    };
     let id = id?;
     Some(match result {
         Ok(result) => Value::object([("jsonrpc", "2.0".into()), ("id", id), ("result", result)]),
         Err(e) => error_reply(id, e.code, &e.message),
     })
+}
+
+/// `events`: names, `prefix.*` or `*`; all of them when missing.
+fn subscribe(mux: &Mux, connection: u64, to: &Sender<Value>, params: &Value) -> Result<Value, RpcError> {
+    let patterns = match params.get("events") {
+        None | Some(Value::Null) => vec!["*".to_owned()],
+        Some(events) => events
+            .as_array()
+            .and_then(|events| events.iter().map(|e| e.as_str().map(str::to_owned)).collect())
+            .ok_or_else(|| RpcError { code: -32602, message: "`events` must be an array of event names".into() })?,
+    };
+    mux.events().subscribe(connection, patterns, to.clone()).map_err(|message| RpcError { code: -32602, message })?;
+    Ok(Value::object([("events", Value::Array(EVENTS.iter().map(|&e| e.into()).collect()))]))
 }
 
 fn error_reply(id: Value, code: i64, message: &str) -> Value {
@@ -136,12 +180,17 @@ pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
+    /// Events that arrived while waiting for a reply.
+    events: VecDeque<Value>,
 }
 
 impl Client {
     pub fn connect(path: &Path) -> io::Result<Self> {
-        let writer = UnixStream::connect(path)?;
-        Ok(Self { reader: BufReader::new(writer.try_clone()?), writer, next_id: 1 })
+        Self::from_stream(UnixStream::connect(path)?)
+    }
+
+    fn from_stream(writer: UnixStream) -> io::Result<Self> {
+        Ok(Self { reader: BufReader::new(writer.try_clone()?), writer, next_id: 1, events: VecDeque::new() })
     }
 
     /// `$MIGHTTY_SOCKET` if set (inside a mightty pane), otherwise the most
@@ -180,21 +229,88 @@ impl Client {
         ]);
         let disconnected = |e: io::Error| CallError::Disconnected(e.to_string());
         writeln!(self.writer, "{request}").map_err(disconnected)?;
-        let mut line = String::new();
-        if self.reader.read_line(&mut line).map_err(disconnected)? == 0 {
-            return Err(CallError::Disconnected("mightty closed the connection".into()));
-        }
-        let reply = json::parse(&line).map_err(|e| CallError::Rpc(format!("invalid reply: {e}")))?;
+        let reply = loop {
+            let message = self.read()?;
+            if message.get("id").is_some() {
+                break message;
+            }
+            self.events.push_back(message);
+        };
         match reply.get("error") {
             Some(error) => Err(CallError::Rpc(error["message"].as_str().unwrap_or("unknown error").to_owned())),
             None => Ok(reply["result"].clone()),
         }
+    }
+
+    /// The next event after `events.subscribe`, as `(event, params)`; blocks until one comes.
+    pub fn next_event(&mut self) -> Result<(String, Value), CallError> {
+        let event = match self.events.pop_front() {
+            Some(event) => event,
+            None => self.read()?,
+        };
+        Ok((event["method"].as_str().unwrap_or_default().to_owned(), event["params"].clone()))
+    }
+
+    fn read(&mut self) -> Result<Value, CallError> {
+        let mut line = String::new();
+        if self.reader.read_line(&mut line).map_err(|e| CallError::Disconnected(e.to_string()))? == 0 {
+            return Err(CallError::Disconnected("mightty closed the connection".into()));
+        }
+        json::parse(&line).map_err(|e| CallError::Rpc(format!("invalid message: {e}")))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Headless, SpawnOptions};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn events_reach_subscribers() {
+        let mux = Mux::new(Arc::new(Headless));
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let served = mux.clone();
+        thread::spawn(move || serve(&served, theirs));
+        let mut client = Client::from_stream(ours).unwrap();
+
+        let unknown = Value::object([("events", vec!["pane.nope".into()].into())]);
+        assert!(matches!(client.call("events.subscribe", unknown), Err(CallError::Rpc(m)) if m.contains("pane.nope")));
+        let events = Value::object([("events", vec!["pane.*".into()].into())]);
+        client.call("events.subscribe", events).unwrap();
+
+        let command = r"printf '\033]2;hello\007'; exit 3";
+        let pane = mux.spawn(SpawnOptions { command: Some(command.into()), ..Default::default() }).unwrap();
+        let mut seen = Vec::new();
+        loop {
+            let (event, params) = client.next_event().unwrap();
+            assert_eq!(params["pane"].as_u64(), Some(pane.id), "{event} {params}");
+            match event.as_str() {
+                "pane.title" => assert_eq!(params["title"].as_str(), Some("hello")),
+                "pane.exited" => assert_eq!(params["exit_code"].as_i64(), Some(3)),
+                _ => {}
+            }
+            let done = event == "pane.exited";
+            seen.push(event);
+            if done {
+                break;
+            }
+        }
+        seen.retain(|e| e != "pane.status" && e != "pane.cwd");
+        assert_eq!(seen, ["pane.opened", "pane.title", "pane.exited"]);
+        // Replies still come while events do.
+        assert_eq!(client.call("pane.list", Value::Null).unwrap().as_array().map(<[_]>::len), Some(1));
+
+        // Closing the connection unsubscribes it.
+        assert!(mux.events().active());
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while mux.events().active() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!mux.events().active());
+    }
 
     #[test]
     fn private_dir_is_checked() {

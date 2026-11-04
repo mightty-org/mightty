@@ -24,6 +24,8 @@ usage: mightty ctl <command> [args]
                                         e.g. from an agent's notification hook
   attention                             panes needing you, the longest waiting first
   close N                               close pane N
+  watch [EVENT...]                      print events as JSON lines until mightty quits:
+                                        pane.opened, command.finished, pane.* ... (default: all)
   call METHOD [JSON]                    raw JSON-RPC call
 
 Connects to $MIGHTTY_SOCKET, or the most recent running mightty.";
@@ -97,6 +99,17 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                 return Ok(ExitCode::from(124));
             }
             return Ok(ExitCode::from(result["exit_code"].as_i64().unwrap_or(0).clamp(0, 255) as u8));
+        }
+        "watch" => {
+            let events: Vec<Value> = std::iter::from_fn(|| opts.positional()).map(Into::into).collect();
+            opts.finish()?;
+            let params = if events.is_empty() { Value::Null } else { Value::object([("events", events.into())]) };
+            client.call("events.subscribe", params)?;
+            loop {
+                let (event, mut params) = client.next_event()?;
+                params.insert("event", event);
+                println!("{params}");
+            }
         }
         "send" => {
             let pane = opts.pane()?;

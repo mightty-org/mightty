@@ -3,6 +3,7 @@
 //! socket. The GUI is one client of it; `mightty ctl` and the MCP server are
 //! others.
 
+mod events;
 mod keys;
 mod rpc;
 mod shell;
@@ -21,9 +22,11 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use mightty_json::Value;
 use mightty_pty::{Pty, WindowSize};
-use mightty_term::{Term, TermOptions};
+use mightty_term::{CommandEvent, Term, TermOptions};
 
+pub use events::{EVENTS, Events};
 pub use keys::key_bytes;
 pub use rpc::{RpcError, handle};
 pub use socket::{CallError, Client, listen, runtime_dir};
@@ -146,6 +149,7 @@ pub struct Pane {
     activity: Mutex<Activity>,
     /// The user is looking at it: it can't need them.
     focused: AtomicBool,
+    events: Arc<Events>,
 }
 
 impl Pane {
@@ -194,13 +198,35 @@ impl Pane {
     /// Whether the user is looking at it. Looking clears its attention;
     /// returns whether that changed.
     pub fn set_focused(&self, focused: bool) -> bool {
-        self.focused.store(focused, Ordering::Relaxed);
-        focused && self.activity.lock().unwrap().clear()
+        if !self.focused.swap(focused, Ordering::Relaxed) && focused {
+            self.events.emit("pane.focused", || Value::object([("pane", self.id.into())]));
+        }
+        let changed = focused && self.activity.lock().unwrap().clear();
+        if changed {
+            self.status_changed();
+        }
+        changed
     }
 
     /// Asks for the user, unless they're looking at it. Returns whether it changed anything.
     pub fn request_attention(&self, reason: Reason) -> bool {
-        !self.focused.load(Ordering::Relaxed) && self.activity.lock().unwrap().raise(reason, Instant::now())
+        let changed = !self.focused.load(Ordering::Relaxed) && self.activity.lock().unwrap().raise(reason, Instant::now());
+        if changed {
+            self.status_changed();
+        }
+        changed
+    }
+
+    /// Tells subscribers the status or attention changed.
+    fn status_changed(&self) {
+        self.events.emit("pane.status", || {
+            let activity = self.activity.lock().unwrap();
+            Value::object([
+                ("pane", self.id.into()),
+                ("status", activity.status.name().into()),
+                ("attention", rpc::attention(activity.attention.as_ref())),
+            ])
+        });
     }
 
     /// Re-derives the status (see [`status`]). Returns whether it or attention changed.
@@ -216,7 +242,11 @@ impl Pane {
         let command = running.as_deref().or((!integrated).then_some(self.command.as_str()));
         let agent = is_agent(command, foreground.as_ref());
         let focused = self.focused.load(Ordering::Relaxed);
-        self.activity.lock().unwrap().update(Instant::now(), !self.is_alive(), busy, agent, focused)
+        let changed = self.activity.lock().unwrap().update(Instant::now(), !self.is_alive(), busy, agent, focused);
+        if changed {
+            self.status_changed();
+        }
+        changed
     }
 
     /// Current output generation.
@@ -246,6 +276,7 @@ pub struct Mux {
     socket: OnceLock<PathBuf>,
     /// For every pane's terminal.
     options: Mutex<TermOptions>,
+    events: Arc<Events>,
 }
 
 impl Mux {
@@ -254,7 +285,11 @@ impl Mux {
     }
 
     pub fn with_options(host: Arc<dyn Host>, options: TermOptions) -> Arc<Self> {
-        let mux = Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(), options: Mutex::new(options) });
+        let mux = Arc::new(Self {
+            panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(),
+            options: Mutex::new(options),
+            events: Arc::default(),
+        });
         spawn_monitor(Arc::downgrade(&mux));
         mux
     }
@@ -323,8 +358,10 @@ impl Mux {
             changed: (Mutex::new(0), Condvar::new()),
             activity: Mutex::new(Activity::new()),
             focused: AtomicBool::new(false),
+            events: self.events.clone(),
         });
         self.panes.lock().unwrap().insert(id, pane.clone());
+        self.events.emit("pane.opened", || Value::object([("pane", id.into()), ("command", pane.command.as_str().into())]));
         spawn_reader(pane.clone(), reader, self.host.clone());
         if opts.visible {
             pane.set_visible(self.host.show_pane(id, opts.placement));
@@ -340,6 +377,11 @@ impl Mux {
         &*self.host
     }
 
+    /// Who is subscribed to what.
+    pub fn events(&self) -> &Events {
+        &self.events
+    }
+
     pub fn panes(&self) -> Vec<Arc<Pane>> {
         self.panes.lock().unwrap().values().cloned().collect()
     }
@@ -350,6 +392,7 @@ impl Mux {
         if pane.is_alive() {
             let _ = pane.pty.lock().unwrap().kill();
         }
+        self.events.emit("pane.closed", || Value::object([("pane", id.into())]));
         self.host.pane_closed(id);
         true
     }
@@ -421,6 +464,7 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
         .name(format!("pane-{}", pane.id))
         .spawn(move || {
             let mut buf = vec![0; 64 * 1024];
+            let mut watch = Watch::default();
             loop {
                 let n = match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -432,6 +476,7 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                 let (replies, bells, notifications) = {
                     let mut term = pane.term.lock().unwrap();
                     term.feed(&buf[..n]);
+                    watch.check(&pane, &mut term);
                     (term.take_responses(), term.bells(), term.take_notifications())
                 };
                 if !replies.is_empty() {
@@ -441,6 +486,7 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                 host.pane_output(pane.id);
                 let focused = pane.focused.load(Ordering::Relaxed);
                 if pane.activity.lock().unwrap().output(Instant::now(), bells, notifications, focused) {
+                    pane.status_changed();
                     host.pane_status(pane.id);
                 }
             }
@@ -450,9 +496,48 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
             if pane.update_status() {
                 host.pane_status(pane.id);
             }
+            pane.events.emit("pane.exited", || Value::object([("pane", pane.id.into()), ("exit_code", code.into())]));
             host.pane_exited(pane.id);
         })
         .expect("failed to spawn pane reader thread");
+}
+
+/// What a pane's reader last told subscribers, to tell them what changed.
+#[derive(Default)]
+struct Watch {
+    title: String,
+    cwd: Option<String>,
+    command_started: Option<Instant>,
+}
+
+impl Watch {
+    fn check(&mut self, pane: &Pane, term: &mut Term) {
+        let events = &pane.events;
+        let commands = term.take_command_events();
+        let id = || ("pane", pane.id.into());
+        if term.title() != self.title {
+            self.title = term.title().to_owned();
+            events.emit("pane.title", || Value::object([id(), ("title", self.title.as_str().into())]));
+        }
+        if term.cwd() != self.cwd.as_deref() {
+            self.cwd = term.cwd().map(str::to_owned);
+            events.emit("pane.cwd", || Value::object([id(), ("cwd", self.cwd.clone().into())]));
+        }
+        for event in commands {
+            match event {
+                CommandEvent::Started { command } => {
+                    self.command_started = Some(Instant::now());
+                    events.emit("command.started", || Value::object([id(), ("command", command.into())]));
+                }
+                CommandEvent::Finished { command, exit_code } => {
+                    let duration = self.command_started.take().map(|t| t.elapsed().as_millis() as u64);
+                    events.emit("command.finished", || {
+                        Value::object([id(), ("command", command.into()), ("exit_code", exit_code.into()), ("duration_ms", duration.into())])
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
