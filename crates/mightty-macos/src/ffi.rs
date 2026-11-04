@@ -248,6 +248,9 @@ unsafe extern "C" {
     pub fn CFArrayCreate(alloc: *const c_void, values: *const CFTypeRef, count: isize, callbacks: *const c_void) -> CFTypeRef;
     pub fn CFNumberCreate(alloc: *const c_void, kind: isize, value: *const c_void) -> CFTypeRef;
     pub static kCFTypeArrayCallBacks: [u8; 0];
+    pub fn CFPreferencesCopyAppValue(key: CFStringRef, application: CFStringRef) -> CFTypeRef;
+    pub fn CFPreferencesAppSynchronize(application: CFStringRef) -> bool;
+    pub static kCFPreferencesAnyApplication: CFStringRef;
     pub static kCFTypeDictionaryKeyCallBacks: [u8; 0];
     pub static kCFTypeDictionaryValueCallBacks: [u8; 0];
     pub static kCFBooleanTrue: CFTypeRef;

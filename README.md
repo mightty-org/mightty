@@ -89,7 +89,8 @@ cursor-color = #ff79c6
 | `adjust-cell-width`, `adjust-cell-height` | `0` | Wider or taller cells than the font gives: points (`1`, `-1`) or a percentage (`10%`); taller cells space lines out |
 | `unfocused-split-opacity` | `0.7` | Panes keys aren't going to are dimmed to this, 0.15 to 1 |
 | `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |
-| `theme` | | Colours from `themes/NAME` in the config directory, or a path |
+| `theme` | | Colours from `themes/NAME` in the config directory, or a path. `light:NAME,dark:NAME` follows macOS's appearance and switches when it changes |
+| `config-file` | | Another config file to read after this one, relative to it (`?PATH` if it may be missing), as in Ghostty; in the file, or `--config-file` |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
 | `selection-background`, `selection-foreground` | `#3e4451`, unchanged | Selected text |

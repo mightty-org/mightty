@@ -340,6 +340,16 @@ extern "C" fn on_blink_tick(_: *mut c_void) {
     run_on_main_after(BLINK_INTERVAL, on_blink_tick);
 }
 
+/// After macOS changed between light and dark mode (with a moment for the
+/// preference to be written): the settings again, if a theme follows it.
+extern "C" fn on_appearance_changed(_: *mut c_void) {
+    with_app(|app| {
+        if app.config.follows_appearance {
+            app.reload_config();
+        }
+    });
+}
+
 extern "C" fn on_reload_signal(_: *mut c_void) {
     with_app(App::reload_config);
 }
@@ -476,6 +486,10 @@ pub fn run(config: Config) -> io::Result<()> {
         // As in Ghostty: `kill -USR2` reloads the configuration.
         const SIGUSR2: i32 = 31;
         on_signal_run_on_main(SIGUSR2, on_reload_signal);
+        // Light and dark mode changing, for `theme = light:…,dark:…`.
+        let center: Id = msg!(class(c"NSDistributedNotificationCenter"), c"defaultCenter");
+        let name = nsstring("AppleInterfaceThemeChangedNotification");
+        call!(center, c"addObserver:selector:name:object:", delegate, sel(c"appearanceChanged:"), name, NIL);
         run_on_main_after(BLINK_INTERVAL, on_blink_tick);
         call!(ns_app, c"activateIgnoringOtherApps:", YES);
         call!(ns_app, c"run");
@@ -2415,6 +2429,9 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn jump_to_attention(_: Id, _: Sel, _sender: Id) {
         with_app(App::jump_to_attention);
     }
+    extern "C" fn appearance_changed(_: Id, _: Sel, _notification: Id) {
+        run_on_main_after(Duration::from_millis(100), on_appearance_changed);
+    }
     extern "C" fn open_config(_: Id, _: Sel, _sender: Id) {
         with_app(|app| app.open_config());
     }
@@ -2490,6 +2507,7 @@ unsafe fn register_delegate_class() -> Id {
             (c"equalizeSplits:", action(equalize), c"v@:@"),
             (c"jumpToAttention:", action(jump_to_attention), c"v@:@"),
             (c"openConfig:", action(open_config), c"v@:@"),
+            (c"appearanceChanged:", action(appearance_changed), c"v@:@"),
             (c"reloadConfig:", action(reload_config), c"v@:@"),
         ])
     }

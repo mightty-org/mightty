@@ -55,6 +55,36 @@ pub struct Config {
     /// The next `font-family` starts a new list: each source (a file, the
     /// flags) gives the whole list, as in Ghostty.
     fresh_families: bool,
+    /// macOS is in dark mode, for `theme = light:…,dark:…`.
+    dark_mode: bool,
+    /// `theme` names a light and a dark theme, so the settings are loaded
+    /// again when macOS changes between them.
+    pub follows_appearance: bool,
+    /// Files being read, innermost last, to catch `config-file` loops.
+    including: Vec<PathBuf>,
+}
+
+/// `config-file` nesting deeper than this is taken for a mistake.
+const MAX_INCLUDE_DEPTH: usize = 10;
+
+/// Whether macOS is in dark mode (System Settings → Appearance), read from
+/// the user's global preferences, so it works before the app starts.
+pub fn system_dark() -> bool {
+    use crate::ffi::*;
+    // SAFETY: CoreFoundation calls with valid arguments; the copied value
+    // and the key are released here.
+    unsafe {
+        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication);
+        let key = cfstring("AppleInterfaceStyle");
+        let value = CFPreferencesCopyAppValue(key, kCFPreferencesAnyApplication);
+        CFRelease(key);
+        if value.is_null() {
+            return false; // light: the key is only set for dark
+        }
+        let dark = string_from_ns(value as Id).eq_ignore_ascii_case("dark");
+        CFRelease(value);
+        dark
+    }
 }
 
 /// Which fonts, and how they're set up: `font-family` and the settings
@@ -243,6 +273,9 @@ impl Default for Config {
         Self {
             fonts: Fonts::default(),
             fresh_families: true,
+            dark_mode: false,
+            follows_appearance: false,
+            including: Vec::new(),
             font_size: 14.0,
             cols: 100,
             rows: 30,
@@ -682,9 +715,23 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "theme",
         value: "NAME",
-        help: "colours from themes/NAME in the config directory, or a path",
+        help: "colours from themes/NAME in the config directory, or a path; light:NAME,dark:NAME \
+               follows macOS's appearance",
         color: false,
-        set: |c, v| c.load_theme(v),
+        set: |c, v| {
+            let pick = |side: &str| v.split(',').find_map(|part| part.trim().strip_prefix(side)).map(str::trim);
+            match (pick("light:"), pick("dark:")) {
+                (Some(light), Some(dark)) => {
+                    c.follows_appearance = true;
+                    c.load_theme(if c.dark_mode { dark } else { light })
+                }
+                (None, None) => {
+                    c.follows_appearance = false;
+                    c.load_theme(v)
+                }
+                _ => Err("expects NAME, or light:NAME,dark:NAME".into()),
+            }
+        },
         get: |_| None,
     },
     Setting {
@@ -918,14 +965,10 @@ impl Config {
             }
         }
 
-        let mut config = Self { default_file: default_file.clone(), args: args.to_vec(), ..Self::default() };
+        let mut config = Self { default_file: default_file.clone(), args: args.to_vec(), dark_mode: system_dark(), ..Self::default() };
         let mut warnings = Vec::new();
         if default_files && let Some(path) = default_file {
-            match fs::read_to_string(&path) {
-                Ok(text) => warnings.extend(config.apply_text(&text, &path, false)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => warnings.push(format!("{}: {e}", path.display())),
-            }
+            warnings.extend(config.apply_file(&path, true));
         }
         for path in files {
             let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -947,19 +990,54 @@ impl Config {
         self.default_file.as_deref().filter(|_| !skipped)
     }
 
+    /// Applies the config file at `path`, returning warnings; a missing
+    /// file is one unless `optional`.
+    fn apply_file(&mut self, path: &Path, optional: bool) -> Vec<String> {
+        // The same file however it's reached (`parts/../config`, links).
+        let real = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        if self.including.contains(&real) {
+            return vec![format!("{}: included again from itself (a config-file loop)", path.display())];
+        }
+        if self.including.len() >= MAX_INCLUDE_DEPTH {
+            return vec![format!("{}: config-file nested more than {MAX_INCLUDE_DEPTH} deep", path.display())];
+        }
+        match fs::read_to_string(path) {
+            Ok(text) => {
+                self.including.push(real);
+                let warnings = self.apply_text(&text, path, false);
+                self.including.pop();
+                warnings
+            }
+            Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => vec![format!("{}: {e}", path.display())],
+        }
+    }
+
     /// Applies `name = value` lines, returning a warning per bad line.
+    /// `config-file = PATH` lines (relative to `origin`'s directory; `?PATH`
+    /// if it may be missing) are read after the rest, as in Ghostty.
     /// `colors_only` is for theme files.
     fn apply_text(&mut self, text: &str, origin: &Path, colors_only: bool) -> Vec<String> {
         let mut warnings = Vec::new();
         if !colors_only {
             self.fresh_families = true;
         }
+        let mut includes = Vec::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let result = match line.split_once('=') {
+                Some((name, value)) if name.trim() == "config-file" && !colors_only => {
+                    let value = value.trim();
+                    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+                    let (optional, value) = value.strip_prefix('?').map_or((false, value), |v| (true, v));
+                    let path = expand_home(value);
+                    let dir = origin.parent().unwrap_or(Path::new(""));
+                    includes.push((dir.join(path), optional));
+                    Ok(())
+                }
                 Some((name, value)) => {
                     let value = value.trim();
                     let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
@@ -970,6 +1048,9 @@ impl Config {
             if let Err(e) = result {
                 warnings.push(format!("{}:{}: {e}", origin.display(), n + 1));
             }
+        }
+        for (path, optional) in includes {
+            warnings.extend(self.apply_file(&path, optional));
         }
         warnings
     }
@@ -1187,6 +1268,39 @@ mod tests {
         assert!(Config::load_from(None, &args(&["--config-file=/nonexistent/mightty"])).is_err());
         let (c, warnings) = Config::load_from(Some(dir.join("missing")), &[]).unwrap();
         assert!(warnings.is_empty() && c.cols == 100);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn config_file_includes() {
+        let dir = scratch("include");
+        fs::create_dir_all(dir.join("parts")).unwrap();
+        fs::write(dir.join("config"), "config-file = parts/look\nconfig-file = ?parts/missing\nconfig-file = parts/gone\nwindow-width = 90\n").unwrap();
+        // Included files are read after the including one, so they win.
+        fs::write(dir.join("parts/look"), "window-width = 70\nconfig-file = ../config\n").unwrap();
+        let (c, warnings) = Config::load_from(Some(dir.join("config")), &[]).unwrap();
+        assert_eq!(c.cols, 70);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("loop")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("gone")), "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn theme_follows_appearance() {
+        let dir = scratch("appearance");
+        fs::write(dir.join("day"), "background = #ffffff\n").unwrap();
+        fs::write(dir.join("night"), "background = #000000\n").unwrap();
+        let value = format!("--theme=light:{0}/day, dark:{0}/night", dir.display());
+        for (dark, background) in [(false, (255, 255, 255)), (true, (0, 0, 0))] {
+            let mut c = Config { dark_mode: dark, ..Config::default() };
+            c.apply_args(&args(&[&value])).unwrap();
+            assert_eq!((c.theme.background, c.follows_appearance), (background, true));
+        }
+        let mut c = Config::default();
+        c.apply_args(&args(&[&format!("--theme={}/day", dir.display())])).unwrap();
+        assert!(!c.follows_appearance);
+        assert!(Config::default().apply_args(&args(&["--theme=light:day"])).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 
