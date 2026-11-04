@@ -112,7 +112,7 @@ pub struct Face {
     /// Apple's own substitution table (AAT), which only CoreText reads.
     morx: bool,
     /// Worked out from GSUB the first time text is shaped, then shared.
-    starts: Arc<OnceLock<crate::shape::LookupStarts>>,
+    prepared: Arc<OnceLock<crate::shape::Prepared>>,
 }
 
 /// Where glyph outlines come from.
@@ -223,7 +223,7 @@ impl Face {
         let axes = offset(b"fvar").and_then(|at| var::axes(b, at)).unwrap_or_default();
         let color = color::Tables { sbix: table(b"sbix"), cblc: table(b"CBLC"), cbdt: table(b"CBDT"), colr: table(b"COLR"), cpal: table(b"CPAL") };
         let (gsub, gpos, gdef, morx) = (offset(b"GSUB"), offset(b"GPOS"), offset(b"GDEF"), table(b"morx").is_some());
-        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), color, gsub, gpos, gdef, morx, starts: Arc::default(), data })
+        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), color, gsub, gpos, gdef, morx, prepared: Arc::default(), data })
     }
 
     pub(crate) fn bytes(&self) -> Bytes<'_> {
@@ -234,8 +234,8 @@ impl Face {
         self.gsub
     }
 
-    pub(crate) fn lookup_starts(&self, build: impl FnOnce() -> crate::shape::LookupStarts) -> &crate::shape::LookupStarts {
-        self.starts.get_or_init(build)
+    pub(crate) fn prepared(&self, build: impl FnOnce() -> crate::shape::Prepared) -> &crate::shape::Prepared {
+        self.prepared.get_or_init(build)
     }
 
     pub(crate) fn gpos_table(&self) -> Option<usize> {

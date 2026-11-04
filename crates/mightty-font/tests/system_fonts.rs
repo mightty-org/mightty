@@ -551,3 +551,37 @@ fn substitution_bombs_are_refused() {
     assert_eq!(shaped.len(), 200);
     assert!(started.elapsed().as_secs() < 1, "{:?}", started.elapsed());
 }
+
+/// A GSUB listing 30000 lookups, all one lookup of 512 single
+/// substitutions on every glyph: 15 million subtables to read.
+fn huge_gsub() -> Vec<u8> {
+    let be = |v: u16| v.to_be_bytes();
+    let lookups: u16 = 30_000;
+    let features: u16 = 4096;
+    // Header, script list, lang sys, feature list at 30, its feature at 38.
+    let mut g = [be(1), be(0), be(10), be(30), be(0)].concat();
+    g.extend([be(1), *b"DF", *b"LT", be(8), be(4), be(0), be(0), be(0xFFFF), be(1), be(0)].concat());
+    g.extend([be(1), *b"li", *b"ga", be(8), be(0), be(features)].concat());
+    (0..features).for_each(|i| g.extend(be(i)));
+    let list = g.len();
+    g[8..10].copy_from_slice(&be(list as u16));
+    let lookup = 2 + 2 * lookups as usize;
+    g.extend(be(lookups));
+    (0..lookups).for_each(|_| g.extend(be(lookup as u16)));
+    let subtables: u16 = 512;
+    let subtable = 6 + 2 * subtables;
+    g.extend([be(1), be(0), be(subtables)].concat());
+    (0..subtables).for_each(|_| g.extend(be(subtable)));
+    // Single substitution format 1 (delta 0) over a coverage of all glyphs.
+    g.extend([be(1), be(6), be(0), be(2), be(1), be(0), be(0xFFFF), be(0)].concat());
+    g
+}
+
+#[test]
+fn huge_lookup_lists_are_read_within_a_budget() {
+    let face = Face::parse(FontData::from(font_with(&[], None, vec![(b"GSUB", huge_gsub())])), 0).unwrap();
+    let started = std::time::Instant::now();
+    let shaped = face.shape(&['x'; 100], &LIGATURES);
+    assert_eq!(shaped.len(), 100);
+    assert!(started.elapsed().as_secs() < 1, "{:?}", started.elapsed());
+}

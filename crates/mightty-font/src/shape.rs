@@ -31,8 +31,14 @@ const MAX_NESTING: usize = 4;
 /// character at most (a line of nothing but ligatures).
 const WORK_PER_CHAR: usize = 1024;
 const MAX_WORK: usize = 1 << 20;
-/// What calling a nested lookup costs, in steps: reading it is work too.
+/// What calling a nested lookup costs, in steps.
 const NESTED_CALL: usize = 16;
+/// Subtables read of one lookup: real fonts have a few, a handful of
+/// dozen at most.
+const MAX_SUBTABLES: usize = 512;
+/// Steps reading a font's lookups and their starting glyphs may take,
+/// once: JetBrains Mono and Fira Code take about 3000.
+const PREPARE_WORK: usize = 1 << 20;
 /// Glyphs a buffer may grow to (multiple substitutions add some).
 const MAX_GLYPHS_PER_CHAR: usize = 4;
 
@@ -44,17 +50,16 @@ impl Face {
         if let Some(gsub) = self.gsub_table() {
             let b = self.bytes();
             let gdef = self.gdef_table();
-            let starts = self.lookup_starts(|| lookup_starts(b, gsub, self.glyph_count()));
+            let prepared = self.prepared(|| prepare(b, gsub, self.glyph_count()));
             let budget = (4 + text.len()).saturating_mul(WORK_PER_CHAR).min(MAX_WORK);
-            let mut run = Run { b, gsub, gdef, work: 0, budget, limit: text.len().max(1) * MAX_GLYPHS_PER_CHAR };
+            let mut run = Run { b, prepared, gdef, work: 0, budget, limit: text.len().max(1) * MAX_GLYPHS_PER_CHAR };
             for lookup in lookups_of(b, gsub, features) {
+                let starts = prepared.starts.get(lookup as usize).and_then(Option::as_deref);
                 // Most lookups can't start at most glyphs: skip those quickly.
-                if let Some(Some(set)) = starts.get(lookup as usize)
-                    && !buffer.iter().any(|s| has(set, s.glyph))
-                {
+                if starts.is_some_and(|set| !buffer.iter().any(|s| has(set, s.glyph))) {
                     continue;
                 }
-                run.apply_lookup(&mut buffer, lookup, starts.get(lookup as usize).and_then(Option::as_deref));
+                run.apply_lookup(&mut buffer, lookup, starts);
                 if run.work > run.budget {
                     break;
                 }
@@ -100,7 +105,7 @@ pub(crate) fn lookups_of(b: Bytes<'_>, gsub: usize, features: &[[u8; 4]]) -> Vec
 
 struct Run<'a> {
     b: Bytes<'a>,
-    gsub: usize,
+    prepared: &'a Prepared,
     gdef: Option<usize>,
     work: usize,
     /// The most steps this shaping may take.
@@ -110,28 +115,17 @@ struct Run<'a> {
 }
 
 /// A lookup's type, flags and subtables (extensions unwrapped).
-struct Lookup {
+pub(crate) struct Lookup {
     kind: u16,
     flags: u16,
     subtables: Vec<usize>,
 }
 
-impl Run<'_> {
-    fn lookup(&self, index: u16) -> Option<Lookup> {
-        let b = self.b;
-        let list = self.gsub + b.u16(self.gsub + 8)? as usize;
-        if index >= b.u16(list)? {
-            return None;
-        }
-        let at = list + b.u16(list + 2 + 2 * index as usize)? as usize;
-        let (mut kind, flags, count) = (b.u16(at)?, b.u16(at + 2)?, b.u16(at + 4)? as usize);
-        let mut subtables: Vec<usize> = (0..count).filter_map(|i| Some(at + b.u16(at + 6 + 2 * i)? as usize)).collect();
-        if kind == 7 {
-            // Extension: the real type, and 32-bit offsets.
-            kind = subtables.first().and_then(|&s| b.u16(s + 2))?;
-            subtables = subtables.iter().filter_map(|&s| (b.u16(s + 2)? == kind).then(|| Some(s + b.u32(s + 4)? as usize))?).collect();
-        }
-        Some(Lookup { kind, flags, subtables })
+impl<'a> Run<'a> {
+    /// Lookup `index`, as read once for the face.
+    fn lookup(&self, index: u16) -> Option<&'a Lookup> {
+        let prepared: &'a Prepared = self.prepared;
+        prepared.lookups.get(index as usize)?.as_ref()
     }
 
     /// Runs lookup `index` along the buffer. `starts`: the glyphs it can
@@ -145,7 +139,7 @@ impl Run<'_> {
                 i += 1;
                 continue;
             }
-            i = match self.apply_at(buffer, &lookup, i, 0) {
+            i = match self.apply_at(buffer, lookup, i, 0) {
                 Some(next) => next.max(i + 1),
                 None => i + 1,
             };
@@ -214,6 +208,9 @@ impl Run<'_> {
                 let set = s + b.u16(s + 6 + 2 * k)? as usize;
                 for l in 0..b.u16(set)? as usize {
                     self.work += 1;
+                    if self.work > self.budget {
+                        return None;
+                    }
                     let lig = set + b.u16(set + 2 + 2 * l)? as usize;
                     let (result, count) = (b.u16(lig)?, b.u16(lig + 2)? as usize);
                     if count == 0 {
@@ -308,7 +305,7 @@ impl Run<'_> {
                 }
                 let Some(nested) = self.lookup(index) else { continue };
                 let len = buffer.len();
-                self.apply_at(buffer, &nested, p, depth + 1);
+                self.apply_at(buffer, nested, p, depth + 1);
                 // Glyphs added or taken out move the positions after.
                 let delta = buffer.len() as isize - len as isize;
                 if delta != 0 {
@@ -327,6 +324,9 @@ impl Run<'_> {
         let b = self.b;
         for r in 0..b.u16(set)? as usize {
             self.work += 1;
+            if self.work > self.budget {
+                return None;
+            }
             let rule = set + b.u16(set + 2 + 2 * r)? as usize;
             if let Some(m) = self.match_rule(buffer, flags, i, rule, chained, |_, at, g| is(at, g)) {
                 return Some(m);
@@ -341,6 +341,9 @@ impl Run<'_> {
         let b = self.b;
         for r in 0..b.u16(set)? as usize {
             self.work += 1;
+            if self.work > self.budget {
+                return None;
+            }
             let rule = set + b.u16(set + 2 + 2 * r)? as usize;
             let matches = |part: usize, at: usize, g: u16| b.u16(at) == Some(class_of(b, classes[part], g));
             if let Some(m) = self.match_rule(buffer, flags, i, rule, chained, matches) {
@@ -388,7 +391,7 @@ impl Run<'_> {
                 self.work += 1;
             }
             self.work += 1;
-            if p >= buffer.len() || !is(j, buffer[p].glyph) {
+            if self.work > self.budget || p >= buffer.len() || !is(j, buffer[p].glyph) {
                 return None;
             }
             positions.push(p);
@@ -403,6 +406,9 @@ impl Run<'_> {
             loop {
                 p = p.checked_sub(1)?;
                 self.work += 1;
+                if self.work > self.budget {
+                    return None;
+                }
                 if !self.ignored(flags, buffer[p].glyph) {
                     break;
                 }
@@ -441,33 +447,59 @@ impl Run<'_> {
     }
 }
 
-/// Each lookup's set of glyphs it can start at (a bit a glyph), from its
-/// subtables' first coverage; `None` where that isn't known.
-pub(crate) type LookupStarts = Vec<Option<Box<[u64]>>>;
+/// A face's lookups, read once: each one's subtables, and the glyphs it
+/// can start at (a bit a glyph) where that's known. Lookups that would
+/// take too long to read are left out.
+pub(crate) struct Prepared {
+    lookups: Vec<Option<Lookup>>,
+    starts: Vec<Option<Box<[u64]>>>,
+}
 
 fn has(set: &[u64], glyph: u16) -> bool {
     set.get(glyph as usize / 64).is_some_and(|w| w >> (glyph % 64) & 1 != 0)
 }
 
-/// Every lookup's starting glyphs, for a font of `glyphs` glyphs.
-fn lookup_starts(b: Bytes<'_>, gsub: usize, glyphs: u16) -> LookupStarts {
-    let run = Run { b, gsub, gdef: None, work: 0, budget: 0, limit: 0 };
+/// Reads GSUB's lookups for a font of `glyphs` glyphs, within `PREPARE_WORK`.
+fn prepare(b: Bytes<'_>, gsub: usize, glyphs: u16) -> Prepared {
+    let mut work = 0usize;
     let count = (|| {
         let list = gsub + b.u16(gsub + 8)? as usize;
-        b.u16(list)
-    })()
-    .unwrap_or(0);
-    (0..count)
-        .map(|index| {
-            let lookup = run.lookup(index)?;
+        Some((list, b.u16(list)?))
+    })();
+    let Some((list, count)) = count else { return Prepared { lookups: Vec::new(), starts: Vec::new() } };
+    let mut lookups = Vec::with_capacity(count as usize);
+    let mut starts = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        work += 1;
+        let lookup = (work <= PREPARE_WORK).then(|| read_lookup(b, list, index, &mut work)).flatten();
+        let start = lookup.as_ref().and_then(|lookup| {
             let mut set = vec![0u64; (glyphs as usize).div_ceil(64)].into_boxed_slice();
             for &s in &lookup.subtables {
-                let table = first_coverage(b, lookup.kind, s)?;
-                add_covered(b, table, &mut set)?;
+                add_covered(b, first_coverage(b, lookup.kind, s)?, &mut set, glyphs, &mut work)?;
             }
             Some(set)
-        })
-        .collect()
+        });
+        lookups.push(lookup.filter(|_| work <= PREPARE_WORK));
+        starts.push(start.filter(|_| work <= PREPARE_WORK));
+    }
+    Prepared { lookups, starts }
+}
+
+/// Lookup `index` of the list at `list`, counting what reading it takes.
+fn read_lookup(b: Bytes<'_>, list: usize, index: usize, work: &mut usize) -> Option<Lookup> {
+    let at = list + b.u16(list + 2 + 2 * index)? as usize;
+    let (mut kind, flags, count) = (b.u16(at)?, b.u16(at + 2)?, b.u16(at + 4)? as usize);
+    if count > MAX_SUBTABLES {
+        return None;
+    }
+    *work += count;
+    let mut subtables: Vec<usize> = (0..count).filter_map(|i| Some(at + b.u16(at + 6 + 2 * i)? as usize)).collect();
+    if kind == 7 {
+        // Extension: the real type, and 32-bit offsets.
+        kind = subtables.first().and_then(|&s| b.u16(s + 2))?;
+        subtables = subtables.iter().filter_map(|&s| (b.u16(s + 2)? == kind).then(|| Some(s + b.u32(s + 4)? as usize))?).collect();
+    }
+    Some(Lookup { kind, flags, subtables })
 }
 
 /// The Coverage table of the first glyph a subtable matches.
@@ -486,19 +518,28 @@ fn first_coverage(b: Bytes<'_>, kind: u16, s: usize) -> Option<usize> {
     Some(s + offset as usize)
 }
 
-/// Sets the bits of the glyphs a Coverage table covers.
-fn add_covered(b: Bytes<'_>, at: usize, set: &mut [u64]) -> Option<()> {
+/// Sets the bits of the glyphs (fewer than `glyphs`) a Coverage table
+/// covers, counting each in `work`; gives up past `PREPARE_WORK`.
+fn add_covered(b: Bytes<'_>, at: usize, set: &mut [u64], glyphs: u16, work: &mut usize) -> Option<()> {
     let mut add = |g: u16| {
         if let Some(word) = set.get_mut(g as usize / 64) {
             *word |= 1 << (g % 64);
         }
     };
     let count = b.u16(at + 2)? as usize;
+    *work += count;
+    if *work > PREPARE_WORK {
+        return None;
+    }
     match b.u16(at)? {
         1 => (0..count).for_each(|i| b.u16(at + 4 + 2 * i).into_iter().for_each(&mut add)),
         2 => {
             for i in 0..count {
-                let (start, end) = (b.u16(at + 4 + 6 * i)?, b.u16(at + 6 + 6 * i)?);
+                let (start, end) = (b.u16(at + 4 + 6 * i)?, b.u16(at + 6 + 6 * i)?.min(glyphs.saturating_sub(1)));
+                *work += (end as usize + 1).saturating_sub(start as usize);
+                if *work > PREPARE_WORK {
+                    return None;
+                }
                 (start..=end).for_each(&mut add);
             }
         }
