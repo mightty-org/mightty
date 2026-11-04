@@ -69,7 +69,10 @@ cursor-color = #ff79c6
 
 | Setting | Default | |
 |---|---|---|
-| `font-family`, `font-size` | `Menlo`, `14` | Font and size in points |
+| `font-family`, `font-size` | `Menlo`, `14` | Font and size in points. Repeat `font-family` for fallbacks, tried in order before the ones macOS picks; each source (the file, then flags) gives the whole list, and an empty value clears it, as in Ghostty. A name mightty can't find is reported |
+| `font-family-bold`, `font-family-italic`, `font-family-bold-italic` | from `font-family` | A different family for bold or italic text; unset, the family's own bold and italic, or ones made from it |
+| `font-feature` | | OpenType features, repeated: `ss01` (or `+ss01`) on, `-calt` off, `cv01=2` an alternate; they apply to single characters (`zero`) as well as ligatures. An empty value clears them |
+| `font-variation`, `font-variation-bold`, `font-variation-italic`, `font-variation-bold-italic` | | Variable font axes, repeated: `wght=450`, `slnt=-10` |
 | `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
 | `scrollback-lines` | `10000` | Lines kept above the screen |
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |

@@ -245,6 +245,9 @@ unsafe extern "C" {
     pub fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
     pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+    pub fn CFArrayCreate(alloc: *const c_void, values: *const CFTypeRef, count: isize, callbacks: *const c_void) -> CFTypeRef;
+    pub fn CFNumberCreate(alloc: *const c_void, kind: isize, value: *const c_void) -> CFTypeRef;
+    pub static kCFTypeArrayCallBacks: [u8; 0];
     pub static kCFTypeDictionaryKeyCallBacks: [u8; 0];
     pub static kCFTypeDictionaryValueCallBacks: [u8; 0];
     pub static kCFBooleanTrue: CFTypeRef;
@@ -274,6 +277,12 @@ unsafe extern "C" {
     pub fn CTFontCopyAttribute(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef;
     pub fn CTFontCopyPostScriptName(font: CTFontRef) -> CFStringRef;
     pub fn CTFontCopyVariation(font: CTFontRef) -> CFTypeRef;
+    pub fn CTFontCopyFamilyName(font: CTFontRef) -> CFStringRef;
+    pub fn CTFontDescriptorCreateWithAttributes(attributes: CFTypeRef) -> CFTypeRef;
+    pub static kCTFontVariationAttribute: CFStringRef;
+    pub static kCTFontFeatureSettingsAttribute: CFStringRef;
+    pub static kCTFontOpenTypeFeatureTag: CFStringRef;
+    pub static kCTFontOpenTypeFeatureValue: CFStringRef;
     pub static kCTFontURLAttribute: CFStringRef;
     pub fn CTFontGetGlyphsForCharacters(font: CTFontRef, chars: *const u16, glyphs: *mut u16, count: isize) -> bool;
     pub fn CTFontGetAdvancesForGlyphs(

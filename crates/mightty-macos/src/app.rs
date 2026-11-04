@@ -1180,7 +1180,7 @@ impl App {
         };
         self.mux.set_options(config.term_options());
         // Sizes changed with ⌘+ and ⌘- stay unless the font settings changed.
-        let font = |c: &Config| (c.font.clone(), c.font_size, c.font_backend, c.ligatures);
+        let font = |c: &Config| (c.fonts.clone(), c.font_size, c.font_backend, c.ligatures);
         let font_changed = font(&config) != font(&self.config);
         set_menu_keys(&config.keybinds);
         for w in &self.windows {

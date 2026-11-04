@@ -11,7 +11,7 @@ use std::ptr;
 
 use mightty_font::{EMBOLDEN, Face, FontData, OBLIQUE};
 
-use crate::config::FontBackend;
+use crate::config::{FontBackend, Fonts};
 use crate::ffi::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -55,6 +55,12 @@ pub struct Font {
     own: [Option<Face>; 4],
     /// The `Style` bits each variant lacks and has made up.
     synthetic: [u8; 4],
+    /// `font-family` after the first: tried in order before CoreText picks.
+    chain: Vec<CTFontRef>,
+    /// Features our shaper applies (`font-feature`, `font-ligatures`).
+    shaping: Vec<[u8; 4]>,
+    /// Whether runs of text need shaping: ligatures or features are on.
+    shapes: bool,
     /// With `font-backend = mightty`, the fallback fonts CoreText picked
     /// (emoji, CJK) read by us, by PostScript name; `None` where we can't.
     fallbacks: RefCell<Vec<(String, Option<Face>)>>,
@@ -79,23 +85,54 @@ impl Font {
         (self.cell_width, self.cell_height) = (width, height);
     }
 
-    /// `size` is in pixels (points × backing scale).
+    /// `name` alone, with ligatures. `size` is in pixels (points × backing scale).
+    #[cfg(test)]
     pub fn new(name: &str, size: f64, backend: FontBackend) -> Self {
+        Self::with(&Fonts { families: vec![name.into()], ..Fonts::default() }, size, backend, true)
+    }
+
+    /// The fonts `fonts` describes, at `size` pixels.
+    pub fn with(fonts: &Fonts, size: f64, backend: FontBackend, ligatures: bool) -> Self {
+        // `font-ligatures = false` turns the ligature features off, unless set.
+        let mut features = fonts.features.clone();
+        if !ligatures {
+            for tag in [*b"liga", *b"clig", *b"calt", *b"dlig"] {
+                if !features.iter().any(|f| f.0 == tag) {
+                    features.push((tag, 0));
+                }
+            }
+        }
+        let mut shaping: Vec<[u8; 4]> = mightty_font::LIGATURES.to_vec();
+        for &(tag, value) in &features {
+            shaping.retain(|&t| t != tag);
+            if value > 0 {
+                shaping.push(tag);
+            }
+        }
+        let shapes = ligatures || fonts.features.iter().any(|f| f.1 > 0);
         // SAFETY: CoreText/CoreGraphics calls with valid arguments; every
         // created object is owned by `Font` and released in `Drop`.
         unsafe {
-            let cf_name = cfstring(name);
-            // Falls back to a default font for unknown names, never null.
-            let regular = CTFontCreateWithName(cf_name, size, ptr::null());
-            CFRelease(cf_name);
-
-            let variant = |traits: u32| {
-                let font = CTFontCreateCopyWithSymbolicTraits(regular, 0.0, ptr::null(), traits, traits);
-                if font.is_null() { CFRetain(regular) } else { font }
+            let first = fonts.families.first().map_or("Menlo", String::as_str);
+            let base = open_font(first, size);
+            // Bold and italic come from the family's unvaried font, so its
+            // own weights stand unless `font-variation-bold` and so on say.
+            let variant = |style: usize, traits: u32| {
+                let font = match &fonts.styled[style - 1] {
+                    Some(name) => open_font(name, size),
+                    None => {
+                        let font = CTFontCreateCopyWithSymbolicTraits(base, 0.0, ptr::null(), traits, traits);
+                        if font.is_null() { CFRetain(base) } else { font }
+                    }
+                };
+                with_settings(font, &fonts.variations[style], &features)
             };
-            let bold = variant(kCTFontTraitBold);
-            let italic = variant(kCTFontTraitItalic);
-            let bold_italic = variant(kCTFontTraitBold | kCTFontTraitItalic);
+            let regular = with_settings(CFRetain(base), &fonts.variations[0], &features);
+            let bold = variant(1, kCTFontTraitBold);
+            let italic = variant(2, kCTFontTraitItalic);
+            let bold_italic = variant(3, kCTFontTraitBold | kCTFontTraitItalic);
+            CFRelease(base);
+            let chain = fonts.families.iter().skip(1).map(|name| with_settings(open_font(name, size), &[], &features)).collect();
 
             let mut variants = [regular, bold, italic, bold_italic];
             let mut synthetic = [0; 4];
@@ -148,6 +185,9 @@ impl Font {
                 synthetic,
                 fallbacks: RefCell::new(Vec::new()),
                 files: RefCell::new(files),
+                chain,
+                shaping,
+                shapes,
                 backend,
                 size,
                 colorspace: CGColorSpaceCreateDeviceRGB(),
@@ -156,6 +196,12 @@ impl Font {
                 baseline,
             }
         }
+    }
+
+    /// Whether runs of text are shaped: ligatures, or features such as
+    /// `ss01` or `zero` that change single glyphs, are on.
+    pub fn shapes(&self) -> bool {
+        self.shapes
     }
 
     /// Renders `c` into a tile `cells` wide. Returns `None` when no font has the glyph.
@@ -176,20 +222,23 @@ impl Font {
         // created here are released before returning.
         unsafe {
             let mut fallback: CTFontRef = ptr::null();
-            if !CTFontGetGlyphsForCharacters(base, units.as_ptr(), glyphs.as_mut_ptr(), n) || glyphs[0] == 0 {
-                // Let CoreText pick a font that covers the character (CJK, emoji, symbols).
-                let mut buf = [0u8; 4];
-                let s = cfstring(c.encode_utf8(&mut buf));
-                fallback = CTFontCreateForString(base, s, CFRange { location: 0, length: n });
-                CFRelease(s);
-                if fallback.is_null()
-                    || !CTFontGetGlyphsForCharacters(fallback, units.as_ptr(), glyphs.as_mut_ptr(), n)
-                    || glyphs[0] == 0
-                {
-                    if !fallback.is_null() {
-                        CFRelease(fallback);
+            let has = |font: CTFontRef, glyphs: &mut [u16; 2]| CTFontGetGlyphsForCharacters(font, units.as_ptr(), glyphs.as_mut_ptr(), n) && glyphs[0] != 0;
+            if !has(base, &mut glyphs) {
+                if let Some(&font) = self.chain.iter().find(|&&font| has(font, &mut glyphs)) {
+                    // The next `font-family` that has it.
+                    fallback = CFRetain(font);
+                } else {
+                    // Let CoreText pick a font that covers the character (CJK, emoji, symbols).
+                    let mut buf = [0u8; 4];
+                    let s = cfstring(c.encode_utf8(&mut buf));
+                    fallback = CTFontCreateForString(base, s, CFRange { location: 0, length: n });
+                    CFRelease(s);
+                    if fallback.is_null() || !has(fallback, &mut glyphs) {
+                        if !fallback.is_null() {
+                            CFRelease(fallback);
+                        }
+                        return None;
                     }
-                    return None;
                 }
             }
             let font = if fallback.is_null() { base } else { fallback };
@@ -265,7 +314,7 @@ impl Font {
         let own = self.own[style.0 as usize].as_ref();
         let (shaped, nominal): (Vec<(u16, usize)>, Vec<u16>) = match own {
             Some(face) => (
-                face.shape(text, &mightty_font::LIGATURES).iter().map(|s| (s.glyph, s.cluster as usize)).collect(),
+                face.shape(text, &self.shaping).iter().map(|s| (s.glyph, s.cluster as usize)).collect(),
                 text.iter().map(|&c| face.glyph(c).unwrap_or(0)).collect(),
             ),
             // SAFETY: a live CTFont of ours.
@@ -421,7 +470,7 @@ impl Font {
             // Joiners and variation selectors a font doesn't map only steer
             // substitution; any other character it lacks is another font's.
             let invisible = |c: char| matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}');
-            let shaped: Vec<_> = face.shape(&chars, &mightty_font::LIGATURES).into_iter().filter(|s| s.glyph != 0 || !invisible(chars[s.cluster as usize])).collect();
+            let shaped: Vec<_> = face.shape(&chars, &self.shaping).into_iter().filter(|s| s.glyph != 0 || !invisible(chars[s.cluster as usize])).collect();
             if shaped.is_empty() || shaped.iter().any(|s| s.glyph == 0) {
                 return None;
             }
@@ -571,6 +620,90 @@ impl Font {
     }
 }
 
+/// `name` at `size` pixels: a family, or a PostScript name. CoreText falls
+/// back to a default font for names it doesn't know (never null), so that
+/// is reported.
+unsafe fn open_font(name: &str, size: f64) -> CTFontRef {
+    // SAFETY: as documented; the strings are released here.
+    unsafe {
+        let cf = cfstring(name);
+        let font = CTFontCreateWithName(cf, size, ptr::null());
+        CFRelease(cf);
+        let names = [CTFontCopyFamilyName(font), CTFontCopyPostScriptName(font)];
+        let found = names.iter().any(|&n| !n.is_null() && string_from_ns(n as Id).eq_ignore_ascii_case(name));
+        for n in names.into_iter().filter(|n| !n.is_null()) {
+            CFRelease(n);
+        }
+        if !found {
+            eprintln!("mightty: no font named `{name}`; using the default");
+        }
+        font
+    }
+}
+
+/// `font` (consumed) with `font-variation` axes and `font-feature`s set.
+unsafe fn with_settings(font: CTFontRef, variations: &[([u8; 4], f64)], features: &[([u8; 4], u32)]) -> CTFontRef {
+    if variations.is_empty() && features.is_empty() {
+        return font;
+    }
+    // SAFETY: CoreFoundation calls with valid arguments; everything created
+    // here is released, the dictionaries and arrays retain what they hold.
+    unsafe {
+        let dict = |keys: &[CFTypeRef], values: &[CFTypeRef]| {
+            CFDictionaryCreate(
+                ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                keys.len() as isize,
+                (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
+                (&raw const kCFTypeDictionaryValueCallBacks).cast(),
+            )
+        };
+        let int = |v: i64| CFNumberCreate(ptr::null(), kCFNumberSInt64Type, (&raw const v).cast());
+        let float = |v: f64| CFNumberCreate(ptr::null(), kCFNumberFloat64Type, (&raw const v).cast());
+        let mut owned = Vec::new();
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        if !variations.is_empty() {
+            let tags: Vec<CFTypeRef> = variations.iter().map(|(t, _)| int(u32::from_be_bytes(*t) as i64)).collect();
+            let amounts: Vec<CFTypeRef> = variations.iter().map(|&(_, v)| float(v)).collect();
+            let axes = dict(&tags, &amounts);
+            owned.extend(tags.into_iter().chain(amounts));
+            keys.push(kCTFontVariationAttribute);
+            values.push(axes);
+            owned.push(axes);
+        }
+        if !features.is_empty() {
+            let settings: Vec<CFTypeRef> = features
+                .iter()
+                .map(|&(tag, value)| {
+                    let (name, number) = (cfstring(std::str::from_utf8(&tag).unwrap_or("    ")), int(value as i64));
+                    let setting = dict(&[kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue], &[name, number]);
+                    owned.extend([name, number]);
+                    setting
+                })
+                .collect();
+            let array = CFArrayCreate(ptr::null(), settings.as_ptr(), settings.len() as isize, (&raw const kCFTypeArrayCallBacks).cast());
+            owned.extend(settings);
+            keys.push(kCTFontFeatureSettingsAttribute);
+            values.push(array);
+            owned.push(array);
+        }
+        let attributes = dict(&keys, &values);
+        let descriptor = CTFontDescriptorCreateWithAttributes(attributes);
+        let changed = CTFontCreateCopyWithAttributes(font, 0.0, ptr::null(), descriptor);
+        for object in owned.into_iter().chain([attributes, descriptor]) {
+            CFRelease(object);
+        }
+        if changed.is_null() {
+            font
+        } else {
+            CFRelease(font);
+            changed
+        }
+    }
+}
+
 /// Our face for CoreText's `font`: the face it was loaded from, found by
 /// its file (opened once, in `files`) and PostScript name, and for a
 /// variable font set to the same position. `None` where we can't read it
@@ -645,7 +778,7 @@ impl Drop for Font {
     fn drop(&mut self) {
         // SAFETY: we own one reference to each.
         unsafe {
-            for font in self.variants {
+            for font in self.variants.into_iter().chain(self.chain.iter().copied()) {
                 CFRelease(font);
             }
             CGColorSpaceRelease(self.colorspace);

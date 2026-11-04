@@ -17,7 +17,7 @@ use crate::bindings::Bindings;
 use mightty_term::{DEFAULT_SCROLLBACK, TermOptions};
 
 pub struct Config {
-    pub font: String,
+    pub fonts: Fonts,
     /// Points.
     pub font_size: f64,
     pub cols: u16,
@@ -52,6 +52,63 @@ pub struct Config {
     /// default file, and the command line.
     default_file: Option<PathBuf>,
     args: Vec<String>,
+    /// The next `font-family` starts a new list: each source (a file, the
+    /// flags) gives the whole list, as in Ghostty.
+    fresh_families: bool,
+}
+
+/// Which fonts, and how they're set up: `font-family` and the settings
+/// around it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fonts {
+    /// `font-family`, repeated: the font, then fallbacks tried in order
+    /// before the ones macOS picks.
+    pub families: Vec<String>,
+    /// `font-family-bold`, `-italic` and `-bold-italic`, by `Style` bits
+    /// minus one; unset ones come from the first family.
+    pub styled: [Option<String>; 3],
+    /// `font-feature`: OpenType features and values (0 off, 1 on, more for
+    /// alternates), in order.
+    pub features: Vec<([u8; 4], u32)>,
+    /// `font-variation`, `-bold`, `-italic` and `-bold-italic`, by `Style`
+    /// bits: axis tags and values.
+    pub variations: [Vec<([u8; 4], f64)>; 4],
+}
+
+impl Default for Fonts {
+    fn default() -> Self {
+        Self { families: vec!["Menlo".into()], styled: Default::default(), features: Vec::new(), variations: Default::default() }
+    }
+}
+
+/// An OpenType tag: four characters, shorter ones padded with spaces.
+fn tag(v: &str) -> Result<[u8; 4], String> {
+    let bytes = v.as_bytes();
+    if bytes.is_empty() || bytes.len() > 4 || !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(format!("`{v}` isn't an OpenType tag such as ss01 or wght"));
+    }
+    let mut out = [b' '; 4];
+    out[..bytes.len()].copy_from_slice(bytes);
+    Ok(out)
+}
+
+/// `font-feature`: `ss01` or `+ss01` (on), `-calt` (off), `cv01=2`.
+fn feature(v: &str) -> Result<([u8; 4], u32), String> {
+    if let Some(off) = v.strip_prefix('-') {
+        return Ok((tag(off)?, 0));
+    }
+    let v = v.strip_prefix('+').unwrap_or(v);
+    match v.split_once('=') {
+        Some((name, value)) => Ok((tag(name.trim())?, value.trim().parse().map_err(|_| "expects a whole number after =")?)),
+        None => Ok((tag(v)?, 1)),
+    }
+}
+
+/// `font-variation`: `wght=450`.
+fn variation(v: &str) -> Result<([u8; 4], f64), String> {
+    let (name, value) = v.split_once('=').ok_or("expects AXIS=VALUE, such as wght=450")?;
+    let value = value.trim().parse().ok().filter(|v: &f64| v.is_finite()).ok_or("expects a number after =")?;
+    Ok((tag(name.trim())?, value))
 }
 
 /// Settings the renderer draws with, apart from colours and fonts.
@@ -184,7 +241,8 @@ impl OptionAsAlt {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            font: "Menlo".into(),
+            fonts: Fonts::default(),
+            fresh_families: true,
             font_size: 14.0,
             cols: 100,
             rows: 30,
@@ -226,13 +284,111 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "font-family",
         value: "NAME",
-        help: "font family",
+        help: "font family; repeat for fallbacks, tried in order (an empty value clears the list)",
         color: false,
         set: |c, v| {
-            c.font = v.into();
+            if std::mem::take(&mut c.fresh_families) || v.is_empty() {
+                c.fonts.families.clear();
+            }
+            if !v.is_empty() {
+                c.fonts.families.push(v.into());
+            }
             Ok(())
         },
-        get: |c| Some(c.font.clone()),
+        get: |c| Some(c.fonts.families.join(", ")),
+    },
+    Setting {
+        name: "font-family-bold",
+        value: "NAME",
+        help: "family for bold text (default: the font-family's bold, or made from it)",
+        color: false,
+        set: |c, v| {
+            c.fonts.styled[0] = Some(v.into()).filter(|v: &String| !v.is_empty());
+            Ok(())
+        },
+        get: |c| c.fonts.styled[0].clone(),
+    },
+    Setting {
+        name: "font-family-italic",
+        value: "NAME",
+        help: "family for italic text",
+        color: false,
+        set: |c, v| {
+            c.fonts.styled[1] = Some(v.into()).filter(|v: &String| !v.is_empty());
+            Ok(())
+        },
+        get: |c| c.fonts.styled[1].clone(),
+    },
+    Setting {
+        name: "font-family-bold-italic",
+        value: "NAME",
+        help: "family for bold italic text",
+        color: false,
+        set: |c, v| {
+            c.fonts.styled[2] = Some(v.into()).filter(|v: &String| !v.is_empty());
+            Ok(())
+        },
+        get: |c| c.fonts.styled[2].clone(),
+    },
+    Setting {
+        name: "font-feature",
+        value: "FEATURE",
+        help: "OpenType feature: ss01 or +ss01 on, -calt off, cv01=2 an alternate; repeat for more \
+               (an empty value clears them)",
+        color: false,
+        set: |c, v| {
+            if v.is_empty() {
+                c.fonts.features.clear();
+            } else {
+                let (tag, value) = feature(v)?;
+                c.fonts.features.retain(|f| f.0 != tag);
+                c.fonts.features.push((tag, value));
+            }
+            Ok(())
+        },
+        get: |c| {
+            let show = |(tag, value): &([u8; 4], u32)| {
+                let name = String::from_utf8_lossy(tag).trim_end().to_owned();
+                match value {
+                    0 => format!("-{name}"),
+                    1 => name,
+                    n => format!("{name}={n}"),
+                }
+            };
+            (!c.fonts.features.is_empty()).then(|| c.fonts.features.iter().map(show).collect::<Vec<_>>().join(", "))
+        },
+    },
+    Setting {
+        name: "font-variation",
+        value: "AXIS=VALUE",
+        help: "variable font axis for regular text, such as wght=450; repeat for more axes (empty clears)",
+        color: false,
+        set: |c, v| set_variation(c, 0, v),
+        get: |c| show_variations(&c.fonts.variations[0]),
+    },
+    Setting {
+        name: "font-variation-bold",
+        value: "AXIS=VALUE",
+        help: "variable font axis for bold text",
+        color: false,
+        set: |c, v| set_variation(c, 1, v),
+        get: |c| show_variations(&c.fonts.variations[1]),
+    },
+    Setting {
+        name: "font-variation-italic",
+        value: "AXIS=VALUE",
+        help: "variable font axis for italic text",
+        color: false,
+        set: |c, v| set_variation(c, 2, v),
+        get: |c| show_variations(&c.fonts.variations[2]),
+    },
+    Setting {
+        name: "font-variation-bold-italic",
+        value: "AXIS=VALUE",
+        help: "variable font axis for bold italic text",
+        color: false,
+        set: |c, v| set_variation(c, 3, v),
+        get: |c| show_variations(&c.fonts.variations[3]),
     },
     Setting {
         name: "font-size",
@@ -684,6 +840,23 @@ const FILE_FLAGS: [(&str, &str); 2] = [
     ("config-default-files=false", "skip the default config file"),
 ];
 
+fn set_variation(c: &mut Config, style: usize, v: &str) -> Result<(), String> {
+    let list = &mut c.fonts.variations[style];
+    if v.is_empty() {
+        list.clear();
+    } else {
+        let (tag, value) = variation(v)?;
+        list.retain(|a| a.0 != tag);
+        list.push((tag, value));
+    }
+    Ok(())
+}
+
+fn show_variations(list: &[([u8; 4], f64)]) -> Option<String> {
+    let show = |(tag, value): &([u8; 4], f64)| format!("{}={value}", String::from_utf8_lossy(tag).trim_end());
+    (!list.is_empty()).then(|| list.iter().map(show).collect::<Vec<_>>().join(", "))
+}
+
 /// A number from `min` to 1.
 fn fraction(v: &str, min: f64) -> Result<f64, String> {
     v.parse().ok().filter(|f: &f64| (min..=1.0).contains(f)).ok_or_else(|| format!("expects a number from {min} to 1"))
@@ -778,6 +951,9 @@ impl Config {
     /// `colors_only` is for theme files.
     fn apply_text(&mut self, text: &str, origin: &Path, colors_only: bool) -> Vec<String> {
         let mut warnings = Vec::new();
+        if !colors_only {
+            self.fresh_families = true;
+        }
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -828,6 +1004,7 @@ impl Config {
     /// the rest of the arguments and runs in the current directory unless
     /// `--working-directory` says otherwise.
     pub fn apply_args(&mut self, args: &[String]) -> Result<(), String> {
+        self.fresh_families = true;
         for (i, arg) in args.iter().enumerate() {
             if arg == "-e" {
                 let program = &args[i + 1..];
@@ -913,7 +1090,7 @@ mod tests {
         let mut c = Config::default();
         c.apply_args(&args(&["--window-width=120", "--window-height=40", "--font-family=SF Mono", "--font-size=13.5", "--window-vsync=false"]))
             .unwrap();
-        assert_eq!((c.cols, c.rows, c.font.as_str(), c.font_size, c.vsync), (120, 40, "SF Mono", 13.5, false));
+        assert_eq!((c.cols, c.rows, c.fonts.families[0].as_str(), c.font_size, c.vsync), (120, 40, "SF Mono", 13.5, false));
         c.apply_args(&args(&["--macos-option-as-alt=left"])).unwrap();
         assert_eq!(c.option_as_alt, Some(OptionAsAlt::Left));
     }
@@ -991,7 +1168,7 @@ mod tests {
         )
         .unwrap();
         let (c, warnings) = Config::load_from(Some(file.clone()), &args(&["--window-width=120"])).unwrap();
-        assert_eq!((c.cols, c.rows, c.font.as_str()), (120, 30, "Iosevka Term"));
+        assert_eq!((c.cols, c.rows, c.fonts.families.join(",")), (120, 30, "Iosevka Term".into()));
         assert_eq!((c.theme.background, c.theme.palette[1]), ((0x10, 0x10, 0x10), (0xff, 0, 0)));
         assert_eq!(c.term_options().background, (0x10, 0x10, 0x10));
         let at = |line| format!("{}:{line}: ", file.display());
@@ -1010,6 +1187,35 @@ mod tests {
         assert!(Config::load_from(None, &args(&["--config-file=/nonexistent/mightty"])).is_err());
         let (c, warnings) = Config::load_from(Some(dir.join("missing")), &[]).unwrap();
         assert!(warnings.is_empty() && c.cols == 100);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn font_settings() {
+        let dir = scratch("fonts");
+        let file = dir.join("config");
+        fs::write(
+            &file,
+            "font-family = JetBrains Mono\nfont-family = Symbols Nerd Font\nfont-family-bold = Iosevka Heavy\n\
+             font-feature = ss01\nfont-feature = -calt\nfont-feature = cv01=2\nfont-feature = +ss01\n\
+             font-variation = wght=450\nfont-variation-italic = slnt=-10\n",
+        )
+        .unwrap();
+        let (c, warnings) = Config::load_from(Some(file.clone()), &[]).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(c.fonts.families, ["JetBrains Mono", "Symbols Nerd Font"]);
+        assert_eq!(c.fonts.styled, [Some("Iosevka Heavy".into()), None, None]);
+        assert_eq!(c.fonts.features, [(*b"calt", 0), (*b"cv01", 2), (*b"ss01", 1)]);
+        assert_eq!(c.fonts.variations[0], [(*b"wght", 450.0)]);
+        assert_eq!(c.fonts.variations[2], [(*b"slnt", -10.0)]);
+        // Flags start a new list of families; an empty one clears it.
+        let (c, _) = Config::load_from(Some(file.clone()), &args(&["--font-family=Menlo"])).unwrap();
+        assert_eq!(c.fonts.families, ["Menlo"]);
+        let (c, _) = Config::load_from(Some(file), &args(&["--font-family=", "--font-family=A", "--font-family=B"])).unwrap();
+        assert_eq!(c.fonts.families, ["A", "B"]);
+        for bad in ["--font-feature=toolong", "--font-feature=cv01=x", "--font-variation=wght", "--font-variation=wg!t=1"] {
+            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 

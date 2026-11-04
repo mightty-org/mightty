@@ -12,7 +12,7 @@ use std::rc::Rc;
 use mightty_render::{Rgb, Theme, boxdraw};
 use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
 
-use crate::config::{Adjust, Config, CursorStyle, FontBackend, Look};
+use crate::config::{Adjust, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
 use crate::font::{Font, Ligature, RasterGlyph, Style};
 use crate::snapshot;
@@ -273,7 +273,7 @@ pub struct Renderer {
     ligatures: bool,
     /// Ligatures found in runs of text, by the text and its style.
     shaped: HashMap<RunKey, Rc<[Ligature]>>,
-    font_name: String,
+    fonts: Fonts,
     font_size: f64,
     backend: FontBackend,
     scale: f64,
@@ -320,11 +320,11 @@ impl Renderer {
                 atlas: Atlas { texture: create_atlas(device, ATLAS_MIN), size: ATLAS_MIN, x: 0, y: 0, row_height: 0 },
                 glyphs: HashMap::new(),
                 atlas_reset: false,
-                font: load_font(&config.font, config.font_size, config.font_backend, config.look.cell_adjust, scale),
+                font: load_font(&config.fonts, config.font_size, config.font_backend, config.ligatures, config.look.cell_adjust, scale),
                 ligatures: config.ligatures,
                 shaped: HashMap::new(),
                 backend: config.font_backend,
-                font_name: config.font.clone(),
+                fonts: config.fonts.clone(),
                 font_size: config.font_size,
                 scale,
                 theme: config.theme.clone(),
@@ -369,9 +369,9 @@ impl Renderer {
             call!(self.layer, c"setDisplaySyncEnabled:", if config.vsync { YES } else { NO });
             call!(self.layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
         }
-        let font = |r: &Self| (r.font_name.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
+        let font = |r: &Self| (r.fonts.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
         let before = (font(self), self.look.padding);
-        self.font_name = config.font.clone();
+        self.fonts = config.fonts.clone();
         self.font_size = font_size;
         self.backend = config.font_backend;
         self.ligatures = config.ligatures;
@@ -383,7 +383,7 @@ impl Renderer {
     }
 
     fn reload_font(&mut self) {
-        self.font = load_font(&self.font_name, self.font_size, self.backend, self.look.cell_adjust, self.scale);
+        self.font = load_font(&self.fonts, self.font_size, self.backend, self.ligatures, self.look.cell_adjust, self.scale);
         self.shaped.clear();
         self.reset_atlas();
     }
@@ -559,7 +559,7 @@ impl Renderer {
         for r in 0..rows {
             let y = pad_y + r as f32 * ch;
             let line = snapshot.first_line + r as u64;
-            let ligatures = if self.ligatures { self.row_ligatures(snapshot, r, &mut ligature_cells) } else { Rc::from([]) };
+            let ligatures = if self.font.shapes() { self.row_ligatures(snapshot, r, &mut ligature_cells) } else { Rc::from([]) };
 
             for c in 0..cols {
                 let cell = &snapshot.cells[r * cols + c];
@@ -840,10 +840,10 @@ impl Renderer {
     }
 }
 
-/// `name` at `points`, with its cells adjusted (`adjust-cell-width`,
+/// `fonts` at `points`, with its cells adjusted (`adjust-cell-width`,
 /// `adjust-cell-height`).
-fn load_font(name: &str, points: f64, backend: FontBackend, (width, height): (Adjust, Adjust), scale: f64) -> Font {
-    let mut font = Font::new(name, points * scale, backend);
+fn load_font(fonts: &Fonts, points: f64, backend: FontBackend, ligatures: bool, (width, height): (Adjust, Adjust), scale: f64) -> Font {
+    let mut font = Font::with(fonts, points * scale, backend, ligatures);
     font.resize_cells(width.apply(font.cell_width, scale), height.apply(font.cell_height, scale));
     font
 }

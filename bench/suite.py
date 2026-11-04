@@ -62,7 +62,7 @@ TERMINALS = {
 FONT = "JetBrains Mono"
 PROFILES = {
     "effects": {
-        "mightty": ["--font-family=" + FONT, "--font-ligatures=true", "--background-opacity=0.85", "--background-blur=20",
+        "mightty": ["--font-family=", "--font-family=" + FONT, "--font-ligatures=true", "--background-opacity=0.85", "--background-blur=20",
                     "--cursor-style=bar", "--cursor-style-blink=true", "--adjust-cell-height=10%",
                     "--window-padding-x=12", "--window-padding-y=8", "--background=#1a1b26", "--foreground=#c0caf5",
                     "--cursor-color=#ff9e64", "--selection-background=#33467c"],
