@@ -3,6 +3,7 @@
 //! terminal must send back to the application (replies to queries) are
 //! collected and drained with [`Term::take_responses`].
 
+mod base64;
 mod cell;
 mod graphemes;
 mod links;
@@ -114,6 +115,25 @@ pub enum MarkKind {
     CommandEnd { exit_code: Option<i32> },
 }
 
+/// A program's request for the clipboard (OSC 52); the GUI decides
+/// whether to allow it (`clipboard-read`, `clipboard-write`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardRequest {
+    /// Put this text on the clipboard.
+    Write(String),
+    /// Send the clipboard back; answer with [`clipboard_reply`].
+    Read { bell_terminated: bool },
+}
+
+/// The OSC 52 reply carrying `text` for a `ClipboardRequest::Read`.
+pub fn clipboard_reply(text: &str, bell_terminated: bool) -> Vec<u8> {
+    let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
+    format!("\x1b]52;c;{}{terminator}", base64::encode(text.as_bytes())).into_bytes()
+}
+
+/// Clipboard requests kept until taken; older ones are dropped.
+const MAX_CLIPBOARD_REQUESTS: usize = 8;
+
 /// A desktop notification a program asked for (OSC 9, OSC 777).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notification {
@@ -211,6 +231,7 @@ pub struct Term {
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
     bells: u64,
     notifications: Vec<Notification>,
+    clipboard: Vec<ClipboardRequest>,
     styles: Styles,
     /// Style ids of the pen and of blanks erased with it (BCE), interned on
     /// first use after SGR changes the pen.
@@ -286,6 +307,7 @@ impl Term {
             bell: false,
             bells: 0,
             notifications: Vec::new(),
+            clipboard: Vec::new(),
             styles: Styles::new(),
             pen_id: None,
             erased_id: None,
@@ -337,6 +359,18 @@ impl Term {
             return None;
         }
         self.command_blocks().pop()?.command
+    }
+
+    /// Clipboard requests (OSC 52) since the last call, oldest first.
+    pub fn take_clipboard_requests(&mut self) -> Vec<ClipboardRequest> {
+        mem::take(&mut self.clipboard)
+    }
+
+    fn request_clipboard(&mut self, request: ClipboardRequest) {
+        if self.clipboard.len() == MAX_CLIPBOARD_REQUESTS {
+            self.clipboard.remove(0);
+        }
+        self.clipboard.push(request);
     }
 
     fn notify(&mut self, title: &[u8], body: &[u8]) {
@@ -1594,6 +1628,14 @@ impl Term {
             // iTerm2's notification: OSC 9 ; text.
             [b"9", text @ ..] => self.notify(b"", &text.join(&b';')),
             [b"777", b"notify", title, body @ ..] => self.notify(title, &body.join(&b';')),
+            // OSC 52 ; targets ; base64 text, or `?` to read. Every target
+            // (clipboard, primary, selection) is the one macOS clipboard.
+            [b"52", _targets, b"?"] => self.request_clipboard(ClipboardRequest::Read { bell_terminated }),
+            [b"52", _targets, data] => {
+                if let Some(text) = base64::decode(data).and_then(|bytes| String::from_utf8(bytes).ok()) {
+                    self.request_clipboard(ClipboardRequest::Write(text));
+                }
+            }
             [b"0" | b"2", rest @ ..] => {
                 self.title = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
             }

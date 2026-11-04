@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
-use mightty_term::{MouseMode, Term};
+use mightty_term::{ClipboardRequest, MouseMode, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Config, ConfirmClose, OptionAsAlt, SaveState};
+use crate::config::{self, Behaviour, Config, ConfirmClose, OptionAsAlt, Permission, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
@@ -323,6 +323,14 @@ extern "C" fn on_save_tick(_: *mut c_void) {
 }
 
 thread_local! {
+    /// `config.behaviour`, for panes, which can't reach the app while it's
+    /// borrowed for them; kept up to date on reload.
+    static BEHAVIOUR: Cell<Behaviour> = Cell::new(Behaviour::default());
+    /// A clipboard request waiting on a sheet's answer, and its pane.
+    static ASKING: RefCell<Option<(Id, ClipboardRequest)>> = const { RefCell::new(None) };
+}
+
+thread_local! {
     /// Blinking cursors are in their off phase; and the last key typed,
     /// which keeps them on for a moment.
     static BLINK: Cell<(bool, Instant)> = Cell::new((false, Instant::now()));
@@ -464,6 +472,7 @@ pub fn run(config: Config) -> io::Result<()> {
         // A window running a command (-e) is opened alone; otherwise the last session's come back.
         let restore = config.command.is_none();
 
+        BEHAVIOUR.set(config.behaviour);
         let app = App {
             mux,
             windows: Vec::new(),
@@ -1208,6 +1217,7 @@ impl App {
             // The cell size may have changed, so the grid too; hidden panes as well.
             surface.resize();
         }
+        BEHAVIOUR.set(config.behaviour);
         self.config = config;
         let windows: Vec<Id> = self.windows.iter().map(|w| w.window).collect();
         for window in windows {
@@ -1462,6 +1472,33 @@ fn confirm(window: Id, closing: Closing, title: &str, detail: &str) {
     }
 }
 
+/// Asks on a sheet over `window` whether to carry out a program's
+/// clipboard `request` for the pane `view`. One at a time: while a sheet is
+/// up, other requests are refused.
+fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str, detail: &str) {
+    static ANSWERED: Block = Block::with_response(answered);
+    unsafe extern "C" fn answered(_: *const Block, response: isize) {
+        let Some((view, request)) = ASKING.with_borrow_mut(Option::take) else { return };
+        if response == ALERT_FIRST_BUTTON {
+            with_surface(view, |s| s.do_clipboard(request));
+        }
+    }
+    // SAFETY: main thread; documented signatures; the handler is a global block.
+    unsafe {
+        let sheet: Id = msg!(window, c"attachedSheet");
+        if !sheet.is_null() || ASKING.with_borrow(Option::is_some) {
+            return;
+        }
+        ASKING.with_borrow_mut(|asking| *asking = Some((view, request)));
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(alert, c"setMessageText:", nsstring(question));
+        call!(alert, c"setInformativeText:", nsstring(detail));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Allow"));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Deny"));
+        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+    }
+}
+
 /// Where a divider can be grabbed: wider than it's drawn.
 fn grab_area(divider: &Divider) -> Rect {
     let r = divider.rect;
@@ -1518,11 +1555,12 @@ impl Surface {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let pool = objc_autoreleasePoolPush();
-            let frame = {
+            let (frame, clipboard) = {
                 let mut term = self.pane.term.lock().unwrap();
                 if term.take_bell() {
                     NSBeep();
                 }
+                let clipboard = term.take_clipboard_requests();
                 let mut title = if term.title().is_empty() { self.pane.command.clone() } else { term.title().to_owned() };
                 if let Some(code) = self.pane.exit_status() {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
@@ -1536,7 +1574,7 @@ impl Surface {
                     self.title = title;
                 }
                 // Synchronized output (mode 2026): hold the frame until the app finishes.
-                if term.modes().sync_output {
+                let frame = if term.modes().sync_output {
                     None
                 } else {
                     // Output may have added or changed matches.
@@ -1548,8 +1586,12 @@ impl Surface {
                         self.snapshot.overlay(&self.preedit, term.cursor());
                     }
                     Some(selection_range(self.selection, &term))
-                }
+                };
+                (frame, clipboard)
             };
+            for request in clipboard {
+                self.clipboard_request(request);
+            }
             // The terminal is unlocked again: build and draw the frame.
             if let Some(selection) = frame {
                 if let Some(search) = &mut self.search {
@@ -1594,6 +1636,10 @@ impl Surface {
     fn type_bytes(&mut self, bytes: &[u8]) {
         // Typing shows a blinking cursor until it pauses.
         BLINK.set((false, Instant::now()));
+        if BEHAVIOUR.get().hide_mouse {
+            // SAFETY: main thread; documented class method.
+            unsafe { call!(class(c"NSCursor"), c"setHiddenUntilMouseMoves:", YES) };
+        }
         self.write(bytes);
         if self.echo_frame.is_none() {
             self.echo_frame = Some(Instant::now() + ECHO_WAIT);
@@ -1668,7 +1714,14 @@ impl Surface {
                     selection.dragged = true;
                 }
             }
-            MouseAction::Release => return,
+            MouseAction::Release => {
+                // A drag, or a word or line picked by clicking.
+                let picked = self.selection.is_some_and(|s| s.dragged || s.granularity != Granularity::Cell);
+                if picked && BEHAVIOUR.get().copy_on_select {
+                    self.copy();
+                }
+                return;
+            }
         }
         self.render();
     }
@@ -1777,6 +1830,46 @@ impl Surface {
         if offset != self.scroll_offset {
             self.scroll_offset = offset;
             self.render();
+        }
+    }
+
+    /// A program's OSC 52 request, as `clipboard-read` and
+    /// `clipboard-write` allow: done, refused, or asked about on a sheet.
+    fn clipboard_request(&mut self, request: ClipboardRequest) {
+        let behaviour = BEHAVIOUR.get();
+        let (permission, question, detail) = match &request {
+            ClipboardRequest::Read { .. } => (
+                behaviour.clipboard_read,
+                "Let this program read the clipboard?",
+                "A program in this pane is asking for what you last copied.".to_owned(),
+            ),
+            ClipboardRequest::Write(text) => {
+                let preview: String = text.chars().take(200).collect();
+                let more = if text.chars().count() > 200 { "…" } else { "" };
+                (behaviour.clipboard_write, "Let this program copy to the clipboard?", format!("It would copy:\n\n{preview}{more}"))
+            }
+        };
+        match permission {
+            Permission::Allow => self.do_clipboard(request),
+            Permission::Deny => {}
+            Permission::Ask => ask_clipboard(self.window, self.view, request, question, &detail),
+        }
+    }
+
+    fn do_clipboard(&mut self, request: ClipboardRequest) {
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let pasteboard: Id = msg!(class(c"NSPasteboard"), c"generalPasteboard");
+            match request {
+                ClipboardRequest::Write(text) => {
+                    let _: isize = msg!(pasteboard, c"clearContents");
+                    let _: Bool = msg!(pasteboard, c"setString:forType:", nsstring(&text), NSPasteboardTypeString);
+                }
+                ClipboardRequest::Read { bell_terminated } => {
+                    let text = string_from_ns(msg!(pasteboard, c"stringForType:", NSPasteboardTypeString));
+                    let _ = self.pane.write(&clipboard_reply(&text, bell_terminated));
+                }
+            }
         }
     }
 
@@ -2085,7 +2178,7 @@ unsafe fn register_view_class() -> Id {
             with_surface(view, |w| {
                 // Trackpads report points, wheels report lines.
                 let points_per_line = w.renderer.cell_size().1 as f64 / w.renderer.scale();
-                let lines = if precise != 0 { dy / points_per_line } else { dy };
+                let lines = if precise != 0 { dy / points_per_line } else { dy } * BEHAVIOUR.get().scroll_multiplier;
                 let (col, row) = w.cell_at(w.local(location));
                 w.scroll(lines, col, row);
             });

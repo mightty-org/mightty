@@ -88,6 +88,10 @@ cursor-color = #ff79c6
 | `cursor-style-blink` | as the program asks | `true` or `false`; typing keeps it on for a moment |
 | `adjust-cell-width`, `adjust-cell-height` | `0` | Wider or taller cells than the font gives: points (`1`, `-1`) or a percentage (`10%`); taller cells space lines out |
 | `unfocused-split-opacity` | `0.7` | Panes keys aren't going to are dimmed to this, 0.15 to 1 |
+| `clipboard-write`, `clipboard-read` | `allow`, `ask` | Programs setting and reading the clipboard through OSC 52, as vim, tmux and ssh sessions do to copy: `allow`, `ask` (a sheet with the text, Allow and Deny) or `deny`, as in Ghostty |
+| `copy-on-select` | `false` | Copy text to the clipboard as soon as it's selected (a drag, or a double- or triple-click) |
+| `mouse-hide-while-typing` | `false` | Hide the pointer while typing, until the mouse moves |
+| `mouse-scroll-multiplier` | `1` | Scroll this many times as far as the wheel or trackpad says |
 | `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path. `light:NAME,dark:NAME` follows macOS's appearance and switches when it changes |
 | `config-file` | | Another config file to read after this one, relative to it (`?PATH` if it may be missing), as in Ghostty; in the file, or `--config-file` |

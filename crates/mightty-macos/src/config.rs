@@ -48,6 +48,8 @@ pub struct Config {
     pub background_blur: u32,
     /// `unfocused-split-opacity`: panes keys aren't going to are dimmed to this.
     pub unfocused_split_opacity: f64,
+    /// Clipboard and mouse settings.
+    pub behaviour: Behaviour,
     /// Where this came from, to load it again (see `Config::reload`): the
     /// default file, and the command line.
     default_file: Option<PathBuf>,
@@ -139,6 +141,62 @@ fn variation(v: &str) -> Result<([u8; 4], f64), String> {
     let (name, value) = v.split_once('=').ok_or("expects AXIS=VALUE, such as wght=450")?;
     let value = value.trim().parse().ok().filter(|v: &f64| v.is_finite()).ok_or("expects a number after =")?;
     Ok((tag(name.trim())?, value))
+}
+
+/// How panes treat the clipboard and the mouse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Behaviour {
+    /// `clipboard-read`: programs reading the clipboard (OSC 52).
+    pub clipboard_read: Permission,
+    /// `clipboard-write`: programs setting it.
+    pub clipboard_write: Permission,
+    /// `copy-on-select`: selected text goes to the clipboard at once.
+    pub copy_on_select: bool,
+    /// `mouse-hide-while-typing`.
+    pub hide_mouse: bool,
+    /// `mouse-scroll-multiplier`: lines scrolled per line the wheel or
+    /// trackpad reports.
+    pub scroll_multiplier: f64,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            clipboard_read: Permission::Ask,
+            clipboard_write: Permission::Allow,
+            copy_on_select: false,
+            hide_mouse: false,
+            scroll_multiplier: 1.0,
+        }
+    }
+}
+
+/// Whether programs may do something: as in Ghostty's `clipboard-read`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permission {
+    Allow,
+    Ask,
+    Deny,
+}
+
+impl Permission {
+    fn parse(v: &str) -> Result<Self, String> {
+        match v {
+            "allow" => Ok(Self::Allow),
+            "ask" => Ok(Self::Ask),
+            "deny" => Ok(Self::Deny),
+            _ => Err("expects allow, ask or deny".into()),
+        }
+    }
+
+    fn show(self) -> String {
+        match self {
+            Self::Allow => "allow",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
+        .into()
+    }
 }
 
 /// Settings the renderer draws with, apart from colours and fonts.
@@ -293,6 +351,7 @@ impl Default for Config {
             look: Look::default(),
             background_blur: 0,
             unfocused_split_opacity: 0.7,
+            behaviour: Behaviour::default(),
             default_file: None,
             args: Vec::new(),
         }
@@ -702,6 +761,66 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.unfocused_split_opacity.to_string()),
+    },
+    Setting {
+        name: "clipboard-read",
+        value: "WHEN",
+        help: "allow, ask or deny: programs reading the clipboard (OSC 52)",
+        color: false,
+        set: |c, v| {
+            c.behaviour.clipboard_read = Permission::parse(v)?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.clipboard_read.show()),
+    },
+    Setting {
+        name: "clipboard-write",
+        value: "WHEN",
+        help: "allow, ask or deny: programs setting the clipboard (OSC 52), as vim, tmux and ssh sessions do to copy",
+        color: false,
+        set: |c, v| {
+            c.behaviour.clipboard_write = Permission::parse(v)?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.clipboard_write.show()),
+    },
+    Setting {
+        name: "copy-on-select",
+        value: "BOOL",
+        help: "copy text to the clipboard as soon as it's selected (true or clipboard)",
+        color: false,
+        set: |c, v| {
+            c.behaviour.copy_on_select = match v {
+                "true" | "clipboard" => true,
+                "false" => false,
+                _ => return Err("expects true, false or clipboard".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.copy_on_select.to_string()),
+    },
+    Setting {
+        name: "mouse-hide-while-typing",
+        value: "BOOL",
+        help: "hide the mouse pointer while typing, until it moves",
+        color: false,
+        set: |c, v| {
+            c.behaviour.hide_mouse = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.hide_mouse.to_string()),
+    },
+    Setting {
+        name: "mouse-scroll-multiplier",
+        value: "N",
+        help: "scroll this many times as far as the wheel or trackpad says (0.01 to 10000)",
+        color: false,
+        set: |c, v| {
+            c.behaviour.scroll_multiplier =
+                v.parse().ok().filter(|m: &f64| (0.01..=10000.0).contains(m)).ok_or("expects a number from 0.01 to 10000")?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.scroll_multiplier.to_string()),
     },
     Setting {
         name: "keybind",
@@ -1269,6 +1388,25 @@ mod tests {
         let (c, warnings) = Config::load_from(Some(dir.join("missing")), &[]).unwrap();
         assert!(warnings.is_empty() && c.cols == 100);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn behaviour_settings() {
+        let mut c = Config::default();
+        assert_eq!((c.behaviour.clipboard_read, c.behaviour.clipboard_write), (Permission::Ask, Permission::Allow));
+        c.apply_args(&args(&[
+            "--clipboard-read=deny",
+            "--clipboard-write=ask",
+            "--copy-on-select=clipboard",
+            "--mouse-hide-while-typing=true",
+            "--mouse-scroll-multiplier=3",
+        ]))
+        .unwrap();
+        let b = c.behaviour;
+        assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
+        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary"] {
+            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+        }
     }
 
     #[test]

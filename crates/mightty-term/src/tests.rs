@@ -238,6 +238,24 @@ fn options_set_scrollback_and_reported_colors() {
 }
 
 #[test]
+fn osc52_clipboard_requests() {
+    let mut t = Term::new(10, 2);
+    t.feed(b"\x1b]52;c;aMOpbGxvIOKckw==\x07"); // "héllo ✓"
+    t.feed(b"\x1b]52;;?\x1b\\");
+    t.feed(b"\x1b]52;c;not base64!\x07"); // ignored
+    assert_eq!(
+        t.take_clipboard_requests(),
+        [ClipboardRequest::Write("héllo ✓".into()), ClipboardRequest::Read { bell_terminated: false }]
+    );
+    assert!(t.take_clipboard_requests().is_empty());
+    assert_eq!(clipboard_reply("hi", true), b"\x1b]52;c;aGk=\x07");
+    for _ in 0..20 {
+        t.feed(b"\x1b]52;c;?\x07");
+    }
+    assert_eq!(t.take_clipboard_requests().len(), 8);
+}
+
+#[test]
 fn clear_above_cursor_keeps_the_prompt_line() {
     let mut t = Term::new(10, 3);
     t.feed(b"one\r\ntwo\r\nthree\r\nfour\r\n$ ls");
