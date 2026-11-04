@@ -436,6 +436,7 @@ checks the header compiles as C++.
    - ✅ Bold and italic for families without them: made from the regular face (grown outlines, 12° slant)
    - ✅ Ligatures (`font-ligatures`, on): `->`, `!=`, `===` and the rest in fonts that have them, drawn as one tile over exactly the cells they cover, shaped once per run of text and kept
    - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor
+   - ✅ Kitty keyboard protocol, all five enhancements (disambiguate, event types, alternate keys, every key as an escape code, associated text), with a flag stack per screen: Neovim, Helix, fish and Kakoune can tell Ctrl-I from Tab, Esc from Alt, and see key releases; ⌘ chords no menu item uses reach them as Super
    - ✅ Search (Cmd-F): scrollback and screen, across wrapped lines, smart case, a match count, kept up to date as output arrives; Return/Cmd-G for older matches, Shift-Return/Cmd-Shift-G for newer, Esc to close; colours from the theme (`search-*`)
    - ✅ Links: hold Cmd to underline an OSC 8 hyperlink or a URL in the text and see where it goes; Cmd-click opens web and mail links and local documents, media and folders (anything else, such as apps, scripts and executables, is shown in Finder instead); other schemes are ignored
 3. ✅ libmightty C ABI, pkg-config, install script

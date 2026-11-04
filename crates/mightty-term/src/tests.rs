@@ -562,3 +562,39 @@ fn notifications_and_bells() {
     t.feed("\x1b]9;4;1;50\x07\x1b]9;a\u{85}b\x07".as_bytes());
     assert_eq!(t.take_notifications().iter().map(|n| n.body.as_str()).collect::<Vec<_>>(), ["ab"]);
 }
+
+#[test]
+fn kitty_keyboard_flags() {
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?0u");
+    // Push, then set, or and clear bits on the top entry.
+    t.feed(b"\x1b[>1u");
+    assert_eq!(t.key_flags(), KEY_DISAMBIGUATE);
+    t.feed(b"\x1b[=10;2u");
+    assert_eq!(t.key_flags(), 11);
+    t.feed(b"\x1b[=2;3u");
+    assert_eq!(t.key_flags(), 9);
+    t.feed(b"\x1b[=31u\x1b[?u");
+    assert_eq!(t.take_responses(), b"\x1b[?31u");
+    // The alternate screen has its own stack.
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.key_flags(), 0);
+    t.feed(b"\x1b[>5u");
+    assert_eq!(t.key_flags(), 5);
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.key_flags(), 31);
+    // Popping goes back through the pushes, and past them to 0.
+    t.feed(b"\x1b[>3u\x1b[<u");
+    assert_eq!(t.key_flags(), 31);
+    t.feed(b"\x1b[<5u");
+    assert_eq!(t.key_flags(), 0);
+    // Too many pushes drop the oldest; RIS clears everything.
+    for i in 1..=20u8 {
+        t.feed(format!("\x1b[>{i}u").as_bytes());
+    }
+    t.feed(b"\x1b[<8u");
+    assert_eq!(t.key_flags(), 0);
+    t.feed(b"\x1b[>4u\x1bc");
+    assert_eq!(t.key_flags(), 0);
+}

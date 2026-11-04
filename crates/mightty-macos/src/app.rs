@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
-use mightty_term::{ClipboardRequest, MouseMode, Term, clipboard_reply};
+use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
 use crate::config::{self, Behaviour, Config, ConfirmClose, OptionAsAlt, Permission, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
-use crate::keys::{self, Mods, MouseAction};
+use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
 use crate::open;
 use crate::linkhint::{self, LinkHint};
@@ -117,6 +117,13 @@ struct Surface {
     preedit: String,
     /// The input method used the key being handled (inserted or composed text).
     ime_used_key: bool,
+    /// While handling a key for a program using the kitty keyboard
+    /// protocol: text the input method types is kept in `typed` to be sent
+    /// as that key, not as plain text.
+    capture: bool,
+    typed: Option<String>,
+    /// Keys whose presses the program was told of, so it hears their releases.
+    keys_down: Vec<u16>,
     search: Option<Search>,
     /// The link under the pointer while Cmd is held, and where it goes.
     hover: Option<(HoveredLink, String)>,
@@ -243,10 +250,23 @@ const CMD: usize = 1 << 20;
 const SHIFT: usize = 1 << 17;
 const CTRL: usize = 1 << 18;
 const ALT: usize = 1 << 19;
+/// NSEventModifierFlagCapsLock.
+const CAPS: usize = 1 << 16;
 
 fn modifiers(flags: usize) -> Mods {
-    Mods { shift: flags & (1 << 17) != 0, ctrl: flags & (1 << 18) != 0, alt: flags & (1 << 19) != 0 }
+    Mods {
+        shift: flags & SHIFT != 0,
+        ctrl: flags & CTRL != 0,
+        alt: flags & ALT != 0,
+        cmd: flags & CMD != 0,
+        caps_lock: flags & CAPS != 0,
+    }
 }
+
+/// The device-dependent bit in `modifierFlags` that is set while each
+/// modifier key (by key code) is down; Caps Lock's is its lock state.
+const MODIFIER_KEYS: [(u16, usize); 9] =
+    [(56, 0x2), (60, 0x4), (59, 0x1), (62, 0x2000), (58, 0x20), (61, 0x40), (55, 0x8), (54, 0x10), (57, CAPS)];
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -634,6 +654,9 @@ impl App {
                 start_dir: None,
                 preedit: String::new(),
                 ime_used_key: false,
+                capture: false,
+                typed: None,
+                keys_down: Vec::new(),
                 search: None,
                 hover: None,
                 hint: None,
@@ -2009,8 +2032,11 @@ unsafe fn register_view_class() -> Id {
                 return perform(view, &action);
             }
             let flags: usize = msg!(event, c"modifierFlags");
-            if flags & (1 << 20) != 0 {
-                return; // Command shortcuts belong to the menu.
+            let key_flags = with_surface(view, |w| w.pane.term.lock().unwrap().key_flags()).unwrap_or(0);
+            // Command shortcuts belong to the menu; ones it hasn't go to
+            // programs that can tell them apart (kitty's Super).
+            if flags & CMD != 0 && key_flags == 0 {
+                return;
             }
             let mods = modifiers(flags);
             // Option not acting as Alt types what the layout gives it (å, @,
@@ -2027,23 +2053,72 @@ unsafe fn register_view_class() -> Id {
                 w.ime_used_key = false;
                 !w.preedit.is_empty()
             });
-            if composing == Some(true) || !(mods.ctrl || alt) {
+            let code: u16 = msg!(event, c"keyCode");
+            let chars = string_from_ns(msg!(event, c"characters"));
+            let shifted = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
+            let unshifted = if key_flags == 0 { String::new() } else { string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize)) };
+            let repeat: Bool = msg!(event, c"isARepeat");
+            let action = if repeat != NO { KeyAction::Repeat } else { KeyAction::Press };
+            let key = Key { code, text: &chars, shifted: &shifted, unshifted: &unshifted, mods, action };
+            if composing == Some(true) || !(mods.ctrl || alt || mods.cmd) {
+                // What the input method types for this key alone is still this key.
+                with_surface(view, |w| w.capture = key_flags != 0 && w.preedit.is_empty());
                 let context: Id = msg!(view, c"inputContext");
                 if !context.is_null() {
                     // Not inside `with_surface`: the callbacks borrow the window.
                     let _: Bool = msg!(context, c"handleEvent:", event);
                 }
-                if with_surface(view, |w| w.ime_used_key) == Some(true) {
+                let (used, typed) = with_surface(view, |w| {
+                    w.capture = false;
+                    (w.ime_used_key, w.typed.take())
+                })
+                .unwrap_or_default();
+                if let Some(text) = typed {
+                    // Option typed it: it isn't Alt.
+                    let mods = Mods { alt: false, ..mods };
+                    send_key(view, &Key { text: &text, mods, ..key }, key_flags);
+                }
+                if used {
                     return;
                 }
             }
+            send_key(view, &key, key_flags);
+        }
+    }
+
+    fn send_key(view: Id, key: &Key, key_flags: u8) {
+        with_surface(view, |w| {
+            let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
+            if let Some(bytes) = keys::kitty(key, key_flags, app_cursor) {
+                w.type_bytes(&bytes);
+                if key_flags & KEY_EVENT_TYPES != 0 && !w.keys_down.contains(&key.code) {
+                    w.keys_down.push(key.code);
+                }
+            }
+        });
+    }
+
+    /// Releases, for programs that asked for them, of keys they heard pressed.
+    extern "C" fn key_up(view: Id, _: Sel, event: Id) {
+        // SAFETY: `event` is an NSEvent; documented signatures.
+        unsafe {
             let code: u16 = msg!(event, c"keyCode");
+            if with_surface(view, |w| w.keys_down.contains(&code)) != Some(true) {
+                return;
+            }
+            let flags: usize = msg!(event, c"modifierFlags");
             let chars = string_from_ns(msg!(event, c"characters"));
-            let base = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
+            let shifted = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
+            let unshifted = string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize));
+            let key = Key { code, text: &chars, shifted: &shifted, unshifted: &unshifted, mods: modifiers(flags), action: KeyAction::Release };
             with_surface(view, |w| {
-                let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
-                if let Some(bytes) = keys::encode(code, &chars, &base, mods, app_cursor) {
-                    w.type_bytes(&bytes);
+                w.keys_down.retain(|&c| c != code);
+                let (key_flags, app_cursor) = {
+                    let term = w.pane.term.lock().unwrap();
+                    (term.key_flags(), term.modes().app_cursor)
+                };
+                if let Some(bytes) = keys::kitty(&key, key_flags, app_cursor) {
+                    w.write(&bytes);
                 }
             });
         }
@@ -2109,6 +2184,10 @@ unsafe fn register_view_class() -> Id {
         with_surface(view, |w| {
             w.ime_used_key = true;
             let had_preedit = !mem::take(&mut w.preedit).is_empty();
+            if w.capture && !had_preedit {
+                w.typed = Some(text);
+                return;
+            }
             w.type_bytes(text.as_bytes());
             if had_preedit {
                 w.render();
@@ -2239,8 +2318,21 @@ unsafe fn register_view_class() -> Id {
     /// Cmd pressed or released without the mouse moving.
     extern "C" fn flags_changed(view: Id, _: Sel, event: Id) {
         // SAFETY: `event` is an NSEvent.
-        let flags: usize = unsafe { msg!(event, c"modifierFlags") };
-        with_surface(view, |w| w.update_hover(flags & CMD != 0));
+        let (flags, code): (usize, u16) = unsafe { (msg!(event, c"modifierFlags"), msg!(event, c"keyCode")) };
+        with_surface(view, |w| {
+            w.update_hover(flags & CMD != 0);
+            // Modifier keys themselves, for programs that want every key.
+            let Some(&(_, bit)) = MODIFIER_KEYS.iter().find(|m| m.0 == code) else { return };
+            let (key_flags, app_cursor) = {
+                let term = w.pane.term.lock().unwrap();
+                (term.key_flags(), term.modes().app_cursor)
+            };
+            let action = if flags & bit != 0 { KeyAction::Press } else { KeyAction::Release };
+            let key = Key { code, mods: modifiers(flags), action, ..Key::default() };
+            if let Some(bytes) = keys::kitty(&key, key_flags, app_cursor) {
+                w.write(&bytes);
+            }
+        });
     }
     extern "C" fn mouse_dragged(view: Id, _: Sel, event: Id) {
         mouse_event(view, event, MouseAction::Motion);
@@ -2267,6 +2359,7 @@ unsafe fn register_view_class() -> Id {
             (c"becomeFirstResponder", predicate(become_first_responder), c"c@:"),
             (c"isOpaque", predicate(yes), c"c@:"),
             (c"keyDown:", action(key_down), c"v@:@"),
+            (c"keyUp:", action(key_up), c"v@:@"),
             (
                 c"performKeyEquivalent:",
                 perform_key_equivalent as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,

@@ -141,6 +141,16 @@ pub struct Notification {
     pub body: String,
 }
 
+/// Kitty keyboard protocol enhancement flags.
+pub const KEY_DISAMBIGUATE: u8 = 1;
+pub const KEY_EVENT_TYPES: u8 = 2;
+pub const KEY_ALTERNATES: u8 = 4;
+pub const KEY_ALL_AS_ESCAPES: u8 = 8;
+pub const KEY_TEXT: u8 = 16;
+const KEY_ALL: u8 = 31;
+/// Pushed flags kept per screen; pushing more drops the oldest.
+const MAX_KEY_FLAGS: usize = 8;
+
 /// A command starting or finishing, from shell-integration marks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandEvent {
@@ -206,6 +216,9 @@ pub struct Term {
     primary: VecDeque<Row>,
     alternate: VecDeque<Row>,
     alt_active: bool,
+    /// Kitty keyboard protocol flags, a stack per screen (primary,
+    /// alternate); the last entry is in force and the first is never popped.
+    key_flags: [Vec<u8>; 2],
     scrollback: VecDeque<Row>,
     scrollback_limit: usize,
     lines_scrolled: u64,
@@ -291,6 +304,7 @@ impl Term {
             primary: VecDeque::from(vec![Row::new(cols, Cell::default()); rows]),
             alternate: VecDeque::from(vec![Row::new(cols, Cell::default()); rows]),
             alt_active: false,
+            key_flags: [vec![0], vec![0]],
             scrollback: VecDeque::new(),
             scrollback_limit,
             lines_scrolled: 0,
@@ -633,6 +647,16 @@ impl Term {
 
     pub fn is_alt_screen(&self) -> bool {
         self.alt_active
+    }
+
+    /// Kitty keyboard protocol enhancements the program asked for (see
+    /// `KEY_*`); 0 means legacy encoding.
+    pub fn key_flags(&self) -> u8 {
+        *self.key_flags[usize::from(self.alt_active)].last().unwrap_or(&0)
+    }
+
+    fn key_flags_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.key_flags[usize::from(self.alt_active)]
     }
 
     /// Rows of the active screen.
@@ -1843,8 +1867,38 @@ impl Perform for Term {
             ([], b'r') => self.set_scroll_region(arg(0, 1), arg(1, self.rows as u16)),
             ([], b's') => self.save_cursor(),
             ([], b'u') => self.restore_cursor(),
-            // Kitty keyboard protocol query: report no enhancements until implemented.
-            ([b'?'], b'u') => self.respond(b"\x1b[?0u"),
+            // Kitty keyboard protocol: query, push, pop, set.
+            ([b'?'], b'u') => {
+                let reply = format!("\x1b[?{}u", self.key_flags());
+                self.respond(reply.as_bytes());
+            }
+            ([b'>'], b'u') => {
+                let flags = arg(0, 0) as u8 & KEY_ALL;
+                let stack = self.key_flags_mut();
+                if stack.len() > MAX_KEY_FLAGS {
+                    stack.remove(1);
+                }
+                stack.push(flags);
+            }
+            ([b'<'], b'u') => {
+                let stack = self.key_flags_mut();
+                let keep = stack.len().saturating_sub(arg(0, 1).max(1)).max(1);
+                stack.truncate(keep);
+                if keep == 1 {
+                    stack[0] = 0;
+                }
+            }
+            ([b'='], b'u') => {
+                let flags = arg(0, 0) as u8 & KEY_ALL;
+                let mode = arg(1, 1);
+                let current = self.key_flags_mut().last_mut().expect("never empty");
+                match mode {
+                    1 => *current = flags,
+                    2 => *current |= flags,
+                    3 => *current &= !flags,
+                    _ => {}
+                }
+            }
             ([b' '], b'q') => self.modes.cursor_shape = params.arg(0, 0),
             _ => {}
         }
