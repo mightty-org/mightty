@@ -78,6 +78,7 @@ cursor-color = #ff79c6
 | `font-ligatures` | `true` | Draw the font's ligatures and contextual alternates (`->`, `!=`, `===` in fonts such as JetBrains Mono and Fira Code), each kept to the cells it covers; never across the cursor or a change of colour or style |
 | `font-backend` | `coretext` | `mightty` draws glyphs with mightty's own rasterizer (`mightty-font`: TrueType and CFF fonts, variable fonts, colour emoji, ligatures, accents, and the fallback fonts CoreText picks; CoreText still finds fonts and draws fonts in Apple's own formats: `morx` composition, as in Menlo and Apple Color Emoji, and `hvgl` outlines). For testing: the rasterizer is for platforms without CoreText |
 | `window-save-state` | `default` | Reopen windows, tabs and splits where they were, each pane a new shell in its old directory: `always`, `never`, or `default`, which follows macOS (only when "Close windows when quitting an application" is off in System Settings → Desktop & Dock), as in Ghostty. Saved in `~/Library/Application Support/mightty/session.json` |
+| `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
@@ -97,6 +98,42 @@ it first if there isn't one. ⌘⇧, (Reload Configuration), or `kill -USR2` as 
 Ghostty, applies the files again to what's open: colours, fonts, `window-vsync`
 and scrollback change in place, flags still win, and window size, `command` and
 `working-directory` apply to new windows.
+
+### Key bindings
+
+`keybind = TRIGGER=ACTION` binds a key, as in Ghostty; repeat it for more.
+A trigger is modifiers (`cmd`, `ctrl`, `alt`, `shift`) and a key joined by
+`+`: a character as typed without modifiers (`t`, `[`, `=`) or a name
+(`enter`, `tab`, `space`, `escape`, `backspace`, `delete`, arrows `up`/`down`/
+`left`/`right`, `home`, `end`, `page_up`, `page_down`, `f1`…`f12`, `plus`).
+`TRIGGER=unbind` removes a binding, and `keybind = clear` removes them all,
+defaults included. Menu items show the first key bound to their action.
+
+```
+keybind = cmd+shift+t=new_tab
+keybind = ctrl+shift+h=text:echo hello\r
+keybind = cmd+k=unbind
+```
+
+| Action | Default | |
+|---|---|---|
+| `new_window`, `new_tab` | ⌘N, ⌘T | |
+| `new_split:right`, `new_split:down` | ⌘D, ⌘⇧D | |
+| `close_surface`, `close_window`, `minimize_window`, `quit` | ⌘W, ⌘⇧W, ⌘M, ⌘Q | |
+| `copy_to_clipboard`, `paste_from_clipboard` | ⌘C, ⌘V | |
+| `start_search`, `navigate_search:next`, `navigate_search:previous` | ⌘F, ⌘G, ⌘⇧G | |
+| `goto_split:previous`, `goto_split:next` | ⌘[, ⌘] | |
+| `goto_split:left` (`right`, `up`, `down`) | ⌘⌥ and an arrow | |
+| `resize_split:left,10` (`right`, `up`, `down`; points) | ⌘⌃ and an arrow | |
+| `toggle_split_zoom`, `equalize_splits` | ⌘⇧↩, ⌘⌃= | |
+| `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
+| `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
+| `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `increase_font_size:1`, `decrease_font_size:1`, `reset_font_size` | ⌘=, ⌘-, ⌘0 | The pane keys go to, in points |
+| `clear_screen` | ⌘K | History and the screen above the prompt |
+| `scroll_to_top`, `scroll_to_bottom`, `scroll_page_up`, `scroll_page_down` | ⌘Home, ⌘End, ⌘PgUp, ⌘PgDn | |
+| `text:…`, `csi:…`, `esc:…` | | Send bytes to the program: `text:` takes `\n`, `\r`, `\t`, `\e`, `\\`, `\xHH`; `csi:2J` sends `ESC [ 2J` |
+| `ignore` | | The key does nothing |
 
 A typo in the config file is reported with its line number (on stderr, and in
 a sheet when reloading) and the rest still applies; a bad flag stops with an error.

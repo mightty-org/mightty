@@ -339,6 +339,11 @@ impl Renderer {
         }
     }
 
+    /// Points.
+    pub fn font_size(&self) -> f64 {
+        self.font_size
+    }
+
     pub fn scale(&self) -> f64 {
         self.scale
     }

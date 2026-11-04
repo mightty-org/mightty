@@ -4,6 +4,7 @@
 #![cfg(target_os = "macos")]
 
 mod app;
+mod bindings;
 mod config;
 mod ffi;
 mod findbar;

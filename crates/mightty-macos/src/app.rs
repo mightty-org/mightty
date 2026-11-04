@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
 use mightty_term::{MouseMode, Term};
 
+use crate::bindings::{self, Action, Bindings, Trigger};
 use crate::config::{self, Config, ConfirmClose, OptionAsAlt, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
@@ -62,6 +63,9 @@ const MIN_PANE: f64 = 60.0;
 const NS_WINDOW_OCCLUSION_STATE_VISIBLE: usize = 1 << 1;
 /// Around a pane that needs the user, in points.
 const ATTENTION_BORDER: f64 = 2.0;
+/// Limits for ⌘+ and ⌘-, in points.
+const MIN_FONT_SIZE: f64 = 4.0;
+const MAX_FONT_SIZE: f64 = 200.0;
 /// Panes keys aren't going to are dimmed toward the background (as in Ghostty).
 const UNFOCUSED_OPACITY: f32 = 0.7;
 
@@ -409,7 +413,7 @@ pub fn run(config: Config) -> io::Result<()> {
 
         let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
         call!(ns_app, c"setActivationPolicy:", 0isize); // regular app: Dock icon, menu bar
-        install_menu(ns_app);
+        install_menu(ns_app, &config.keybinds);
         let delegate: Id = msg!(register_delegate_class(), c"new");
         call!(ns_app, c"setDelegate:", delegate);
         notify::set_delegate(delegate);
@@ -1156,6 +1160,10 @@ impl App {
             Err(e) => return show_problems("The configuration wasn't reloaded", &[e]),
         };
         self.mux.set_options(config.term_options());
+        // Sizes changed with ⌘+ and ⌘- stay unless the font settings changed.
+        let font = |c: &Config| (c.font.clone(), c.font_size, c.font_backend, c.ligatures);
+        let font_changed = font(&config) != font(&self.config);
+        set_menu_keys(&config.keybinds);
         let divider = color(renderer::mix(config.theme.background, config.theme.foreground, 0.25));
         // SAFETY: main thread; documented signatures.
         unsafe {
@@ -1165,7 +1173,9 @@ impl App {
             for surface in &mut self.surfaces {
                 surface.renderer.set_theme(config.theme.clone());
                 surface.renderer.set_vsync(config.vsync);
-                surface.renderer.set_font(&config.font, config.font_size, config.font_backend, config.ligatures);
+                if font_changed {
+                    surface.renderer.set_font(&config.font, config.font_size, config.font_backend, config.ligatures);
+                }
                 call!(msg!(surface.container, c"layer"), c"setBackgroundColor:", color(config.theme.background));
                 // The cell size may have changed, so the grid too; hidden panes as well.
                 surface.resize();
@@ -1174,6 +1184,17 @@ impl App {
         self.config = config;
         if !warnings.is_empty() {
             show_problems("Some settings weren't applied", &warnings);
+        }
+    }
+
+    /// ⌘+ and ⌘- (`delta` points), ⌘0 (`None`: back to `font-size`): the
+    /// font size of the pane `view`.
+    fn change_font_size(&mut self, view: Id, delta: Option<f64>) {
+        let Some(surface) = self.surfaces.iter_mut().find(|s| s.view == view) else { return };
+        let size = delta.map_or(self.config.font_size, |d| (surface.renderer.font_size() + d).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE));
+        let c = &self.config;
+        if surface.renderer.set_font(&c.font, size, c.font_backend, c.ligatures) {
+            surface.resize();
         }
     }
 
@@ -1234,15 +1255,16 @@ impl App {
         }
     }
 
-    /// ⌘⌃ and an arrow: moves the nearest divider that way (as Ghostty's `resize_split`).
-    fn move_divider(&mut self, direction: Direction) {
+    /// ⌘⌃ and an arrow: moves the nearest divider `step` points that way
+    /// (as Ghostty's `resize_split`).
+    fn move_divider(&mut self, direction: Direction, step: f64) {
         let Some((window, active)) = self.key_window() else { return };
         let Some(w) = self.windows.iter_mut().find(|w| w.window == window).filter(|w| !w.zoomed) else { return };
         let (axis, points) = match direction {
-            Direction::Left => (Axis::Row, -RESIZE_STEP),
-            Direction::Right => (Axis::Row, RESIZE_STEP),
-            Direction::Up => (Axis::Column, -RESIZE_STEP),
-            Direction::Down => (Axis::Column, RESIZE_STEP),
+            Direction::Left => (Axis::Row, -step),
+            Direction::Right => (Axis::Row, step),
+            Direction::Up => (Axis::Column, -step),
+            Direction::Down => (Axis::Column, step),
         };
         // SAFETY: main thread; documented signature.
         let bounds = to_rect(unsafe { send_rect(w.root, c"bounds") });
@@ -1701,6 +1723,28 @@ impl Surface {
         }
     }
 
+    /// ⌘K: history and the screen above the prompt.
+    fn clear_screen(&mut self) {
+        self.pane.term.lock().unwrap().clear_above_cursor();
+        self.scroll_offset = 0;
+        self.render();
+    }
+
+    /// `scroll_to_top` and the like: `to` picks the new offset from the
+    /// current one, the history length and the rows on screen. Not on the
+    /// alternate screen, which has no history.
+    fn scroll_to(&mut self, to: impl FnOnce(usize, usize, usize) -> usize) {
+        let (alt, history, rows) = {
+            let term = self.pane.term.lock().unwrap();
+            (term.is_alt_screen(), term.scrollback().len(), term.rows())
+        };
+        let offset = to(self.scroll_offset, history, rows).min(history);
+        if !alt && offset != self.scroll_offset {
+            self.scroll_offset = offset;
+            self.render();
+        }
+    }
+
     /// A dark terminal theme, for the overlays to match.
     fn dark(&self) -> bool {
         let (r, g, b) = self.renderer.theme().background;
@@ -1783,9 +1827,37 @@ unsafe fn register_view_class() -> Id {
         YES
     }
 
+    /// Key presses reach the key window's views before the menu: bound
+    /// keys are handled here, for the pane keys go to.
+    extern "C" fn perform_key_equivalent(view: Id, _: Sel, event: Id) -> Bool {
+        const KEY_DOWN: usize = 10;
+        // SAFETY: `event` is an NSEvent; documented signatures.
+        unsafe {
+            let kind: usize = msg!(event, c"type");
+            let window: Id = msg!(view, c"window");
+            let responder: Id = if window.is_null() { NIL } else { msg!(window, c"firstResponder") };
+            if kind != KEY_DOWN || responder != view {
+                return NO;
+            }
+            match binding_for(event) {
+                Some(action) => {
+                    perform(view, &action);
+                    YES
+                }
+                None => NO,
+            }
+        }
+    }
+
     extern "C" fn key_down(view: Id, _: Sel, event: Id) {
         // SAFETY: `event` is an NSEvent; documented signatures.
         unsafe {
+            // Bound keys without Command can arrive here instead; not while composing.
+            if with_surface(view, |w| w.preedit.is_empty()) == Some(true)
+                && let Some(action) = binding_for(event)
+            {
+                return perform(view, &action);
+            }
             let flags: usize = msg!(event, c"modifierFlags");
             if flags & (1 << 20) != 0 {
                 return; // Command shortcuts belong to the menu.
@@ -2045,6 +2117,11 @@ unsafe fn register_view_class() -> Id {
             (c"becomeFirstResponder", predicate(become_first_responder), c"c@:"),
             (c"isOpaque", predicate(yes), c"c@:"),
             (c"keyDown:", action(key_down), c"v@:@"),
+            (
+                c"performKeyEquivalent:",
+                perform_key_equivalent as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
+                c"c@:@",
+            ),
             (c"scrollWheel:", action(scroll_wheel), c"v@:@"),
             (c"paste:", action(paste), c"v@:@"),
             (c"copy:", action(copy), c"v@:@"),
@@ -2306,7 +2383,7 @@ unsafe fn register_delegate_class() -> Id {
         // SAFETY: `sender` is the menu item.
         let tag: isize = unsafe { msg!(sender, c"tag") };
         let direction = [Direction::Left, Direction::Right, Direction::Up, Direction::Down][tag as usize % 4];
-        with_app(|app| app.move_divider(direction));
+        with_app(|app| app.move_divider(direction, RESIZE_STEP));
     }
     extern "C" fn toggle_zoom(_: Id, _: Sel, _sender: Id) {
         with_app(App::toggle_zoom);
@@ -2315,22 +2392,18 @@ unsafe fn register_delegate_class() -> Id {
         with_app(App::equalize);
     }
     /// ⌘1…⌘8 pick that tab, ⌘9 the last (the menu item's tag is the digit).
-    extern "C" fn select_tab(_: Id, _: Sel, sender: Id) {
-        // SAFETY: main thread; `sender` is the menu item; documented signatures.
-        unsafe {
-            let digit: isize = msg!(sender, c"tag");
-            let key: Id = msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow");
-            if key.is_null() {
-                return;
-            }
-            let tabs: Id = msg!(key, c"tabbedWindows");
-            let count: usize = if tabs.is_null() { 1 } else { msg!(tabs, c"count") };
-            let index = if digit == 9 { count - 1 } else { digit as usize - 1 };
-            if !tabs.is_null() && index < count {
-                let window: Id = msg!(tabs, c"objectAtIndex:", index);
-                call!(window, c"makeKeyAndOrderFront:", NIL);
-            }
-        }
+    extern "C" fn select_tab_by_digit(_: Id, _: Sel, sender: Id) {
+        // SAFETY: `sender` is the menu item.
+        let digit: isize = unsafe { msg!(sender, c"tag") };
+        select_tab(if digit == 9 { None } else { Some(digit as usize - 1) });
+    }
+    /// Menu items for actions without a selector: the tag says which.
+    extern "C" fn menu_action(_: Id, _: Sel, sender: Id) {
+        // SAFETY: `sender` is the menu item.
+        let index: isize = unsafe { msg!(sender, c"tag") };
+        let Some(action) = MENU.with_borrow(|items| items.get(index as usize).map(|i| i.1.clone())) else { return };
+        let view = with_app(|app| app.key_window().map(|k| k.1)).flatten().unwrap_or(NIL);
+        perform(view, &action);
     }
 
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
@@ -2362,7 +2435,8 @@ unsafe fn register_delegate_class() -> Id {
             (c"newWindow:", action(new_window), c"v@:@"),
             (c"newTab:", action(new_tab), c"v@:@"),
             (c"newWindowForTab:", action(new_tab), c"v@:@"),
-            (c"selectTabByDigit:", action(select_tab), c"v@:@"),
+            (c"selectTabByDigit:", action(select_tab_by_digit), c"v@:@"),
+            (c"menuAction:", action(menu_action), c"v@:@"),
             (c"splitRight:", action(split_right), c"v@:@"),
             (c"splitDown:", action(split_down), c"v@:@"),
             (c"closeSplit:", action(close_split), c"v@:@"),
@@ -2378,17 +2452,145 @@ unsafe fn register_delegate_class() -> Id {
     }
 }
 
-unsafe fn install_menu(ns_app: Id) {
-    unsafe fn add_item(menu: Id, title: &str, action: &CStr, key: &str) -> Id {
+thread_local! {
+    /// Menu items and their actions, to show the keys bound to them.
+    static MENU: RefCell<Vec<(Id, Action)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Shows on each menu item the first key bound to its action, if any.
+fn set_menu_keys(bindings: &Bindings) {
+    MENU.with_borrow(|items| {
+        for (item, action) in items {
+            let (key, mask) = match bindings.trigger_for(action) {
+                Some(trigger) => (trigger.menu_key(), ns_modifiers(trigger.mods)),
+                None => (String::new(), 0),
+            };
+            // SAFETY: main thread; a live NSMenuItem; documented signatures.
+            unsafe {
+                call!(*item, c"setKeyEquivalent:", nsstring(&key));
+                call!(*item, c"setKeyEquivalentModifierMask:", mask);
+            }
+        }
+    });
+}
+
+/// NSEvent modifier flags for `bindings` modifier bits, and back.
+fn ns_modifiers(mods: u8) -> usize {
+    [(bindings::SHIFT, SHIFT), (bindings::CTRL, CTRL), (bindings::ALT, ALT), (bindings::CMD, CMD)]
+        .iter()
+        .filter(|(bit, _)| mods & bit != 0)
+        .fold(0, |flags, (_, flag)| flags | flag)
+}
+
+fn binding_modifiers(flags: usize) -> u8 {
+    [(bindings::SHIFT, SHIFT), (bindings::CTRL, CTRL), (bindings::ALT, ALT), (bindings::CMD, CMD)]
+        .iter()
+        .filter(|(_, flag)| flags & flag != 0)
+        .fold(0, |mods, (bit, _)| mods | bit)
+}
+
+/// The action bound to a key press, if any.
+unsafe fn binding_for(event: Id) -> Option<Action> {
+    unsafe {
+        let flags: usize = msg!(event, c"modifierFlags");
+        let code: u16 = msg!(event, c"keyCode");
+        // What the key types on the current layout with no modifiers held.
+        let unmodified = string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize));
+        let trigger = Trigger::from_event(code, &unmodified, binding_modifiers(flags))?;
+        with_app(|app| app.config.keybinds.find(trigger).cloned()).flatten()
+    }
+}
+
+/// Carries out a bound action for the pane `view` (nil when there's none):
+/// menu commands go through the responder chain as if chosen, the rest are
+/// done here.
+fn perform(view: Id, action: &Action) {
+    let send = |selector: &CStr, target: Id| {
+        // SAFETY: main thread; documented signature.
+        let _: Bool = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"sendAction:to:from:", sel(selector), target, NIL) };
+    };
+    match *action {
+        Action::NewWindow => send(c"newWindow:", NIL),
+        Action::NewTab => send(c"newTab:", NIL),
+        Action::NewSplit(Direction::Down) => send(c"splitDown:", NIL),
+        Action::NewSplit(_) => send(c"splitRight:", NIL),
+        Action::CloseSurface => send(c"closeSplit:", NIL),
+        Action::CloseWindow => send(c"performClose:", NIL),
+        Action::MinimizeWindow => send(c"performMiniaturize:", NIL),
+        Action::Quit => send(c"terminate:", NIL),
+        Action::Copy => send(c"copy:", view),
+        Action::Paste => send(c"paste:", view),
+        Action::StartSearch => send(c"performFind:", view),
+        Action::NavigateSearch(step) => send(if step > 0 { c"findNext:" } else { c"findPrevious:" }, view),
+        Action::GotoSplitStep(step) => drop(with_app(|app| app.select_split(step))),
+        Action::GotoSplit(direction) => drop(with_app(|app| app.select_split_toward(direction))),
+        Action::ToggleSplitZoom => drop(with_app(App::toggle_zoom)),
+        Action::EqualizeSplits => drop(with_app(App::equalize)),
+        Action::ResizeSplit(direction, points) => drop(with_app(|app| app.move_divider(direction, points))),
+        Action::GotoTab(n) => select_tab(Some(n - 1)),
+        Action::LastTab => select_tab(None),
+        Action::PreviousTab => send(c"selectPreviousTab:", NIL),
+        Action::NextTab => send(c"selectNextTab:", NIL),
+        Action::JumpToAttention => drop(with_app(App::jump_to_attention)),
+        Action::OpenConfig => drop(with_app(|app| app.open_config())),
+        Action::ReloadConfig => drop(with_app(App::reload_config)),
+        Action::ChangeFontSize(points) => drop(with_app(|app| app.change_font_size(view, Some(points)))),
+        Action::ResetFontSize => drop(with_app(|app| app.change_font_size(view, None))),
+        Action::ClearScreen => drop(with_surface(view, Surface::clear_screen)),
+        Action::ScrollToTop => drop(with_surface(view, |s| s.scroll_to(|_, history, _| history))),
+        Action::ScrollToBottom => drop(with_surface(view, |s| s.scroll_to(|_, _, _| 0))),
+        Action::ScrollPageUp => drop(with_surface(view, |s| s.scroll_to(|at, _, rows| at + rows))),
+        Action::ScrollPageDown => drop(with_surface(view, |s| s.scroll_to(|at, _, rows| at.saturating_sub(rows)))),
+        Action::Text(ref bytes) => drop(with_surface(view, |s| s.type_bytes(bytes))),
+        Action::Ignore => {}
+    }
+}
+
+/// Shows the key window's tab at `index`, or its last tab.
+fn select_tab(index: Option<usize>) {
+    // SAFETY: main thread; documented signatures.
+    unsafe {
+        let key: Id = msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow");
+        if key.is_null() {
+            return;
+        }
+        let tabs: Id = msg!(key, c"tabbedWindows");
+        let count: usize = if tabs.is_null() { 1 } else { msg!(tabs, c"count") };
+        let index = index.unwrap_or(count - 1);
+        if !tabs.is_null() && index < count {
+            let window: Id = msg!(tabs, c"objectAtIndex:", index);
+            call!(window, c"makeKeyAndOrderFront:", NIL);
+        }
+    }
+}
+
+/// The main menu. Items show the keys bound to their actions (see
+/// `set_menu_keys`); key presses reach the bindings first, through the
+/// terminal view, and the menu when a field such as the search bar has focus.
+unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
+    /// An item doing `action` by sending `selector`.
+    unsafe fn add_item(menu: Id, title: &str, selector: &CStr, action: Action) -> Id {
         unsafe {
             let item: Id = msg!(
                 msg!(class(c"NSMenuItem"), c"alloc"),
                 c"initWithTitle:action:keyEquivalent:",
                 nsstring(title),
-                sel(action),
-                nsstring(key)
+                sel(selector),
+                nsstring("")
             );
             call!(menu, c"addItem:", item);
+            MENU.with_borrow_mut(|items| items.push((item, action)));
+            item
+        }
+    }
+
+    /// An item for an action without a selector of its own: `menuAction:`
+    /// finds the action by the item's tag.
+    unsafe fn add_action(menu: Id, title: &str, action: Action) -> Id {
+        unsafe {
+            let index = MENU.with_borrow(Vec::len);
+            let item = add_item(menu, title, c"menuAction:", action);
+            call!(item, c"setTag:", index as isize);
             item
         }
     }
@@ -2413,64 +2615,63 @@ unsafe fn install_menu(ns_app: Id) {
     unsafe {
         let bar = new_object(c"NSMenu");
         let app_menu = submenu(bar, "mightty");
-        add_item(app_menu, "Settings…", c"openConfig:", ",");
-        let item = add_item(app_menu, "Reload Configuration", c"reloadConfig:", ",");
-        call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
+        add_item(app_menu, "Settings…", c"openConfig:", Action::OpenConfig);
+        add_item(app_menu, "Reload Configuration", c"reloadConfig:", Action::ReloadConfig);
         separator(app_menu);
-        add_item(app_menu, "Quit mightty", c"terminate:", "q");
+        add_item(app_menu, "Quit mightty", c"terminate:", Action::Quit);
         let shell_menu = submenu(bar, "Shell");
-        add_item(shell_menu, "New Window", c"newWindow:", "n");
-        add_item(shell_menu, "New Tab", c"newTab:", "t");
-        add_item(shell_menu, "Split Right", c"splitRight:", "d");
-        // ⌘⇧D: for letters, the capital implies Shift (unlike "[" below).
-        add_item(shell_menu, "Split Down", c"splitDown:", "D");
+        add_item(shell_menu, "New Window", c"newWindow:", Action::NewWindow);
+        add_item(shell_menu, "New Tab", c"newTab:", Action::NewTab);
+        add_item(shell_menu, "Split Right", c"splitRight:", Action::NewSplit(Direction::Right));
+        add_item(shell_menu, "Split Down", c"splitDown:", Action::NewSplit(Direction::Down));
         separator(shell_menu);
-        add_item(shell_menu, "Close", c"closeSplit:", "w");
-        add_item(shell_menu, "Close Window", c"performClose:", "W");
+        add_item(shell_menu, "Close", c"closeSplit:", Action::CloseSurface);
+        add_item(shell_menu, "Close Window", c"performClose:", Action::CloseWindow);
         let edit_menu = submenu(bar, "Edit");
-        add_item(edit_menu, "Copy", c"copy:", "c");
-        add_item(edit_menu, "Paste", c"paste:", "v");
-        add_item(edit_menu, "Find…", c"performFind:", "f");
-        add_item(edit_menu, "Find Next", c"findNext:", "g");
-        add_item(edit_menu, "Find Previous", c"findPrevious:", "G");
+        add_item(edit_menu, "Copy", c"copy:", Action::Copy);
+        add_item(edit_menu, "Paste", c"paste:", Action::Paste);
+        add_action(edit_menu, "Clear Screen", Action::ClearScreen);
+        separator(edit_menu);
+        add_item(edit_menu, "Find…", c"performFind:", Action::StartSearch);
+        add_item(edit_menu, "Find Next", c"findNext:", Action::NavigateSearch(1));
+        add_item(edit_menu, "Find Previous", c"findPrevious:", Action::NavigateSearch(-1));
+        let view_menu = submenu(bar, "View");
+        add_action(view_menu, "Increase Font Size", Action::ChangeFontSize(1.0));
+        add_action(view_menu, "Decrease Font Size", Action::ChangeFontSize(-1.0));
+        add_action(view_menu, "Reset Font Size", Action::ResetFontSize);
         // AppKit adds the tab items (Show Tab Bar, Move Tab to New Window, …) here.
         let window_menu = submenu(bar, "Window");
-        add_item(window_menu, "Minimize", c"performMiniaturize:", "m");
+        add_item(window_menu, "Minimize", c"performMiniaturize:", Action::MinimizeWindow);
         separator(window_menu);
-        add_item(window_menu, "Jump to Pane Needing You", c"jumpToAttention:", "A");
+        add_item(window_menu, "Jump to Pane Needing You", c"jumpToAttention:", Action::JumpToAttention);
         separator(window_menu);
-        let item = add_item(window_menu, "Zoom Split", c"toggleSplitZoom:", "\r");
-        call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
-        let item = add_item(window_menu, "Equalize Splits", c"equalizeSplits:", "=");
-        call!(item, c"setKeyEquivalentModifierMask:", CMD | CTRL);
-        for (title, key, step) in [("Select Previous Split", "[", -1isize), ("Select Next Split", "]", 1)] {
-            let item = add_item(window_menu, title, c"selectSplit:", key);
+        add_item(window_menu, "Zoom Split", c"toggleSplitZoom:", Action::ToggleSplitZoom);
+        add_item(window_menu, "Equalize Splits", c"equalizeSplits:", Action::EqualizeSplits);
+        for (title, step) in [("Select Previous Split", -1isize), ("Select Next Split", 1)] {
+            let item = add_item(window_menu, title, c"selectSplit:", Action::GotoSplitStep(step));
             call!(item, c"setTag:", step);
         }
-        // The arrow keys' characters (NSLeftArrowFunctionKey, …), in `Direction` order.
-        let arrows = [("Left", "\u{F702}"), ("Right", "\u{F703}"), ("Above", "\u{F700}"), ("Below", "\u{F701}")];
-        for (tag, (title, key)) in arrows.into_iter().enumerate() {
-            let item = add_item(window_menu, &format!("Select Split {title}"), c"selectSplitToward:", key);
-            call!(item, c"setKeyEquivalentModifierMask:", CMD | ALT);
+        // In `Direction` order, which the tags are.
+        let directions = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+        for (tag, title) in ["Left", "Right", "Above", "Below"].into_iter().enumerate() {
+            let item = add_item(window_menu, &format!("Select Split {title}"), c"selectSplitToward:", Action::GotoSplit(directions[tag]));
             call!(item, c"setTag:", tag as isize);
         }
-        for (tag, (title, key)) in [("Left", "\u{F702}"), ("Right", "\u{F703}"), ("Up", "\u{F700}"), ("Down", "\u{F701}")].into_iter().enumerate() {
-            let item = add_item(window_menu, &format!("Move Divider {title}"), c"moveDivider:", key);
-            call!(item, c"setKeyEquivalentModifierMask:", CMD | CTRL);
+        for (tag, title) in ["Left", "Right", "Up", "Down"].into_iter().enumerate() {
+            let action = Action::ResizeSplit(directions[tag], RESIZE_STEP);
+            let item = add_item(window_menu, &format!("Move Divider {title}"), c"moveDivider:", action);
             call!(item, c"setTag:", tag as isize);
         }
         separator(window_menu);
-        // ⌘⇧[ and ⌘⇧]: the unshifted key with Shift in the mask, since with
-        // Cmd held the key may report "[" rather than "{".
-        for (title, action, key) in [("Show Previous Tab", c"selectPreviousTab:", "["), ("Show Next Tab", c"selectNextTab:", "]")] {
-            let item = add_item(window_menu, title, action, key);
-            call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
-        }
+        add_item(window_menu, "Show Previous Tab", c"selectPreviousTab:", Action::PreviousTab);
+        add_item(window_menu, "Show Next Tab", c"selectNextTab:", Action::NextTab);
         for digit in 1..=9isize {
-            let title = if digit == 9 { "Select Last Tab".to_owned() } else { format!("Select Tab {digit}") };
-            let item = add_item(window_menu, &title, c"selectTabByDigit:", &digit.to_string());
+            let (title, action) =
+                if digit == 9 { ("Select Last Tab".to_owned(), Action::LastTab) } else { (format!("Select Tab {digit}"), Action::GotoTab(digit as usize)) };
+            let item = add_item(window_menu, &title, c"selectTabByDigit:", action);
             call!(item, c"setTag:", digit);
         }
+        set_menu_keys(bindings);
         call!(ns_app, c"setWindowsMenu:", window_menu);
         call!(ns_app, c"setMainMenu:", bar);
     }

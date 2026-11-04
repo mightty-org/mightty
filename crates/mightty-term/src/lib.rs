@@ -598,6 +598,23 @@ impl Term {
         self.lines_scrolled
     }
 
+    /// Clears history and the rows above the cursor, moving the cursor's
+    /// row (usually the prompt) to the top, as ⌘K does in Terminal.app and
+    /// Ghostty. Not on the alternate screen, which belongs to its program.
+    pub fn clear_above_cursor(&mut self) {
+        if self.alt_active {
+            return;
+        }
+        // Counted as scrolled off, so absolute line numbers stay right.
+        for _ in 0..self.cursor.row {
+            self.primary.pop_front();
+            self.primary.push_back(Row::new(self.cols, Cell::default()));
+            self.lines_scrolled += 1;
+        }
+        self.cursor.row = 0;
+        self.scrollback.clear();
+    }
+
     /// Absolute line number of the oldest row still in scrollback.
     pub fn first_line(&self) -> u64 {
         self.lines_scrolled - self.scrollback.len() as u64

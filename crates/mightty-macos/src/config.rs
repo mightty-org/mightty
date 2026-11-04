@@ -12,6 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mightty_render::{Rgb, Theme};
+
+use crate::bindings::Bindings;
 use mightty_term::{DEFAULT_SCROLLBACK, TermOptions};
 
 pub struct Config {
@@ -38,6 +40,8 @@ pub struct Config {
     pub font_backend: FontBackend,
     /// Draw the font's ligatures and contextual alternates (`->` as an arrow).
     pub ligatures: bool,
+    /// `keybind`: the defaults, changed by each setting in order.
+    pub keybinds: Bindings,
     /// Where this came from, to load it again (see `Config::reload`): the
     /// default file, and the command line.
     default_file: Option<PathBuf>,
@@ -119,6 +123,7 @@ impl Default for Config {
             save_state: SaveState::Default,
             font_backend: FontBackend::CoreText,
             ligatures: true,
+            keybinds: Bindings::default(),
             default_file: None,
             args: Vec::new(),
         }
@@ -311,6 +316,15 @@ const SETTINGS: &[Setting] = &[
                 .into(),
             )
         },
+    },
+    Setting {
+        name: "keybind",
+        value: "TRIGGER=ACTION",
+        help: "bind keys to an action, as in Ghostty: cmd+shift+t=new_tab, ctrl+k=unbind, or clear \
+               to drop every binding; repeat for more",
+        color: false,
+        set: |c, v| c.keybinds.apply(v),
+        get: |_| None,
     },
     Setting {
         name: "theme",

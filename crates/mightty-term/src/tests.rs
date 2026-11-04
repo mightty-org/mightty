@@ -238,6 +238,22 @@ fn options_set_scrollback_and_reported_colors() {
 }
 
 #[test]
+fn clear_above_cursor_keeps_the_prompt_line() {
+    let mut t = Term::new(10, 3);
+    t.feed(b"one\r\ntwo\r\nthree\r\nfour\r\n$ ls");
+    assert_eq!(t.scrollback().len(), 2);
+    let scrolled = t.lines_scrolled();
+    t.clear_above_cursor();
+    assert!(t.scrollback().is_empty());
+    assert_eq!(t.cursor(), (0, 4));
+    assert_eq!(t.lines_scrolled(), scrolled + 2);
+    t.feed(b"\x1b[?1049h");
+    t.feed(b"\r\nx");
+    t.clear_above_cursor(); // the alternate screen is left alone
+    assert_eq!(t.cursor().0, 1);
+}
+
+#[test]
 fn set_options_changes_a_running_terminal() {
     let mut t = Term::with_options(5, 1, &TermOptions { scrollback_lines: 10, ..TermOptions::default() });
     t.feed(b"a\r\nb\r\nc\r\nd");
