@@ -38,6 +38,10 @@ pub struct Config {
     pub font_backend: FontBackend,
     /// Draw the font's ligatures and contextual alternates (`->` as an arrow).
     pub ligatures: bool,
+    /// Where this came from, to load it again (see `Config::reload`): the
+    /// default file, and the command line.
+    default_file: Option<PathBuf>,
+    args: Vec<String>,
 }
 
 /// `font-backend`: who reads fonts and draws glyphs.
@@ -115,6 +119,8 @@ impl Default for Config {
             save_state: SaveState::Default,
             font_backend: FontBackend::CoreText,
             ligatures: true,
+            default_file: None,
+            args: Vec::new(),
         }
     }
 }
@@ -518,7 +524,7 @@ impl Config {
             }
         }
 
-        let mut config = Self::default();
+        let mut config = Self { default_file: default_file.clone(), args: args.to_vec(), ..Self::default() };
         let mut warnings = Vec::new();
         if default_files && let Some(path) = default_file {
             match fs::read_to_string(&path) {
@@ -533,6 +539,18 @@ impl Config {
         }
         config.apply_args(args)?;
         Ok((config, warnings))
+    }
+
+    /// Loads the settings again from where these came from: the config
+    /// files as they are now, then the same flags.
+    pub fn reload(&self) -> Result<(Self, Vec<String>), String> {
+        Self::load_from(self.default_file.clone(), &self.args)
+    }
+
+    /// The default config file, unless `--config-default-files=false`.
+    pub fn file(&self) -> Option<&Path> {
+        let skipped = self.args.iter().any(|a| a == "--config-default-files=false");
+        self.default_file.as_deref().filter(|_| !skipped)
     }
 
     /// Applies `name = value` lines, returning a warning per bad line.
@@ -771,6 +789,22 @@ mod tests {
         assert!(Config::load_from(None, &args(&["--config-file=/nonexistent/mightty"])).is_err());
         let (c, warnings) = Config::load_from(Some(dir.join("missing")), &[]).unwrap();
         assert!(warnings.is_empty() && c.cols == 100);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reload_reads_the_file_again_and_keeps_flags() {
+        let dir = scratch("reload");
+        let file = dir.join("config");
+        fs::write(&file, "font-size = 12\nwindow-width = 90\n").unwrap();
+        let (c, _) = Config::load_from(Some(file.clone()), &args(&["--window-width=120"])).unwrap();
+        assert_eq!(c.file(), Some(file.as_path()));
+        fs::write(&file, "font-size = 16\nwindow-width = 80\nbogus = 1\n").unwrap();
+        let (c, warnings) = c.reload().unwrap();
+        assert_eq!((c.font_size, c.cols), (16.0, 120));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let (c, _) = Config::load_from(Some(file), &args(&["--config-default-files=false"])).unwrap();
+        assert_eq!(c.file(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 

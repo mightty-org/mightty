@@ -359,6 +359,33 @@ impl Renderer {
         self.reset_atlas();
     }
 
+    /// Changes the font, its size in points, who draws it or whether
+    /// ligatures are drawn. Returns whether anything changed, so the cell
+    /// size may have.
+    pub fn set_font(&mut self, font_name: &str, font_size: f64, backend: FontBackend, ligatures: bool) -> bool {
+        if (font_name, font_size, backend, ligatures) == (self.font_name.as_str(), self.font_size, self.backend, self.ligatures) {
+            return false;
+        }
+        self.font_name = font_name.to_owned();
+        self.font_size = font_size;
+        self.backend = backend;
+        self.ligatures = ligatures;
+        self.font = Font::new(font_name, font_size * self.scale, backend);
+        self.shaped.clear();
+        self.reset_atlas();
+        true
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// See `Renderer::new`.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        // SAFETY: documented signature; `layer` is a CAMetalLayer.
+        unsafe { call!(self.layer, c"setDisplaySyncEnabled:", if vsync { YES } else { NO }) };
+    }
+
     /// Cell size in pixels.
     pub fn cell_size(&self) -> (u32, u32) {
         (self.font.cell_width, self.font.cell_height)

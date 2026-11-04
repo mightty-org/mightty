@@ -242,6 +242,17 @@ impl Term {
         term
     }
 
+    /// Applies changed options to a running terminal: the colours it
+    /// reports, and how much history it keeps (dropping the oldest lines
+    /// past a lower limit).
+    pub fn set_options(&mut self, options: &TermOptions) {
+        self.colors = [options.foreground, options.background];
+        self.scrollback_limit = options.scrollback_lines;
+        while self.scrollback.len() > self.scrollback_limit {
+            self.scrollback.pop_front();
+        }
+    }
+
     pub fn with_scrollback(cols: usize, rows: usize, scrollback_limit: usize) -> Self {
         let (cols, rows) = (cols.max(1), rows.max(1));
         Self {

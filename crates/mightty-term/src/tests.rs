@@ -238,6 +238,17 @@ fn options_set_scrollback_and_reported_colors() {
 }
 
 #[test]
+fn set_options_changes_a_running_terminal() {
+    let mut t = Term::with_options(5, 1, &TermOptions { scrollback_lines: 10, ..TermOptions::default() });
+    t.feed(b"a\r\nb\r\nc\r\nd");
+    assert_eq!(t.scrollback().len(), 3);
+    t.set_options(&TermOptions { scrollback_lines: 1, foreground: (1, 2, 3), background: (4, 5, 6) });
+    assert_eq!(t.scrollback().len(), 1);
+    t.feed(b"\x1b]10;?\x07\x1b]11;?\x07");
+    assert_eq!(t.take_responses(), b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:0404/0505/0606\x07");
+}
+
+#[test]
 fn bulk_text_matches_char_by_char() {
     use mightty_vt::Perform;
     // The bulk path (runs via print_str) must match per-char `print` exactly,

@@ -345,6 +345,28 @@ unsafe extern "C" {
     fn dispatch_time(when: u64, delta: i64) -> u64;
     fn dispatch_sync_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
     fn pthread_main_np() -> i32;
+    static _dispatch_source_type_signal: u8;
+    fn dispatch_source_create(kind: *const c_void, handle: usize, mask: usize, queue: *const c_void) -> *mut c_void;
+    fn dispatch_source_set_event_handler_f(source: *mut c_void, handler: extern "C" fn(*mut c_void));
+    fn dispatch_resume(object: *mut c_void);
+    fn signal(signal: i32, handler: usize) -> usize;
+}
+
+/// Runs `work` on the main thread each time the process gets `signal`,
+/// instead of the signal's default action (which may end the process).
+pub fn on_signal_run_on_main(signal_number: i32, work: extern "C" fn(*mut c_void)) {
+    const SIG_IGN: usize = 1;
+    // SAFETY: as documented for dispatch signal sources: the signal is
+    // ignored so only the source sees it; the source lives for the process.
+    unsafe {
+        signal(signal_number, SIG_IGN);
+        let kind = (&raw const _dispatch_source_type_signal).cast();
+        let source = dispatch_source_create(kind, signal_number as usize, 0, (&raw const _dispatch_main_q).cast());
+        if !source.is_null() {
+            dispatch_source_set_event_handler_f(source, work);
+            dispatch_resume(source);
+        }
+    }
 }
 
 /// Runs `work` on the main thread and waits for its result (at once, when

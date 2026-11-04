@@ -12,13 +12,14 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
 use mightty_term::{MouseMode, Term};
 
-use crate::config::{Config, ConfirmClose, OptionAsAlt, SaveState};
+use crate::config::{self, Config, ConfirmClose, OptionAsAlt, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Mods, MouseAction};
@@ -317,6 +318,10 @@ extern "C" fn on_save_tick(_: *mut c_void) {
     run_on_main_after(SAVE_INTERVAL, on_save_tick);
 }
 
+extern "C" fn on_reload_signal(_: *mut c_void) {
+    with_app(App::reload_config);
+}
+
 extern "C" fn on_pane_status(_: *mut c_void) {
     with_app(App::refresh_attention);
 }
@@ -446,6 +451,9 @@ pub fn run(config: Config) -> io::Result<()> {
             with_app(|app| app.open_window(pane, false));
         }
         run_on_main_after(SAVE_INTERVAL, on_save_tick);
+        // As in Ghostty: `kill -USR2` reloads the configuration.
+        const SIGUSR2: i32 = 31;
+        on_signal_run_on_main(SIGUSR2, on_reload_signal);
         call!(ns_app, c"activateIgnoringOtherApps:", YES);
         call!(ns_app, c"run");
     }
@@ -1138,6 +1146,54 @@ impl App {
         self.dim(window);
     }
 
+    /// Loads the config files again (⌘⇧,) and applies them to what's open:
+    /// colours, fonts, `window-vsync` and the terminals' scrollback.
+    /// Window sizes and commands are for new windows; other settings are
+    /// read when they're used.
+    fn reload_config(&mut self) {
+        let (config, warnings) = match self.config.reload() {
+            Ok(loaded) => loaded,
+            Err(e) => return show_problems("The configuration wasn't reloaded", &[e]),
+        };
+        self.mux.set_options(config.term_options());
+        let divider = color(renderer::mix(config.theme.background, config.theme.foreground, 0.25));
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            for w in &self.windows {
+                call!(msg!(w.root, c"layer"), c"setBackgroundColor:", divider);
+            }
+            for surface in &mut self.surfaces {
+                surface.renderer.set_theme(config.theme.clone());
+                surface.renderer.set_vsync(config.vsync);
+                surface.renderer.set_font(&config.font, config.font_size, config.font_backend, config.ligatures);
+                call!(msg!(surface.container, c"layer"), c"setBackgroundColor:", color(config.theme.background));
+                // The cell size may have changed, so the grid too; hidden panes as well.
+                surface.resize();
+            }
+        }
+        self.config = config;
+        if !warnings.is_empty() {
+            show_problems("Some settings weren't applied", &warnings);
+        }
+    }
+
+    /// Opens the config file in the default text editor (⌘,), first
+    /// creating it, with a few lines on how it works, if there is none.
+    fn open_config(&self) {
+        let Some(path) = self.config.file().map(PathBuf::from).or_else(|| Some(config::config_dir()?.join("config"))) else {
+            return show_problems("There's no config file", &["HOME is unset".into()]);
+        };
+        if !path.exists() {
+            let created = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::write(&path, CONFIG_TEMPLATE));
+            if let Err(e) = created {
+                return show_problems("The config file couldn't be created", &[format!("{}: {e}", path.display())]);
+            }
+        }
+        if let Err(e) = Command::new("/usr/bin/open").arg("-t").arg(&path).spawn() {
+            show_problems("The config file couldn't be opened", &[format!("{}: {e}", path.display())]);
+        }
+    }
+
     /// Draws all of `window`'s panes again, at its current size.
     fn redraw_window(&mut self, window: Id) {
         self.layout(window, false);
@@ -1277,6 +1333,38 @@ enum Closing {
 thread_local! {
     /// The close waiting on a sheet's answer: global blocks capture nothing.
     static CLOSING: Cell<Option<Closing>> = const { Cell::new(None) };
+}
+
+/// Written to a new config file by Settings… (⌘,).
+const CONFIG_TEMPLATE: &str = "\
+# mightty settings: one `name = value` per line; `#` starts a comment.
+# `mightty --help` lists every setting with its current value.
+# Save, then reload with ⌘⇧, (mightty → Reload Configuration).
+#
+# font-family = JetBrains Mono
+# font-size = 14
+# theme = Dracula
+";
+
+/// Tells the user what went wrong, on a sheet over the key window if
+/// there is one; also on stderr.
+fn show_problems(title: &str, problems: &[String]) {
+    for problem in problems {
+        eprintln!("mightty: {problem}");
+    }
+    // SAFETY: main thread; documented signatures.
+    unsafe {
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(alert, c"setMessageText:", nsstring(title));
+        call!(alert, c"setInformativeText:", nsstring(&problems.join("\n")));
+        let key: Id = msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow");
+        let sheet: Id = if key.is_null() { NIL } else { msg!(key, c"attachedSheet") };
+        if key.is_null() || !sheet.is_null() {
+            let _: isize = msg!(alert, c"runModal");
+        } else {
+            call!(alert, c"beginSheetModalForWindow:completionHandler:", key, NIL);
+        }
+    }
 }
 
 /// NSAlertFirstButtonReturn: "Close".
@@ -2207,6 +2295,12 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn jump_to_attention(_: Id, _: Sel, _sender: Id) {
         with_app(App::jump_to_attention);
     }
+    extern "C" fn open_config(_: Id, _: Sel, _sender: Id) {
+        with_app(|app| app.open_config());
+    }
+    extern "C" fn reload_config(_: Id, _: Sel, _sender: Id) {
+        with_app(App::reload_config);
+    }
     /// ⌘⌃ and an arrow: the tag is the `Direction`.
     extern "C" fn move_divider(_: Id, _: Sel, sender: Id) {
         // SAFETY: `sender` is the menu item.
@@ -2278,6 +2372,8 @@ unsafe fn register_delegate_class() -> Id {
             (c"moveDivider:", action(move_divider), c"v@:@"),
             (c"equalizeSplits:", action(equalize), c"v@:@"),
             (c"jumpToAttention:", action(jump_to_attention), c"v@:@"),
+            (c"openConfig:", action(open_config), c"v@:@"),
+            (c"reloadConfig:", action(reload_config), c"v@:@"),
         ])
     }
 }
@@ -2317,6 +2413,10 @@ unsafe fn install_menu(ns_app: Id) {
     unsafe {
         let bar = new_object(c"NSMenu");
         let app_menu = submenu(bar, "mightty");
+        add_item(app_menu, "Settings…", c"openConfig:", ",");
+        let item = add_item(app_menu, "Reload Configuration", c"reloadConfig:", ",");
+        call!(item, c"setKeyEquivalentModifierMask:", CMD | SHIFT);
+        separator(app_menu);
         add_item(app_menu, "Quit mightty", c"terminate:", "q");
         let shell_menu = submenu(bar, "Shell");
         add_item(shell_menu, "New Window", c"newWindow:", "n");

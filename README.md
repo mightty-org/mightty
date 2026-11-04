@@ -92,8 +92,14 @@ as Ghostty's, so Ghostty's ~800 bundled themes work unchanged: copy one from
 `/Applications/Ghostty.app/Contents/Resources/ghostty/themes/` into
 `~/.config/mightty/themes/`. Settings after `theme` override it.
 
-A typo in the config file is reported on stderr with its line number and the
-rest still applies; a bad flag stops with an error.
+⌘, (mightty → Settings…) opens the config file in your text editor, creating
+it first if there isn't one. ⌘⇧, (Reload Configuration), or `kill -USR2` as in
+Ghostty, applies the files again to what's open: colours, fonts, `window-vsync`
+and scrollback change in place, flags still win, and window size, `command` and
+`working-directory` apply to new windows.
+
+A typo in the config file is reported with its line number (on stderr, and in
+a sheet when reloading) and the rest still applies; a bad flag stops with an error.
 `--config-file=PATH` loads an extra file and `--config-default-files=false`
 skips the default one (the benchmark suite uses it).
 

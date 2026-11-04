@@ -245,7 +245,7 @@ pub struct Mux {
     host: Arc<dyn Host>,
     socket: OnceLock<PathBuf>,
     /// For every pane's terminal.
-    options: TermOptions,
+    options: Mutex<TermOptions>,
 }
 
 impl Mux {
@@ -254,9 +254,18 @@ impl Mux {
     }
 
     pub fn with_options(host: Arc<dyn Host>, options: TermOptions) -> Arc<Self> {
-        let mux = Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(), options });
+        let mux = Arc::new(Self { panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(), options: Mutex::new(options) });
         spawn_monitor(Arc::downgrade(&mux));
         mux
+    }
+
+    /// Changes the options of every pane's terminal, and of panes to come.
+    pub fn set_options(&self, options: TermOptions) {
+        // Stored first, so a pane spawned meanwhile gets them either way.
+        *self.options.lock().unwrap() = options.clone();
+        for pane in self.panes() {
+            pane.term.lock().unwrap().set_options(&options);
+        }
     }
 
     /// Panes needing the user, the longest waiting first.
@@ -299,7 +308,7 @@ impl Mux {
 
         let pty = Pty::spawn(cmd, WindowSize { cols: opts.cols, rows: opts.rows, ..Default::default() })?;
         let reader = pty.reader()?;
-        let mut term = Term::with_options(opts.cols.into(), opts.rows.into(), &self.options);
+        let mut term = Term::with_options(opts.cols.into(), opts.rows.into(), &self.options.lock().unwrap());
         if let Some(nonce) = &nonce {
             term.set_mark_nonce(nonce);
         }
