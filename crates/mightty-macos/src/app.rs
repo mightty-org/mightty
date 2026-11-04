@@ -66,8 +66,8 @@ const ATTENTION_BORDER: f64 = 2.0;
 /// Limits for ⌘+ and ⌘-, in points.
 const MIN_FONT_SIZE: f64 = 4.0;
 const MAX_FONT_SIZE: f64 = 200.0;
-/// Panes keys aren't going to are dimmed toward the background (as in Ghostty).
-const UNFOCUSED_OPACITY: f32 = 0.7;
+/// How long a blinking cursor stays on, and off.
+const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
 /// An NSWindow (or tab) and how its panes share it.
 struct Window {
@@ -322,6 +322,24 @@ extern "C" fn on_save_tick(_: *mut c_void) {
     run_on_main_after(SAVE_INTERVAL, on_save_tick);
 }
 
+thread_local! {
+    /// Blinking cursors are in their off phase; and the last key typed,
+    /// which keeps them on for a moment.
+    static BLINK: Cell<(bool, Instant)> = Cell::new((false, Instant::now()));
+}
+
+/// Blinks the cursors that blink, then waits for the next phase.
+extern "C" fn on_blink_tick(_: *mut c_void) {
+    let (off, typed) = BLINK.get();
+    BLINK.set((!off && typed.elapsed() >= BLINK_INTERVAL, typed));
+    with_app(|app| {
+        for surface in app.surfaces.iter_mut().filter(|s| s.renderer.cursor_blinks(&s.snapshot)) {
+            surface.render();
+        }
+    });
+    run_on_main_after(BLINK_INTERVAL, on_blink_tick);
+}
+
 extern "C" fn on_reload_signal(_: *mut c_void) {
     with_app(App::reload_config);
 }
@@ -458,6 +476,7 @@ pub fn run(config: Config) -> io::Result<()> {
         // As in Ghostty: `kill -USR2` reloads the configuration.
         const SIGUSR2: i32 = 31;
         on_signal_run_on_main(SIGUSR2, on_reload_signal);
+        run_on_main_after(BLINK_INTERVAL, on_blink_tick);
         call!(ns_app, c"activateIgnoringOtherApps:", YES);
         call!(ns_app, c"run");
     }
@@ -482,12 +501,12 @@ impl App {
                 (term.cols(), term.rows())
             };
             let (cw, ch) = renderer.cell_size();
-            let pad = 2.0 * renderer.padding_px();
+            let (px, py) = renderer.padding_px();
             let content = CGRect {
                 origin: CGPoint::default(),
                 size: CGSize {
-                    width: (cols as f64 * cw as f64 + pad) / scale,
-                    height: (rows as f64 * ch as f64 + pad) / scale,
+                    width: (cols as f64 * cw as f64 + 2.0 * px) / scale,
+                    height: (rows as f64 * ch as f64 + 2.0 * py) / scale,
                 },
             };
             // titled | closable | miniaturizable | resizable; buffered backing.
@@ -507,8 +526,6 @@ impl App {
 
             let root: Id = msg!(msg!(self.split_class, c"alloc"), c"initWithFrame:", content);
             call!(root, c"setWantsLayer:", YES);
-            let divider = color(renderer::mix(renderer.theme().background, renderer.theme().foreground, 0.25));
-            call!(msg!(root, c"layer"), c"setBackgroundColor:", divider);
             call!(window, c"setContentView:", root);
             call!(root, c"release");
             let view = self.add_surface(window, content, renderer, pane, hold, true);
@@ -527,6 +544,8 @@ impl App {
             if focus || tab_of.is_null() {
                 call!(window, c"makeKeyAndOrderFront:", NIL);
             }
+            // After it's on screen: the blur needs the window server's window.
+            style_window(window, root, &self.config);
             self.layout(window, true);
             self.sync_key_focus();
         }
@@ -535,7 +554,7 @@ impl App {
     fn new_renderer(&self, scale: f64) -> Renderer {
         // SAFETY: main thread; documented signatures.
         let layer: Id = unsafe { msg!(msg!(class(c"CAMetalLayer"), c"layer"), c"retain") };
-        Renderer::new(layer, &self.config.font, self.config.font_size, scale, self.config.theme.clone(), self.config.vsync, self.config.font_backend, self.config.ligatures)
+        Renderer::new(layer, scale, &self.config)
     }
 
     /// Adds a view for `pane` to `window`, at `frame` of its content view
@@ -553,7 +572,7 @@ impl App {
             // Its background shows through a dimmed terminal.
             let container: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", frame);
             call!(container, c"setWantsLayer:", YES);
-            call!(msg!(container, c"layer"), c"setBackgroundColor:", color(renderer.theme().background));
+            call!(msg!(container, c"layer"), c"setBackgroundColor:", pane_background(&self.config));
             call!(view, c"setAutoresizingMask:", 18usize); // width and height sizable
             // Mouse moves (for Cmd-hovering links) while the window is key.
             let options = 0x01usize | 0x02 | 0x20 | 0x200; // entered/exited, moved, active in key window, visible rect
@@ -1164,24 +1183,22 @@ impl App {
         let font = |c: &Config| (c.font.clone(), c.font_size, c.font_backend, c.ligatures);
         let font_changed = font(&config) != font(&self.config);
         set_menu_keys(&config.keybinds);
-        let divider = color(renderer::mix(config.theme.background, config.theme.foreground, 0.25));
-        // SAFETY: main thread; documented signatures.
-        unsafe {
-            for w in &self.windows {
-                call!(msg!(w.root, c"layer"), c"setBackgroundColor:", divider);
-            }
-            for surface in &mut self.surfaces {
-                surface.renderer.set_theme(config.theme.clone());
-                surface.renderer.set_vsync(config.vsync);
-                if font_changed {
-                    surface.renderer.set_font(&config.font, config.font_size, config.font_backend, config.ligatures);
-                }
-                call!(msg!(surface.container, c"layer"), c"setBackgroundColor:", color(config.theme.background));
-                // The cell size may have changed, so the grid too; hidden panes as well.
-                surface.resize();
-            }
+        for w in &self.windows {
+            style_window(w.window, w.root, &config);
+        }
+        for surface in &mut self.surfaces {
+            let size = if font_changed { config.font_size } else { surface.renderer.font_size() };
+            surface.renderer.configure(&config, size);
+            // SAFETY: main thread; documented signature.
+            unsafe { call!(msg!(surface.container, c"layer"), c"setBackgroundColor:", pane_background(&config)) };
+            // The cell size may have changed, so the grid too; hidden panes as well.
+            surface.resize();
         }
         self.config = config;
+        let windows: Vec<Id> = self.windows.iter().map(|w| w.window).collect();
+        for window in windows {
+            self.dim(window);
+        }
         if !warnings.is_empty() {
             show_problems("Some settings weren't applied", &warnings);
         }
@@ -1192,8 +1209,7 @@ impl App {
     fn change_font_size(&mut self, view: Id, delta: Option<f64>) {
         let Some(surface) = self.surfaces.iter_mut().find(|s| s.view == view) else { return };
         let size = delta.map_or(self.config.font_size, |d| (surface.renderer.font_size() + d).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE));
-        let c = &self.config;
-        if surface.renderer.set_font(&c.font, size, c.font_backend, c.ligatures) {
+        if surface.renderer.configure(&self.config, size) {
             surface.resize();
         }
     }
@@ -1228,7 +1244,7 @@ impl App {
         let Some(w) = self.windows.iter().find(|w| w.window == window) else { return };
         let several = !w.zoomed && matches!(w.tree, Node::Split { .. });
         for surface in self.surfaces.iter().filter(|s| s.window == window) {
-            let opacity = if several && !surface.active { UNFOCUSED_OPACITY } else { 1.0 };
+            let opacity = if several && !surface.active { self.config.unfocused_split_opacity as f32 } else { 1.0 };
             // SAFETY: main thread; documented signature.
             unsafe { call!(surface.layer, c"setOpacity:", opacity) };
         }
@@ -1450,12 +1466,36 @@ fn from_rect(r: Rect) -> CGRect {
 }
 
 /// A `CGColor` (autoreleased with its `NSColor`).
-fn color((r, g, b): (u8, u8, u8)) -> Id {
+fn color_alpha((r, g, b): (u8, u8, u8), alpha: f64) -> Id {
     let c = |v: u8| v as f64 / 255.0;
     // SAFETY: documented signatures.
     unsafe {
-        let color: Id = msg!(class(c"NSColor"), c"colorWithSRGBRed:green:blue:alpha:", c(r), c(g), c(b), 1.0f64);
+        let color: Id = msg!(class(c"NSColor"), c"colorWithSRGBRed:green:blue:alpha:", c(r), c(g), c(b), alpha);
         msg!(color, c"CGColor")
+    }
+}
+
+/// Behind each pane's terminal: the default background, at
+/// `background-opacity`. It also shows through a dimmed pane.
+fn pane_background(config: &Config) -> Id {
+    color_alpha(config.theme.background, config.look.background_opacity)
+}
+
+/// `background-opacity` and `background-blur` for a window, whose split
+/// view `root` shows through between panes as dividers.
+fn style_window(window: Id, root: Id, config: &Config) {
+    let translucent = config.look.background_opacity < 1.0;
+    // SAFETY: main thread; documented signatures (the blur is private API).
+    unsafe {
+        call!(window, c"setOpaque:", if translucent { NO } else { YES });
+        let background: Id = if translucent { msg!(class(c"NSColor"), c"clearColor") } else { msg!(class(c"NSColor"), c"windowBackgroundColor") };
+        call!(window, c"setBackgroundColor:", background);
+        // Translucent dividers would show the pane backgrounds through twice: clear instead.
+        let divider = renderer::mix(config.theme.background, config.theme.foreground, 0.25);
+        call!(msg!(root, c"layer"), c"setBackgroundColor:", color_alpha(divider, if translucent { 0.0 } else { 1.0 }));
+        let number: isize = msg!(window, c"windowNumber");
+        let radius = if translucent { config.background_blur } else { 0 };
+        CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number as i32, radius);
     }
 }
 
@@ -1506,6 +1546,7 @@ impl Surface {
                     Some(search) => Highlights { selection, matches: &search.matches, current: search.current, link },
                     None => Highlights { selection, link, ..Highlights::default() },
                 };
+                self.renderer.blink_off = BLINK.get().0;
                 let frame = self.renderer.prepare(&self.snapshot, highlights);
                 let presented = latency::frame(self.window, &self.snapshot);
                 self.renderer.present(frame, presented);
@@ -1537,6 +1578,8 @@ impl Surface {
 
     /// Sends typed input, drawing its echo early (see `ECHO_WAIT`).
     fn type_bytes(&mut self, bytes: &[u8]) {
+        // Typing shows a blinking cursor until it pauses.
+        BLINK.set((false, Instant::now()));
         self.write(bytes);
         if self.echo_frame.is_none() {
             self.echo_frame = Some(Instant::now() + ECHO_WAIT);
@@ -1550,14 +1593,14 @@ impl Surface {
         let (row, col) = self.pane.term.lock().unwrap().cursor();
         let scale = self.renderer.scale();
         let (cw, ch) = self.renderer.cell_size();
-        let pad = self.renderer.padding_px();
+        let (px, py) = self.renderer.padding_px();
         // SAFETY: main thread; documented signatures.
         unsafe {
             let bounds = send_rect(self.view, c"bounds");
             let cell = CGRect {
                 origin: CGPoint {
-                    x: (pad + col as f64 * cw as f64) / scale,
-                    y: bounds.size.height - (pad + (row + 1) as f64 * ch as f64) / scale,
+                    x: (px + col as f64 * cw as f64) / scale,
+                    y: bounds.size.height - (py + (row + 1) as f64 * ch as f64) / scale,
                 },
                 size: CGSize { width: cw as f64 / scale, height: ch as f64 / scale },
             };
@@ -1813,9 +1856,9 @@ impl Surface {
         let bounds = unsafe { send_rect(self.view, c"bounds") };
         let scale = self.renderer.scale();
         let (cw, ch) = self.renderer.cell_size();
-        let pad = self.renderer.padding_px();
-        let x = (point.x * scale - pad).max(0.0);
-        let y = ((bounds.size.height - point.y) * scale - pad).max(0.0);
+        let (px, py) = self.renderer.padding_px();
+        let x = (point.x * scale - px).max(0.0);
+        let y = ((bounds.size.height - point.y) * scale - py).max(0.0);
         ((x / cw as f64) as usize, (y / ch as f64) as usize)
     }
 }

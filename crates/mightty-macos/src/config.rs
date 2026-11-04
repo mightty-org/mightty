@@ -42,10 +42,85 @@ pub struct Config {
     pub ligatures: bool,
     /// `keybind`: the defaults, changed by each setting in order.
     pub keybinds: Bindings,
+    /// How panes look beyond colours and fonts.
+    pub look: Look,
+    /// `background-blur`: blur radius behind a translucent window, in points; 0 for none.
+    pub background_blur: u32,
+    /// `unfocused-split-opacity`: panes keys aren't going to are dimmed to this.
+    pub unfocused_split_opacity: f64,
     /// Where this came from, to load it again (see `Config::reload`): the
     /// default file, and the command line.
     default_file: Option<PathBuf>,
     args: Vec<String>,
+}
+
+/// Settings the renderer draws with, apart from colours and fonts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// `background-opacity`: of the default background, 0 to 1.
+    pub background_opacity: f64,
+    /// `window-padding-x` and `window-padding-y`, in points.
+    pub padding: (f64, f64),
+    pub cursor_style: CursorStyle,
+    /// `cursor-style-blink`; unset: as the program asks (DECSCUSR), else steady.
+    pub cursor_blink: Option<bool>,
+    /// `adjust-cell-width` and `adjust-cell-height`.
+    pub cell_adjust: (Adjust, Adjust),
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            background_opacity: 1.0,
+            padding: (6.0, 6.0),
+            cursor_style: CursorStyle::Block,
+            cursor_blink: None,
+            cell_adjust: (Adjust::Points(0.0), Adjust::Points(0.0)),
+        }
+    }
+}
+
+/// `cursor-style`, as in Ghostty: the cursor unless the program picks one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorStyle {
+    Block,
+    Bar,
+    Underline,
+    BlockHollow,
+}
+
+/// A change to the cell size: points (`2`, `-1`) or a percentage (`10%`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Adjust {
+    Points(f64),
+    Percent(f64),
+}
+
+impl Adjust {
+    /// `pixels` adjusted, at `scale` pixels per point; at least 1.
+    pub fn apply(self, pixels: u32, scale: f64) -> u32 {
+        let adjusted = match self {
+            Self::Points(p) => pixels as f64 + p * scale,
+            Self::Percent(p) => pixels as f64 * (1.0 + p / 100.0),
+        };
+        adjusted.round().max(1.0) as u32
+    }
+
+    fn parse(v: &str) -> Result<Self, String> {
+        let number = |n: &str| n.trim().parse().ok().filter(|n: &f64| n.is_finite());
+        match v.strip_suffix('%') {
+            Some(p) => number(p).filter(|&p| p > -100.0).map(Self::Percent),
+            None => number(v).map(Self::Points),
+        }
+        .ok_or_else(|| "expects points like 2 or -1, or a percentage like 10%".into())
+    }
+
+    fn show(self) -> String {
+        match self {
+            Self::Points(p) => p.to_string(),
+            Self::Percent(p) => format!("{p}%"),
+        }
+    }
 }
 
 /// `font-backend`: who reads fonts and draws glyphs.
@@ -124,6 +199,9 @@ impl Default for Config {
             font_backend: FontBackend::CoreText,
             ligatures: true,
             keybinds: Bindings::default(),
+            look: Look::default(),
+            background_blur: 0,
+            unfocused_split_opacity: 0.7,
             default_file: None,
             args: Vec::new(),
         }
@@ -318,6 +396,125 @@ const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        name: "background-opacity",
+        value: "0-1",
+        help: "opacity of the default background; below 1 the desktop shows through",
+        color: false,
+        set: |c, v| {
+            c.look.background_opacity = fraction(v, 0.0)?;
+            Ok(())
+        },
+        get: |c| Some(c.look.background_opacity.to_string()),
+    },
+    Setting {
+        name: "background-blur",
+        value: "RADIUS",
+        help: "blur behind a translucent background: true, false or a radius in points",
+        color: false,
+        set: |c, v| {
+            c.background_blur = match v {
+                "true" => 20,
+                "false" => 0,
+                _ => v.parse().ok().filter(|&r| r <= 100).ok_or("expects true, false or a radius from 0 to 100")?,
+            };
+            Ok(())
+        },
+        get: |c| Some(c.background_blur.to_string()),
+    },
+    Setting {
+        name: "window-padding-x",
+        value: "POINTS",
+        help: "space left and right of the text",
+        color: false,
+        set: |c, v| {
+            c.look.padding.0 = padding(v)?;
+            Ok(())
+        },
+        get: |c| Some(c.look.padding.0.to_string()),
+    },
+    Setting {
+        name: "window-padding-y",
+        value: "POINTS",
+        help: "space above and below the text",
+        color: false,
+        set: |c, v| {
+            c.look.padding.1 = padding(v)?;
+            Ok(())
+        },
+        get: |c| Some(c.look.padding.1.to_string()),
+    },
+    Setting {
+        name: "cursor-style",
+        value: "STYLE",
+        help: "block, bar, underline or block_hollow, unless the program picks one",
+        color: false,
+        set: |c, v| {
+            c.look.cursor_style = match v {
+                "block" => CursorStyle::Block,
+                "bar" => CursorStyle::Bar,
+                "underline" => CursorStyle::Underline,
+                "block_hollow" => CursorStyle::BlockHollow,
+                _ => return Err("expects block, bar, underline or block_hollow".into()),
+            };
+            Ok(())
+        },
+        get: |c| {
+            Some(
+                match c.look.cursor_style {
+                    CursorStyle::Block => "block",
+                    CursorStyle::Bar => "bar",
+                    CursorStyle::Underline => "underline",
+                    CursorStyle::BlockHollow => "block_hollow",
+                }
+                .into(),
+            )
+        },
+    },
+    Setting {
+        name: "cursor-style-blink",
+        value: "BOOL",
+        help: "blink the cursor (default: only when the program asks)",
+        color: false,
+        set: |c, v| {
+            c.look.cursor_blink = Some(v.parse().map_err(|_| "expects true or false")?);
+            Ok(())
+        },
+        get: |c| c.look.cursor_blink.map(|b| b.to_string()),
+    },
+    Setting {
+        name: "adjust-cell-width",
+        value: "POINTS|N%",
+        help: "make cells wider or narrower than the font says: points (1, -1) or a percentage (10%)",
+        color: false,
+        set: |c, v| {
+            c.look.cell_adjust.0 = Adjust::parse(v)?;
+            Ok(())
+        },
+        get: |c| Some(c.look.cell_adjust.0.show()),
+    },
+    Setting {
+        name: "adjust-cell-height",
+        value: "POINTS|N%",
+        help: "make cells taller or shorter than the font says, for more space between lines: points or a percentage",
+        color: false,
+        set: |c, v| {
+            c.look.cell_adjust.1 = Adjust::parse(v)?;
+            Ok(())
+        },
+        get: |c| Some(c.look.cell_adjust.1.show()),
+    },
+    Setting {
+        name: "unfocused-split-opacity",
+        value: "0.15-1",
+        help: "dim panes keys aren't going to, when a window has several",
+        color: false,
+        set: |c, v| {
+            c.unfocused_split_opacity = fraction(v, 0.15)?;
+            Ok(())
+        },
+        get: |c| Some(c.unfocused_split_opacity.to_string()),
+    },
+    Setting {
         name: "keybind",
         value: "TRIGGER=ACTION",
         help: "bind keys to an action, as in Ghostty: cmd+shift+t=new_tab, ctrl+k=unbind, or clear \
@@ -486,6 +683,16 @@ const FILE_FLAGS: [(&str, &str); 2] = [
     ("config-file=PATH", "also load this config file, after the default one"),
     ("config-default-files=false", "skip the default config file"),
 ];
+
+/// A number from `min` to 1.
+fn fraction(v: &str, min: f64) -> Result<f64, String> {
+    v.parse().ok().filter(|f: &f64| (min..=1.0).contains(f)).ok_or_else(|| format!("expects a number from {min} to 1"))
+}
+
+/// Points of padding, 0 to 200.
+fn padding(v: &str) -> Result<f64, String> {
+    v.parse().ok().filter(|p: &f64| (0.0..=200.0).contains(p)).ok_or_else(|| "expects points from 0 to 200".into())
+}
 
 fn cells(v: &str) -> Result<u16, String> {
     v.parse().ok().filter(|&n| n > 0).ok_or_else(|| "expects a whole number above 0".into())
@@ -804,6 +1011,32 @@ mod tests {
         let (c, warnings) = Config::load_from(Some(dir.join("missing")), &[]).unwrap();
         assert!(warnings.is_empty() && c.cols == 100);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn look_settings() {
+        let mut c = Config::default();
+        c.apply_args(&args(&[
+            "--background-opacity=0.85",
+            "--background-blur=true",
+            "--window-padding-x=12",
+            "--cursor-style=bar",
+            "--cursor-style-blink=true",
+            "--adjust-cell-height=10%",
+            "--adjust-cell-width=-1",
+            "--unfocused-split-opacity=0.5",
+        ]))
+        .unwrap();
+        assert_eq!((c.look.background_opacity, c.background_blur, c.look.padding), (0.85, 20, (12.0, 6.0)));
+        assert_eq!((c.look.cursor_style, c.look.cursor_blink), (CursorStyle::Bar, Some(true)));
+        assert_eq!(c.look.cell_adjust, (Adjust::Points(-1.0), Adjust::Percent(10.0)));
+        assert_eq!(c.unfocused_split_opacity, 0.5);
+        assert_eq!(Adjust::Percent(10.0).apply(30, 2.0), 33);
+        assert_eq!(Adjust::Points(-1.0).apply(16, 2.0), 14);
+        assert_eq!(Adjust::Points(-50.0).apply(16, 2.0), 1);
+        for bad in ["--background-opacity=1.5", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
+            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -78,6 +78,13 @@ cursor-color = #ff79c6
 | `font-ligatures` | `true` | Draw the font's ligatures and contextual alternates (`->`, `!=`, `===` in fonts such as JetBrains Mono and Fira Code), each kept to the cells it covers; never across the cursor or a change of colour or style |
 | `font-backend` | `coretext` | `mightty` draws glyphs with mightty's own rasterizer (`mightty-font`: TrueType and CFF fonts, variable fonts, colour emoji, ligatures, accents, and the fallback fonts CoreText picks; CoreText still finds fonts and draws fonts in Apple's own formats: `morx` composition, as in Menlo and Apple Color Emoji, and `hvgl` outlines). For testing: the rasterizer is for platforms without CoreText |
 | `window-save-state` | `default` | Reopen windows, tabs and splits where they were, each pane a new shell in its old directory: `always`, `never`, or `default`, which follows macOS (only when "Close windows when quitting an application" is off in System Settings → Desktop & Dock), as in Ghostty. Saved in `~/Library/Application Support/mightty/session.json` |
+| `background-opacity` | `1` | Opacity of the default background, 0 to 1; below 1 the desktop shows through (cells with their own background stay solid) |
+| `background-blur` | `false` | Blur what shows through a translucent background: `true` (radius 20), `false`, or a radius in points |
+| `window-padding-x`, `window-padding-y` | `6`, `6` | Space around the text, in points |
+| `cursor-style` | `block` | `block`, `bar`, `underline` or `block_hollow`, unless the program picks one |
+| `cursor-style-blink` | as the program asks | `true` or `false`; typing keeps it on for a moment |
+| `adjust-cell-width`, `adjust-cell-height` | `0` | Wider or taller cells than the font gives: points (`1`, `-1`) or a percentage (`10%`); taller cells space lines out |
+| `unfocused-split-opacity` | `0.7` | Panes keys aren't going to are dimmed to this, 0.15 to 1 |
 | `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |
 | `theme` | | Colours from `themes/NAME` in the config directory, or a path |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |

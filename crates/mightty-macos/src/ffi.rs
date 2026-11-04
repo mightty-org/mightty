@@ -330,6 +330,14 @@ unsafe extern "C" {
     ) -> CFTypeRef;
 }
 
+// Private (SkyLight, re-exported by CoreGraphics), as Ghostty and others
+// use for blur behind a window; there is no public API for it.
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGSMainConnectionID() -> i32;
+    pub fn CGSSetWindowBackgroundBlurRadius(connection: i32, window: i32, radius: u32) -> i32;
+}
+
 #[link(name = "ImageIO", kind = "framework")]
 unsafe extern "C" {
     pub fn CGImageDestinationCreateWithURL(url: CFTypeRef, kind: CFStringRef, count: usize, options: CFTypeRef) -> CFTypeRef;

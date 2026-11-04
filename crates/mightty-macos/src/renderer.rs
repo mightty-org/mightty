@@ -12,7 +12,7 @@ use std::rc::Rc;
 use mightty_render::{Rgb, Theme, boxdraw};
 use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
 
-use crate::config::FontBackend;
+use crate::config::{Adjust, Config, CursorStyle, FontBackend, Look};
 use crate::ffi::*;
 use crate::font::{Font, Ligature, RasterGlyph, Style};
 use crate::snapshot;
@@ -23,9 +23,6 @@ use crate::snapshot;
 const ATLAS_MIN: u32 = 512;
 const ATLAS_MAX: u32 = 2048;
 const PIXEL_FORMAT_BGRA8: usize = 80;
-/// Padding around the grid, in points.
-const PADDING: f64 = 6.0;
-
 const SHADER: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -281,6 +278,9 @@ pub struct Renderer {
     backend: FontBackend,
     scale: f64,
     theme: Theme,
+    look: Look,
+    /// A blinking cursor is in its off phase (set by the app before drawing).
+    pub blink_off: bool,
     /// Quad lists kept between frames, so drawing doesn't allocate.
     spare: Vec<Quad>,
     front: Vec<Quad>,
@@ -292,10 +292,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `layer` must be a `CAMetalLayer`. `font_size` is in points.
-    /// Without `vsync`, frames show as soon as they're ready, possibly torn.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(layer: Id, font_name: &str, font_size: f64, scale: f64, theme: Theme, vsync: bool, backend: FontBackend, ligatures: bool) -> Self {
+    /// `layer` must be a `CAMetalLayer`. Draws with `config`'s font, colours
+    /// and look (see `configure`).
+    pub fn new(layer: Id, scale: f64, config: &Config) -> Self {
         // SAFETY: Metal calls with the documented signatures.
         unsafe {
             let device = MTLCreateSystemDefaultDevice();
@@ -305,11 +304,11 @@ impl Renderer {
             let snapshot = env::var_os("MIGHTTY_SNAPSHOT").map(PathBuf::from);
             // Snapshots read the drawable back, which framebuffer-only textures forbid.
             call!(layer, c"setFramebufferOnly:", if snapshot.is_some() { NO } else { YES });
-            call!(layer, c"setOpaque:", YES);
+            call!(layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
             // Each drawable is a full window image (~11 MiB at 120x40 on
             // Retina); frames are paced by the display, so two are enough.
             call!(layer, c"setMaximumDrawableCount:", 2usize);
-            call!(layer, c"setDisplaySyncEnabled:", if vsync { YES } else { NO });
+            call!(layer, c"setDisplaySyncEnabled:", if config.vsync { YES } else { NO });
             // Keep content pinned during live resize instead of stretching it.
             call!(layer, c"setContentsGravity:", kCAGravityTopLeft);
 
@@ -321,14 +320,16 @@ impl Renderer {
                 atlas: Atlas { texture: create_atlas(device, ATLAS_MIN), size: ATLAS_MIN, x: 0, y: 0, row_height: 0 },
                 glyphs: HashMap::new(),
                 atlas_reset: false,
-                font: Font::new(font_name, font_size * scale, backend),
-                ligatures,
+                font: load_font(&config.font, config.font_size, config.font_backend, config.look.cell_adjust, scale),
+                ligatures: config.ligatures,
                 shaped: HashMap::new(),
-                backend,
-                font_name: font_name.to_owned(),
-                font_size,
+                backend: config.font_backend,
+                font_name: config.font.clone(),
+                font_size: config.font_size,
                 scale,
-                theme,
+                theme: config.theme.clone(),
+                look: config.look,
+                blink_off: false,
                 spare: Vec::new(),
                 front: Vec::new(),
                 vertices: [VertexBuffer { buffer: NIL, bytes: 0, commands: NIL }; VERTEX_BUFFERS],
@@ -337,11 +338,6 @@ impl Renderer {
                 snapshot,
             }
         }
-    }
-
-    /// Points.
-    pub fn font_size(&self) -> f64 {
-        self.font_size
     }
 
     pub fn scale(&self) -> f64 {
@@ -360,35 +356,58 @@ impl Renderer {
     /// Rebuilds the font for a new backing scale (moving between displays).
     pub fn set_scale(&mut self, scale: f64) {
         self.scale = scale;
-        self.font = Font::new(&self.font_name, self.font_size * scale, self.backend);
-        self.reset_atlas();
+        self.reload_font();
     }
 
-    /// Changes the font, its size in points, who draws it or whether
-    /// ligatures are drawn. Returns whether anything changed, so the cell
-    /// size may have.
-    pub fn set_font(&mut self, font_name: &str, font_size: f64, backend: FontBackend, ligatures: bool) -> bool {
-        if (font_name, font_size, backend, ligatures) == (self.font_name.as_str(), self.font_size, self.backend, self.ligatures) {
-            return false;
+    /// Applies changed settings: colours, look and vsync, and the font at
+    /// `font_size` points (`font-size`, or the pane's after ⌘+ and ⌘-).
+    /// Returns whether the cell size or padding may have changed.
+    pub fn configure(&mut self, config: &Config, font_size: f64) -> bool {
+        self.theme = config.theme.clone();
+        // SAFETY: documented signatures; `layer` is a CAMetalLayer.
+        unsafe {
+            call!(self.layer, c"setDisplaySyncEnabled:", if config.vsync { YES } else { NO });
+            call!(self.layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
         }
-        self.font_name = font_name.to_owned();
+        let font = |r: &Self| (r.font_name.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
+        let before = (font(self), self.look.padding);
+        self.font_name = config.font.clone();
         self.font_size = font_size;
-        self.backend = backend;
-        self.ligatures = ligatures;
-        self.font = Font::new(font_name, font_size * self.scale, backend);
+        self.backend = config.font_backend;
+        self.ligatures = config.ligatures;
+        self.look = config.look;
+        if font(self) != before.0 {
+            self.reload_font();
+        }
+        (font(self), self.look.padding) != before
+    }
+
+    fn reload_font(&mut self) {
+        self.font = load_font(&self.font_name, self.font_size, self.backend, self.look.cell_adjust, self.scale);
         self.shaped.clear();
         self.reset_atlas();
-        true
     }
 
-    pub fn set_theme(&mut self, theme: Theme) {
-        self.theme = theme;
+    /// Points.
+    pub fn font_size(&self) -> f64 {
+        self.font_size
     }
 
-    /// See `Renderer::new`.
-    pub fn set_vsync(&mut self, vsync: bool) {
-        // SAFETY: documented signature; `layer` is a CAMetalLayer.
-        unsafe { call!(self.layer, c"setDisplaySyncEnabled:", if vsync { YES } else { NO }) };
+    /// The cursor's style and whether it blinks, for a DECSCUSR `shape`
+    /// from the program (0: not set, so `cursor-style`).
+    fn cursor_style(&self, shape: u16) -> (CursorStyle, bool) {
+        let style = match shape {
+            1 | 2 => CursorStyle::Block,
+            3 | 4 => CursorStyle::Underline,
+            5 | 6 => CursorStyle::Bar,
+            _ => self.look.cursor_style,
+        };
+        (style, self.look.cursor_blink.unwrap_or(shape % 2 == 1))
+    }
+
+    /// Whether the cursor in `snapshot` blinks, so frames are needed to blink it.
+    pub fn cursor_blinks(&self, snapshot: &Snapshot) -> bool {
+        self.focused && snapshot.cursor.is_some_and(|c| self.cursor_style(c.2).1)
     }
 
     /// Cell size in pixels.
@@ -396,16 +415,18 @@ impl Renderer {
         (self.font.cell_width, self.font.cell_height)
     }
 
-    pub fn padding_px(&self) -> f64 {
-        (PADDING * self.scale).round()
+    /// Padding left and right, and above and below, in pixels.
+    pub fn padding_px(&self) -> (f64, f64) {
+        let (x, y) = self.look.padding;
+        ((x * self.scale).round(), (y * self.scale).round())
     }
 
     /// Columns and rows that fit in a drawable of `width`×`height` pixels.
     pub fn grid_size(&self, width: f64, height: f64) -> (usize, usize) {
-        let pad = 2.0 * self.padding_px();
+        let (px, py) = self.padding_px();
         let (cw, ch) = self.cell_size();
-        let cols = ((width - pad) / cw as f64).floor().max(1.0) as usize;
-        let rows = ((height - pad) / ch as f64).floor().max(1.0) as usize;
+        let cols = ((width - 2.0 * px) / cw as f64).floor().max(1.0) as usize;
+        let rows = ((height - 2.0 * py) / ch as f64).floor().max(1.0) as usize;
         (cols, rows)
     }
 
@@ -436,7 +457,10 @@ impl Renderer {
             }
             let pass: Id = msg!(class(c"MTLRenderPassDescriptor"), c"renderPassDescriptor");
             let attachment: Id = msg!(msg!(pass, c"colorAttachments"), c"objectAtIndexedSubscript:", 0usize);
-            let [r, g, b, _] = rgba(self.theme.background);
+            // Translucent: the default background comes from the view behind,
+            // at `background-opacity`, so the window shows through only once.
+            let [r, g, b, _] = if self.look.background_opacity < 1.0 { [0.0; 4] } else { rgba(self.theme.background) };
+            let alpha = if self.look.background_opacity < 1.0 { 0.0 } else { 1.0 };
             let texture: Id = msg!(drawable, c"texture");
             call!(attachment, c"setTexture:", texture);
             call!(attachment, c"setLoadAction:", 2usize); // clear
@@ -445,7 +469,7 @@ impl Renderer {
                 red: r as f64,
                 green: g as f64,
                 blue: b as f64,
-                alpha: 1.0
+                alpha
             });
 
             let commands: Id = msg!(self.queue, c"commandBuffer");
@@ -520,7 +544,8 @@ impl Renderer {
         // skipped once: `matches[next..]` is what's left.
         let mut next = matches.partition_point(|m| m.1.0 < snapshot.first_line);
         let (cw, ch) = (self.font.cell_width as f32, self.font.cell_height as f32);
-        let pad = self.padding_px() as f32;
+        let (pad_x, pad_y) = self.padding_px();
+        let (pad_x, pad_y) = (pad_x as f32, pad_y as f32);
         let thickness = (self.scale as f32).round().max(1.0);
         let baseline = self.font.baseline as f32;
 
@@ -532,13 +557,13 @@ impl Renderer {
         back.clear();
         front.clear();
         for r in 0..rows {
-            let y = pad + r as f32 * ch;
+            let y = pad_y + r as f32 * ch;
             let line = snapshot.first_line + r as u64;
             let ligatures = if self.ligatures { self.row_ligatures(snapshot, r, &mut ligature_cells) } else { Rc::from([]) };
 
             for c in 0..cols {
                 let cell = &snapshot.cells[r * cols + c];
-                let x = pad + c as f32 * cw;
+                let x = pad_x + c as f32 * cw;
                 let wide = cell.flags.contains(Flags::WIDE);
                 let w = if wide { 2.0 * cw } else { cw };
                 let theme = &self.theme;
@@ -575,16 +600,19 @@ impl Renderer {
                     && c == cursor_col
                 {
                     let cursor = theme.cursor.map_or(fg, rgba);
-                    match (self.focused, cursor_shape) {
-                        (true, 0..=2) => {
+                    let (style, blinks) = self.cursor_style(cursor_shape);
+                    match (self.focused, style) {
+                        // A blinking cursor in its off phase.
+                        (true, _) if blinks && self.blink_off => {}
+                        (true, CursorStyle::Block) => {
                             back.push(Quad::solid(x, y, w, ch, cursor));
                             fg = theme.cursor_text.map_or(bg, rgba);
                         }
-                        (true, 3 | 4) => {
+                        (true, CursorStyle::Underline) => {
                             back.push(Quad::solid(x, y + ch - 2.0 * thickness, w, 2.0 * thickness, cursor));
                         }
-                        (true, _) => back.push(Quad::solid(x, y, 2.0 * thickness, ch, cursor)),
-                        (false, _) => {
+                        (true, CursorStyle::Bar) => back.push(Quad::solid(x, y, 2.0 * thickness, ch, cursor)),
+                        (true, CursorStyle::BlockHollow) | (false, _) => {
                             // Hollow block when the window isn't focused.
                             front.push(Quad::solid(x, y, w, thickness, cursor));
                             front.push(Quad::solid(x, y + ch - thickness, w, thickness, cursor));
@@ -810,6 +838,14 @@ impl Renderer {
         self.atlas.y = 0;
         self.atlas.row_height = 0;
     }
+}
+
+/// `name` at `points`, with its cells adjusted (`adjust-cell-width`,
+/// `adjust-cell-height`).
+fn load_font(name: &str, points: f64, backend: FontBackend, (width, height): (Adjust, Adjust), scale: f64) -> Font {
+    let mut font = Font::new(name, points * scale, backend);
+    font.resize_cells(width.apply(font.cell_width, scale), height.apply(font.cell_height, scale));
+    font
 }
 
 unsafe fn create_pipeline(device: Id) -> Id {

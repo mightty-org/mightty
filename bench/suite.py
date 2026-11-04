@@ -1,9 +1,11 @@
 """Full terminal comparison: startup, memory, CPU, throughput, latency.
 
-usage: python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]
+usage: python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS] [PROFILE]
 
 TERMINALS is a comma-separated subset (e.g. `mightty`); its results go to
-bench/results/suite-<names> so the full comparison is kept.
+bench/results/suite-<names> so the full comparison is kept. PROFILE
+`effects` runs mightty with heavy visual customization against Ghostty and
+kitty tuned for speed (see PROFILES); results go to bench/results/suite-effects.
 
 Every terminal runs with its shipped defaults apart from a 120x40 grid and
 Menlo 14 (kitty with --config NONE, Ghostty with --config-default-files=false),
@@ -51,6 +53,35 @@ TERMINALS = {
         {},
     ),
 }
+
+# Settings added per profile, before the command. `effects`: mightty with
+# everything that costs drawing time on (a ligature font, translucency and
+# blur, a blinking bar cursor, taller cells, padding, custom colours);
+# Ghostty and kitty on the same font with what their docs suggest for speed:
+# ligatures off, opaque, no blinking, vsync off (kitty: no input delay).
+FONT = "JetBrains Mono"
+PROFILES = {
+    "effects": {
+        "mightty": ["--font-family=" + FONT, "--font-ligatures=true", "--background-opacity=0.85", "--background-blur=20",
+                    "--cursor-style=bar", "--cursor-style-blink=true", "--adjust-cell-height=10%",
+                    "--window-padding-x=12", "--window-padding-y=8", "--background=#1a1b26", "--foreground=#c0caf5",
+                    "--cursor-color=#ff9e64", "--selection-background=#33467c"],
+        "ghostty": ["--font-family=", "--font-family=" + FONT, "--font-feature=-calt", "--font-feature=-liga", "--font-feature=-dlig",
+                    "--background-opacity=1", "--cursor-style=block", "--cursor-style-blink=false", "--window-vsync=false"],
+        "kitty": ["-o", "font_family=" + FONT, "-o", "disable_ligatures=always", "-o", "background_opacity=1",
+                  "-o", "cursor_blink_interval=0", "-o", "sync_to_monitor=no", "-o", "input_delay=0"],
+    },
+}
+
+
+def use_profile(profile):
+    """Adds `profile`'s settings to each terminal's command line, after the
+    defaults so they win, and before `-e`."""
+    for name, extra in PROFILES[profile].items():
+        argv, env = TERMINALS[name]
+        at = argv.index("-e") if "-e" in argv else len(argv)
+        TERMINALS[name] = (argv[:at] + extra + argv[at:], env)
+
 
 # ---- process sampling ----
 
@@ -268,9 +299,12 @@ def main():
     starts = int(sys.argv[2]) if len(sys.argv) > 2 else 10
     names = [n for n, (argv, _) in TERMINALS.items() if os.path.exists(argv[0])]
     out = OUT
-    if len(sys.argv) > 3:  # a subset, e.g. `mightty` or `mightty,kitty`
+    if len(sys.argv) > 3 and sys.argv[3] != "all":  # a subset, e.g. `mightty` or `mightty,kitty`
         names = [n for n in names if n in sys.argv[3].split(",")]
         out = f"{OUT}-{'-'.join(names)}"
+    if len(sys.argv) > 4:
+        use_profile(sys.argv[4])
+        out = f"{out}-{sys.argv[4]}"
     prepare_data()
     os.makedirs(out, exist_ok=True)
     scratch = os.path.join(out, "tmp")

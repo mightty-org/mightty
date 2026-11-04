@@ -71,6 +71,14 @@ pub struct Font {
 }
 
 impl Font {
+    /// Resizes cells (`adjust-cell-width`, `adjust-cell-height`), keeping
+    /// text centred vertically in the new height.
+    pub fn resize_cells(&mut self, width: u32, height: u32) {
+        let shift = (height as i64 - self.cell_height as i64) / 2;
+        self.baseline = (self.baseline as i64 + shift).clamp(1, height as i64) as u32;
+        (self.cell_width, self.cell_height) = (width, height);
+    }
+
     /// `size` is in pixels (points × backing scale).
     pub fn new(name: &str, size: f64, backend: FontBackend) -> Self {
         // SAFETY: CoreText/CoreGraphics calls with valid arguments; every
