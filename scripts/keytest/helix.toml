@@ -1,0 +1,11 @@
+# Kitty keyboard protocol check: hx -c scripts/keytest/helix.toml
+# In normal mode each key below echoes its name.
+[keys.normal]
+"C-i" = ":echo ctrl-i"
+"tab" = ":echo tab"
+"S-ret" = ":echo shift-enter"
+"C-ret" = ":echo ctrl-enter"
+"C-tab" = ":echo ctrl-tab"
+"C-backspace" = ":echo ctrl-backspace"
+"C-;" = ":echo ctrl-;"
+"C-S-a" = ":echo ctrl-shift-a"

@@ -228,6 +228,8 @@ unsafe extern "C" {
         is_external: bool,
     ) -> CFStringRef;
     pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+    pub fn CFDataCreateWithBytesNoCopy(alloc: *const c_void, bytes: *const u8, len: isize, deallocator: CFTypeRef) -> CFTypeRef;
+    pub static kCFAllocatorNull: CFTypeRef;
     pub fn CFRelease(cf: CFTypeRef);
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
     pub fn CFDictionaryCreate(
@@ -272,6 +274,9 @@ unsafe extern "C" {
         matrix: *const CGAffineTransform,
         attributes: CFTypeRef,
     ) -> CTFontRef;
+    pub fn CTFontGetBoundingRectsForGlyphs(font: CTFontRef, orientation: u32, glyphs: *const u16, rects: *mut CGRect, count: isize) -> CGRect;
+    pub fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeRef) -> CFTypeRef;
+    pub fn CTFontCreateWithFontDescriptor(descriptor: CFTypeRef, size: f64, matrix: *const c_void) -> CTFontRef;
     pub fn CTFontCreateForString(current: CTFontRef, string: CFStringRef, range: CFRange) -> CTFontRef;
     pub fn CTFontGetAscent(font: CTFontRef) -> f64;
     pub fn CTFontGetDescent(font: CTFontRef) -> f64;

@@ -69,7 +69,7 @@ cursor-color = #ff79c6
 
 | Setting | Default | |
 |---|---|---|
-| `font-family`, `font-size` | `Menlo`, `14` | Font and size in points. Repeat `font-family` for fallbacks, tried in order before the ones macOS picks; each source (the file, then flags) gives the whole list, and an empty value clears it, as in Ghostty. A name mightty can't find is reported |
+| `font-family`, `font-size` | `Menlo`, `14` | Font and size in points. Repeat `font-family` for fallbacks, tried in order before the ones macOS picks (Nerd Font icons come from a built-in Symbols Nerd Font, so prompts and file listers need no patched font); each source (the file, then flags) gives the whole list, and an empty value clears it, as in Ghostty. A name mightty can't find is reported |
 | `font-family-bold`, `font-family-italic`, `font-family-bold-italic` | from `font-family` | A different family for bold or italic text; unset, the family's own bold and italic, or ones made from it |
 | `font-feature` | | OpenType features, repeated: `ss01` (or `+ss01`) on, `-calt` off, `cv01=2` an alternate; they apply to single characters (`zero`) as well as ligatures. An empty value clears them |
 | `font-variation`, `font-variation-bold`, `font-variation-italic`, `font-variation-bold-italic` | | Variable font axes, repeated: `wght=450`, `slnt=-10` |
@@ -433,6 +433,7 @@ checks the header compiles as C++.
 2. ✅ macOS window: Cocoa via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas, keyboard input
    - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line) + copy, mouse reporting
    - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters
+   - ✅ Nerd Font icons built in (Symbols Nerd Font Mono, as in Ghostty and kitty): prompt, `eza` and editor icons show with any font, fitted to the cell, or to two when a space follows
    - ✅ Bold and italic for families without them: made from the regular face (grown outlines, 12° slant)
    - ✅ Ligatures (`font-ligatures`, on): `->`, `!=`, `===` and the rest in fonts that have them, drawn as one tile over exactly the cells they cover, shaped once per run of text and kept
    - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor

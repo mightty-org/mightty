@@ -14,7 +14,7 @@ use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
 
 use crate::config::{Adjust, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
-use crate::font::{Font, Ligature, RasterGlyph, Style};
+use crate::font::{self, Font, Ligature, RasterGlyph, Style};
 use crate::snapshot;
 
 /// The glyph atlas starts small and doubles when full, up to the maximum;
@@ -122,6 +122,8 @@ pub enum HoveredLink {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum GlyphKey {
     Char(char),
+    /// A Nerd Font icon given the blank cell after it too, as in Ghostty.
+    Icon(char),
     Cluster(Box<str>),
     Ligature(Box<[(u16, u16)]>, u16),
 }
@@ -658,11 +660,16 @@ impl Renderer {
                     continue;
                 }
                 let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
+                // An icon followed by a space spreads over it, to be drawn larger.
+                let icon = !wide
+                    && font::is_private_use(cell.c)
+                    && snapshot.cells.get(r * cols + c + 1).is_some_and(|next| c + 1 < cols && next.c == ' ' && next.flags.bits() & (Flags::WIDE | Flags::WIDE_SPACER).bits() == 0);
                 let key = match snapshot.clusters.get(&(r * cols + c)) {
                     Some(text) => GlyphKey::Cluster(text.clone()),
+                    None if icon => GlyphKey::Icon(cell.c),
                     None => GlyphKey::Char(cell.c),
                 };
-                if let Some(g) = self.glyph(key, style, if wide { 2 } else { 1 }) {
+                if let Some(g) = self.glyph(key, style, if wide || icon { 2 } else { 1 }) {
                     front.push(Quad {
                         pos: [x, y],
                         size: g.size,
@@ -755,7 +762,7 @@ impl Renderer {
                 self.glyphs.insert((key, style), glyph);
                 return glyph;
             }
-            GlyphKey::Char(c) => *c,
+            GlyphKey::Char(c) | GlyphKey::Icon(c) => *c,
             GlyphKey::Cluster(text) => {
                 // An atlas overflow returns early, uncached, as below.
                 let glyph = match self.font.rasterize_cluster(text, style, cells) {

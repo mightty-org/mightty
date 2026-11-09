@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::ptr;
+use std::sync::OnceLock;
 
 use mightty_font::{EMBOLDEN, Face, FontData, OBLIQUE};
 
@@ -57,6 +58,10 @@ pub struct Font {
     synthetic: [u8; 4],
     /// `font-family` after the first: tried in order before CoreText picks.
     chain: Vec<CTFontRef>,
+    /// The built-in Symbols Nerd Font, for icons in the Private Use Area
+    /// the fonts above lack (prompts, file listers, editor plugins); null
+    /// if it couldn't be loaded.
+    symbols: CTFontRef,
     /// Features our shaper applies (`font-feature`, `font-ligatures`).
     shaping: Vec<[u8; 4]>,
     /// Whether runs of text need shaping: ligatures or features are on.
@@ -186,6 +191,7 @@ impl Font {
                 fallbacks: RefCell::new(Vec::new()),
                 files: RefCell::new(files),
                 chain,
+                symbols: symbols_font(size),
                 shaping,
                 shapes,
                 backend,
@@ -227,6 +233,8 @@ impl Font {
                 if let Some(&font) = self.chain.iter().find(|&&font| has(font, &mut glyphs)) {
                     // The next `font-family` that has it.
                     fallback = CFRetain(font);
+                } else if is_private_use(c) && !self.symbols.is_null() && has(self.symbols, &mut glyphs) {
+                    fallback = CFRetain(self.symbols);
                 } else {
                     // Let CoreText pick a font that covers the character (CJK, emoji, symbols).
                     let mut buf = [0u8; 4];
@@ -240,6 +248,10 @@ impl Font {
                         return None;
                     }
                 }
+            }
+            if !fallback.is_null() && fallback == self.symbols {
+                CFRelease(fallback);
+                return self.draw_icon(glyphs[0], style, cells);
             }
             let font = if fallback.is_null() { base } else { fallback };
             // Ours draws what CoreText picked, if it can read it.
@@ -584,6 +596,33 @@ impl Font {
     /// for content `width` pixels wide, centred when narrower than the tile
     /// (wide CJK, emoji), stroked as well as filled for synthetic bold.
     /// `color` is left false.
+    /// An icon from the built-in symbols font, whose glyphs are an em wide
+    /// whatever the cell: shrunk to fit `cells`, never enlarged, and centred.
+    fn draw_icon(&self, glyph: u16, style: Style, cells: u32) -> Option<RasterGlyph> {
+        let (width, height) = ((self.cell_width * cells) as f64, self.cell_height as f64);
+        // SAFETY: `symbols` is live; the scaled copy is released here.
+        unsafe {
+            let ink = CTFontGetBoundingRectsForGlyphs(self.symbols, 0, &glyph, ptr::null_mut(), 1);
+            // A pixel clear each side, so anti-aliasing isn't cut off.
+            let scale = if ink.size.width > 0.0 && ink.size.height > 0.0 {
+                ((width - 2.0) / ink.size.width).min((height - 2.0) / ink.size.height).min(1.0)
+            } else {
+                1.0
+            };
+            let font = CTFontCreateCopyWithAttributes(self.symbols, self.size * scale, ptr::null(), ptr::null());
+            if font.is_null() {
+                return None;
+            }
+            let origin = CGPoint {
+                x: ((width - ink.size.width * scale) / 2.0 - ink.origin.x * scale).round(),
+                y: ((height - ink.size.height * scale) / 2.0 - ink.origin.y * scale).round(),
+            };
+            let raster = self.draw(cells, width, style, |ctx, _| CTFontDrawGlyphs(font, &glyph, &origin, 1, ctx));
+            CFRelease(font);
+            raster
+        }
+    }
+
     unsafe fn draw(&self, cells: u32, width: f64, style: Style, draw: impl FnOnce(CGContextRef, CGPoint)) -> Option<RasterGlyph> {
         let (tile_width, height) = (self.cell_width * cells, self.cell_height);
         let mut pixels = vec![0u8; (tile_width * height * 4) as usize];
@@ -639,6 +678,37 @@ unsafe fn open_font(name: &str, size: f64) -> CTFontRef {
         }
         font
     }
+}
+
+/// Symbols Nerd Font Mono, built in as Ghostty and kitty do, so Nerd Font
+/// icons show without installing anything (see assets/fonts for its licence).
+static SYMBOLS: &[u8] = include_bytes!("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+
+/// The Unicode Private Use Areas, where Nerd Font icons live.
+pub fn is_private_use(c: char) -> bool {
+    matches!(c, '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..)
+}
+
+/// The built-in symbols font at `size` pixels, or null.
+fn symbols_font(size: f64) -> CTFontRef {
+    // A CTFontDescriptor, made once: immutable, so safe to share.
+    static DESCRIPTOR: OnceLock<usize> = OnceLock::new();
+    let descriptor = *DESCRIPTOR.get_or_init(|| {
+        // SAFETY: `SYMBOLS` is static, so the data can borrow it without
+        // copying; both objects live for the rest of the process.
+        unsafe {
+            let data = CFDataCreateWithBytesNoCopy(ptr::null(), SYMBOLS.as_ptr(), SYMBOLS.len() as isize, kCFAllocatorNull);
+            if data.is_null() {
+                return 0;
+            }
+            CTFontManagerCreateFontDescriptorFromData(data) as usize
+        }
+    });
+    if descriptor == 0 {
+        return ptr::null();
+    }
+    // SAFETY: a live descriptor; the font is the caller's to release.
+    unsafe { CTFontCreateWithFontDescriptor(descriptor as CFTypeRef, size, ptr::null()) }
 }
 
 /// `font` (consumed) with `font-variation` axes and `font-feature`s set.
@@ -781,6 +851,9 @@ impl Drop for Font {
             for font in self.variants.into_iter().chain(self.chain.iter().copied()) {
                 CFRelease(font);
             }
+            if !self.symbols.is_null() {
+                CFRelease(self.symbols);
+            }
             CGColorSpaceRelease(self.colorspace);
         }
     }
@@ -897,6 +970,27 @@ mod tests {
                 let diff: u64 = a.pixels.iter().zip(&b.pixels).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
                 let relative = diff as f64 / total as f64;
                 assert!(relative < 0.08, "{size} {c}: differs by {:.1}%", relative * 100.0);
+            }
+        }
+    }
+
+    /// Nerd Font icons come from the built-in symbols font, with either
+    /// backend: git branch, folder, Apple logo (Font Logos), a Material icon.
+    #[test]
+    fn nerd_font_icons() {
+        for backend in [FontBackend::CoreText, FontBackend::Mightty] {
+            let font = Font::new("Menlo", 32.0, backend);
+            for c in ['\u{F418}', '\u{F07B}', '\u{F179}', '\u{F0001}'] {
+                let raster = font.rasterize(c, Style(0), 1).unwrap_or_else(|| panic!("{:X}", c as u32));
+                let ink = raster.pixels.iter().filter(|&&p| p > 0).count();
+                assert!(ink > 50, "U+{:X}: {ink} pixels drawn", c as u32);
+                // Whole: no solid ink in the tile's edge columns, where it would be cut.
+                let (w, h) = (raster.width as usize, raster.height as usize);
+                let edge = (0..h).any(|y| raster.pixels[(y * w) * 4 + 3] > 128 || raster.pixels[(y * w + w - 1) * 4 + 3] > 128);
+                assert!(!edge, "U+{:X} touches the cell's edge", c as u32);
+                let wide = font.rasterize(c, Style(0), 2).unwrap();
+                let wide_ink = wide.pixels.iter().filter(|&&p| p > 0).count();
+                assert!(wide_ink > ink, "U+{:X}: two cells draw it no larger", c as u32);
             }
         }
     }
