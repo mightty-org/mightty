@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -318,10 +318,20 @@ fn reply(c: &Command, message: &str) -> Option<Vec<u8>> {
 }
 
 /// `O_NOFOLLOW`: opening a symlink fails instead of opening its target.
+/// `O_NONBLOCK`: opening a pipe doesn't wait for a writer.
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
 #[cfg(not(target_os = "linux"))]
 const O_NOFOLLOW: i32 = 0x0100;
+#[cfg(not(target_os = "linux"))]
+const O_NONBLOCK: i32 = 0x0004;
+
+/// Every failure to read a file, or an image from it: output can come
+/// from other machines (ssh), and the reply mustn't tell them whether a
+/// file exists, how big it is or what it holds.
+const FILE_ERROR: &str = "EBADF:can't read an image from the file";
 
 /// Where `t=t` names a temp file as the protocol says (a name holding
 /// `tty-graphics-protocol`, in a temp directory), the path to it with its
@@ -340,53 +350,57 @@ fn temp_file(path: &Path) -> Option<PathBuf> {
     temp_dirs.iter().filter_map(|t| fs::canonicalize(t).ok()).any(|t| dir.starts_with(t)).then(|| dir.join(name))
 }
 
-/// Reads what `t=f` or `t=t` names. Only regular files, so not devices or
-/// pipes; temp files only as `temp_file` allows, never through a symlink,
-/// and deleted once read.
-fn read_file(c: &Command, path: &[u8]) -> Result<Vec<u8>, &'static str> {
-    let path = std::str::from_utf8(path).map_err(|_| "EINVAL:bad file name")?;
-    let mut path = PathBuf::from(path);
+/// Reads what `t=f` or `t=t` names. Only regular files, opened without
+/// waiting, so not devices or pipes, and nothing under /proc, /sys or
+/// /dev; temp files only as `temp_file` allows, never through a symlink,
+/// and deleted once read. Errors say nothing (see `FILE_ERROR`).
+fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
+    let mut path = PathBuf::from(std::str::from_utf8(path).ok()?);
     let temp = c.medium == b't';
+    if !path.is_absolute() || ["/proc", "/sys", "/dev"].iter().any(|dir| path.starts_with(dir)) {
+        return None;
+    }
     let mut options = fs::OpenOptions::new();
     options.read(true);
     if temp {
-        path = temp_file(&path).ok_or("EPERM:not a graphics temp file")?;
-        options.custom_flags(O_NOFOLLOW);
+        path = temp_file(&path)?;
+        options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+    } else {
+        options.custom_flags(O_NONBLOCK);
     }
-    let mut file = options.open(&path).map_err(|e| if e.kind() == ErrorKind::NotFound { "ENOENT:no such file" } else { "EBADF:can't open the file" })?;
+    let mut file = options.open(&path).ok()?;
     // Checked on what was opened, not the path, which could change meanwhile.
-    let meta = file.metadata().map_err(|_| "EBADF:can't read the file")?;
+    let meta = file.metadata().ok()?;
     if !meta.is_file() {
-        return Err("EINVAL:not a regular file");
+        return None;
     }
-    file.seek(SeekFrom::Start(c.read_offset)).map_err(|_| "EBADF:can't read the file")?;
+    file.seek(SeekFrom::Start(c.read_offset)).ok()?;
     let size = if c.read_size > 0 { c.read_size } else { meta.len().saturating_sub(c.read_offset) };
     if size > MAX_TRANSMIT as u64 {
-        return Err("EFBIG:file too large");
+        return None;
     }
     let mut data = Vec::with_capacity(size as usize);
-    file.take(size).read_to_end(&mut data).map_err(|_| "EBADF:can't read the file")?;
+    file.take(size).read_to_end(&mut data).ok()?;
     if temp {
         let _ = fs::remove_file(&path);
     }
-    Ok(data)
+    Some(data)
 }
 
 /// Pixels from transmitted bytes, as the command's format says.
 fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
+    let raw = matches!(c.format, 24 | 32);
+    // Sizes are checked before anything is inflated, which they bound.
+    if raw && (!(1..=MAX_SIDE).contains(&c.width) || !(1..=MAX_SIDE).contains(&c.height)) {
+        return Err("EINVAL:bad image size");
+    }
     if c.compressed {
-        let limit = match c.format {
-            24 | 32 => c.width as usize * c.height as usize * (c.format / 8) as usize,
-            _ => MAX_TRANSMIT,
-        };
+        let limit = if raw { c.width as usize * c.height as usize * (c.format / 8) as usize } else { MAX_TRANSMIT };
         data = mightty_image::inflate::zlib(&data, limit).ok_or("EINVAL:bad zlib data")?;
     }
     let (width, height, pixels) = match c.format {
         24 | 32 => {
             let (w, h) = (c.width, c.height);
-            if !(1..=MAX_SIDE).contains(&w) || !(1..=MAX_SIDE).contains(&h) {
-                return Err("EINVAL:bad image size");
-            }
             let bpp = (c.format / 8) as usize;
             let n = w as usize * h as usize;
             if data.len() < n * bpp {
@@ -455,12 +469,15 @@ impl Term {
         match c.action {
             b't' | b'T' | b'q' => {
                 let pixels = match c.medium {
-                    b'd' => Ok(data),
-                    b'f' | b't' => read_file(&c, &data),
+                    b'd' => decode(&c, data),
+                    // Any file can be named, so only as a PNG, uncompressed:
+                    // raw pixels, offsets and zlib would tell a remote
+                    // program about the file by whether they decode.
+                    b'f' if c.format != 100 || c.compressed => Err("EINVAL:a file must be sent as an uncompressed PNG"),
+                    b'f' | b't' => read_file(&c, &data).and_then(|data| decode(&c, data).ok()).ok_or(FILE_ERROR),
                     b's' => Err("EINVAL:shared memory isn't supported"),
                     _ => Err("EINVAL:unknown transmission medium"),
-                }
-                .and_then(|data| decode(&c, data));
+                };
                 let image = match pixels {
                     Ok(image) => image,
                     Err(error) => return self.graphics_reply(&c, error),
@@ -533,7 +550,9 @@ impl Term {
             (0, rows) => (((rows * ch) as u64 * w as u64 / h as u64).div_ceil(cw as u64) as u32, rows),
             (cols, rows) => (cols, rows),
         };
-        let (cols, rows) = (cols.max(1), rows.max(1));
+        // An image far taller than wide asked for many columns would otherwise
+        // need millions of rows, each a line for the cursor to move down.
+        let (cols, rows) = (cols.clamp(1, MAX_CELLS), rows.clamp(1, MAX_CELLS));
         let placement_id = match c.placement {
             0 => {
                 graphics.next_placement = graphics.next_placement.wrapping_add(1).max(1) | 1 << 31;
@@ -694,6 +713,19 @@ mod tests {
     }
 
     #[test]
+    fn limits() {
+        let mut t = term();
+        // Sizes are checked before inflating, and data can't inflate past them.
+        assert_eq!(send(&mut t, "a=t,f=32,s=99999,v=99999,o=z,i=1", &zlib(&[0; 64])), "\x1b_Gi=1;EINVAL:bad image size\x1b\\");
+        assert_eq!(send(&mut t, "a=t,f=32,s=2,v=2,o=z,i=2", &zlib(&rgba(4, 4))), "\x1b_Gi=2;EINVAL:bad zlib data\x1b\\");
+        // A 1×10000 image 1000 columns wide: capped at 1000 rows, not millions.
+        let start = std::time::Instant::now();
+        assert_eq!(send(&mut t, "a=T,f=32,s=1,v=10000,c=1000,i=3", &rgba(1, 10000)), "\x1b_Gi=3;OK\x1b\\");
+        assert_eq!(t.image_placements()[0].cells, [1000, 1000]);
+        assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[test]
     fn chunks_compression_and_png() {
         let mut t = term();
         let data = base64::encode(&rgba(4, 4));
@@ -721,14 +753,19 @@ mod tests {
     #[test]
     fn files() {
         let dir = std::env::temp_dir();
-        let plain = dir.join(format!("mightty-graphics-test-{}.rgba", std::process::id()));
-        fs::write(&plain, [vec![0; 8], rgba(2, 2)].concat()).unwrap();
+        let error = |id: u32| format!("\x1b_Gi={id};{FILE_ERROR}\x1b\\");
+        let plain = dir.join(format!("mightty-graphics-test-{}.png", std::process::id()));
+        fs::write(&plain, [vec![0; 8], png(2, 2)].concat()).unwrap();
         let mut t = term();
         let path = plain.to_str().unwrap().as_bytes();
-        assert_eq!(send(&mut t, "a=T,t=f,f=32,s=2,v=2,O=8,i=1", path), "\x1b_Gi=1;OK\x1b\\");
-        assert_eq!(t.image_placements()[0].image.pixels, rgba(2, 2));
+        assert_eq!(send(&mut t, "a=T,t=f,f=100,O=8,i=1", path), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(t.image_placements()[0].image.pixels, [0, 255, 0, 255].repeat(4));
+        // Any file can be named, so only as a PNG: raw pixels or zlib would
+        // tell a remote program what the file holds by whether they decode.
+        assert_eq!(send(&mut t, "a=t,t=f,f=32,s=1,v=1,i=8", path), "\x1b_Gi=8;EINVAL:a file must be sent as an uncompressed PNG\x1b\\");
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,o=z,i=8", path), "\x1b_Gi=8;EINVAL:a file must be sent as an uncompressed PNG\x1b\\");
         // A temp file must be named for the protocol, and is deleted once read.
-        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,O=8,i=2", path), "\x1b_Gi=2;EPERM:not a graphics temp file\x1b\\");
+        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,O=8,i=2", path), error(2));
         assert!(plain.exists());
         fs::remove_file(&plain).unwrap();
         let temp = dir.join(format!("tty-graphics-protocol-mightty-{}", std::process::id()));
@@ -741,16 +778,24 @@ mod tests {
         let sneaky = format!("{}/../{}", dir.display(), outside.strip_prefix("/").unwrap().display());
         let up = "/..".repeat(dir.components().count());
         let sneaky = sneaky.replacen("/../", &format!("{up}/"), 1);
-        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=6", sneaky.as_bytes()), "\x1b_Gi=6;EPERM:not a graphics temp file\x1b\\");
+        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=6", sneaky.as_bytes()), error(6));
         let link = dir.join(format!("tty-graphics-protocol-link-{}", std::process::id()));
         let _ = fs::remove_file(&link);
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=7", link.to_str().unwrap().as_bytes()), "\x1b_Gi=7;EBADF:can't open the file\x1b\\");
+        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=7", link.to_str().unwrap().as_bytes()), error(7));
         assert!(outside.exists());
         fs::remove_file(&link).unwrap();
         fs::remove_file(&outside).unwrap();
-        assert_eq!(send(&mut t, "a=t,t=f,i=4", b"/dev/null"), "\x1b_Gi=4;EINVAL:not a regular file\x1b\\");
-        assert_eq!(send(&mut t, "a=t,t=f,i=5", b"/nonexistent/x"), "\x1b_Gi=5;ENOENT:no such file\x1b\\");
+        // Missing, not a file, not an image: the same answer.
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=4", b"/dev/null"), error(4));
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=5", b"/nonexistent/x"), error(5));
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=5", b"/etc/hosts"), error(5));
+        // A pipe with no writer is refused at once, not waited on.
+        let fifo = dir.join(format!("mightty-graphics-fifo-{}", std::process::id()));
+        let _ = fs::remove_file(&fifo);
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=9", fifo.to_str().unwrap().as_bytes()), error(9));
+        fs::remove_file(&fifo).unwrap();
     }
 
     #[test]
