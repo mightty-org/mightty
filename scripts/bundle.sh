@@ -43,6 +43,12 @@ if [ "${1:-}" = "--install" ]; then
   mkdir -p "$dir"
   rm -rf "$dir/mightty.app"
   ditto "$app" "$dir/mightty.app"
+  # Launch the installed copy, not the build: with both registered, macOS
+  # may open either, and the Dock can show a stale icon for the one rebuilt
+  # in place.
+  lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  "$lsregister" -u "$PWD/$app" 2>/dev/null || true
+  "$lsregister" -f "$dir/mightty.app"
   echo "installed $dir/mightty.app"
   echo "for the command line (mightty ctl, mightty mcp):"
   echo "  ln -s \"$dir/mightty.app/Contents/MacOS/mightty\" ~/.local/bin/mightty"

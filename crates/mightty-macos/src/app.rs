@@ -68,6 +68,8 @@ const MIN_FONT_SIZE: f64 = 4.0;
 const MAX_FONT_SIZE: f64 = 200.0;
 /// How long a blinking cursor stays on, and off.
 const BLINK_INTERVAL: Duration = Duration::from_millis(600);
+/// How often a selection dragged past the top or bottom edge scrolls.
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// An NSWindow (or tab) and how its panes share it.
 struct Window {
@@ -105,6 +107,11 @@ struct Surface {
     scroll_remainder: f64,
     title: String,
     selection: Option<Selection>,
+    /// The mouse button that started `selection` is still down.
+    dragging: bool,
+    /// While dragging past the top (> 0) or bottom edge: lines to scroll
+    /// per `AUTOSCROLL_INTERVAL`.
+    autoscroll: isize,
     /// Output redraws wait until then: one frame per display refresh.
     next_frame: Instant,
     /// After a key press, the next output redraw comes this early instead,
@@ -366,6 +373,39 @@ extern "C" fn on_blink_tick(_: *mut c_void) {
         }
     });
     run_on_main_after(BLINK_INTERVAL, on_blink_tick);
+}
+
+thread_local! {
+    /// `on_autoscroll_tick` is scheduled.
+    static AUTOSCROLLING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Scrolls the selections dragged past an edge, extending them to the
+/// pointer, while any are.
+extern "C" fn on_autoscroll_tick(_: *mut c_void) {
+    let more = with_app(|app| {
+        let mut more = false;
+        for surface in app.surfaces.iter_mut().filter(|s| s.autoscroll != 0) {
+            let (alt, history) = {
+                let term = surface.pane.term.lock().unwrap();
+                (term.is_alt_screen(), term.scrollback().len())
+            };
+            if !alt {
+                surface.scroll_offset = surface.scroll_offset.saturating_add_signed(surface.autoscroll).min(history);
+            }
+            // SAFETY: main thread; documented signature.
+            let location = unsafe { msg!(surface.window, c"mouseLocationOutsideOfEventStream") };
+            surface.drag_selection(location);
+            more |= surface.autoscroll != 0;
+        }
+        more
+    });
+    // Busy: try again next tick.
+    let more = more.unwrap_or(true);
+    AUTOSCROLLING.set(more);
+    if more {
+        run_on_main_after(AUTOSCROLL_INTERVAL, on_autoscroll_tick);
+    }
 }
 
 /// After macOS changed between light and dark mode (with a moment for the
@@ -649,6 +689,8 @@ impl App {
                 scroll_remainder: 0.0,
                 title: String::new(),
                 selection: None,
+                dragging: false,
+                autoscroll: 0,
                 next_frame: Instant::now(),
                 echo_frame: None,
                 start_dir: None,
@@ -1721,6 +1763,10 @@ impl Surface {
             return;
         }
 
+        if action == MouseAction::Motion {
+            self.drag_selection(location);
+            return;
+        }
         let point = (lines_scrolled - self.scroll_offset as u64 + row as u64, col);
         match action {
             MouseAction::Press => {
@@ -1730,14 +1776,12 @@ impl Surface {
                     _ => Granularity::Line,
                 };
                 self.selection = Some(Selection { granularity, anchor: point, head: point, dragged: false });
+                self.dragging = true;
             }
-            MouseAction::Motion => {
-                if let Some(selection) = &mut self.selection {
-                    selection.head = point;
-                    selection.dragged = true;
-                }
-            }
+            MouseAction::Motion => {}
             MouseAction::Release => {
+                self.dragging = false;
+                self.autoscroll = 0;
                 // A drag, or a word or line picked by clicking.
                 let picked = self.selection.is_some_and(|s| s.dragged || s.granularity != Granularity::Cell);
                 if picked && BEHAVIOUR.get().copy_on_select {
@@ -1745,6 +1789,45 @@ impl Surface {
                 }
                 return;
             }
+        }
+        self.render();
+    }
+
+    /// While selecting, moves the selection's end to the pointer
+    /// (`location`, in the window's coordinates). Past the top or bottom
+    /// edge, history scrolls, faster the further out the pointer is.
+    fn drag_selection(&mut self, location: CGPoint) {
+        if !self.dragging || self.selection.is_none() {
+            self.autoscroll = 0;
+            return;
+        }
+        let local = self.local(location);
+        let (col, row) = self.cell_at(local);
+        let head = {
+            let term = self.pane.term.lock().unwrap();
+            let (col, row) = (col.min(term.cols() - 1), row.min(term.rows() - 1));
+            (term.lines_scrolled() - self.scroll_offset as u64 + row as u64, col)
+        };
+        if let Some(selection) = &mut self.selection {
+            selection.head = head;
+            selection.dragged = true;
+        }
+
+        // SAFETY: main thread; documented signature.
+        let height = unsafe { send_rect(self.view, c"bounds") }.size.height;
+        let line = self.renderer.cell_size().1 as f64 / self.renderer.scale();
+        // Within a point of the edge counts, for a window against the screen's.
+        let beyond = if local.y >= height - 1.0 {
+            local.y - (height - 1.0)
+        } else if local.y <= 1.0 {
+            local.y - 1.0
+        } else {
+            0.0
+        };
+        self.autoscroll = if beyond == 0.0 { 0 } else { (1 + (beyond.abs() / line) as isize).min(10) * beyond.signum() as isize };
+        if self.autoscroll != 0 && !AUTOSCROLLING.get() {
+            AUTOSCROLLING.set(true);
+            run_on_main_after(AUTOSCROLL_INTERVAL, on_autoscroll_tick);
         }
         self.render();
     }
@@ -2260,6 +2343,10 @@ unsafe fn register_view_class() -> Id {
                 let lines = if precise != 0 { dy / points_per_line } else { dy } * BEHAVIOUR.get().scroll_multiplier;
                 let (col, row) = w.cell_at(w.local(location));
                 w.scroll(lines, col, row);
+                // Scrolling while selecting moves the selection's end too.
+                if w.dragging {
+                    w.drag_selection(location);
+                }
             });
         }
     }
