@@ -471,6 +471,7 @@ impl_message_args!(A);
 impl_message_args!(A, B);
 impl_message_args!(A, B, C);
 impl_message_args!(A, B, C, D);
+impl_message_args!(A, B, C, D, E);
 impl_message_args!(A, B, C, D, E, F, G, H, I, J);
 
 /// Sends `sel` to `obj`.

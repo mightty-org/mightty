@@ -1,16 +1,19 @@
-//! Metal renderer. Every frame is a single instanced draw of quads: cell
+//! Metal renderer. Every frame is an instanced draw of quads: cell
 //! backgrounds and the cursor first, then decorations and glyphs sampled
-//! from a glyph atlas.
+//! from a glyph atlas. Images (kitty graphics) each have a texture and
+//! are drawn between those layers or over them, so a frame with images
+//! is a few draws.
 
 use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::mem;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Flags, Row, StyledCell, Term, char_width};
+use mightty_term::{Color, Flags, ImageData, Placement, Row, StyledCell, Term, char_width};
 
 use crate::config::{Adjust, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
@@ -23,6 +26,10 @@ use crate::snapshot;
 const ATLAS_MIN: u32 = 512;
 const ATLAS_MAX: u32 = 2048;
 const PIXEL_FORMAT_BGRA8: usize = 80;
+const PIXEL_FORMAT_RGBA8: usize = 70;
+/// Frames an image's texture outlives its last use (a few seconds), so
+/// scrolling back to it doesn't upload it again.
+const IMAGE_TEXTURE_FRAMES: u64 = 300;
 const SHADER: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -33,7 +40,7 @@ struct Quad {
     float2 uv;       // atlas pixels
     float2 uv_size;
     float4 color;
-    uint mode;       // 0 solid, 1 coverage mask tinted by color, 2 colour bitmap
+    uint mode;       // 0 solid, 1 coverage mask tinted by color, 2 colour bitmap, 3 image
 };
 
 struct VOut {
@@ -62,6 +69,11 @@ fragment float4 fs(VOut in [[stage_in]], texture2d<float> atlas [[texture(0)]]) 
     if (in.mode == 0) {
         return float4(in.color.rgb * in.color.a, in.color.a);
     }
+    if (in.mode == 3) {
+        // Images are scaled to their cells: smoothly.
+        constexpr sampler smooth(coord::pixel, filter::linear);
+        return atlas.sample(smooth, in.uv) * in.color.a;
+    }
     float4 texel = atlas.sample(s, in.uv);
     if (in.mode == 1) {
         float a = texel.a * in.color.a;
@@ -87,6 +99,7 @@ struct Quad {
 const SOLID: u32 = 0;
 const MASK: u32 = 1;
 const BITMAP: u32 = 2;
+const IMAGE: u32 = 3;
 
 impl Quad {
     fn solid(x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) -> Self {
@@ -157,6 +170,8 @@ pub struct Snapshot {
     cursor: Option<(usize, usize, u16)>,
     /// Text of the cells holding grapheme clusters, by index into `cells`.
     clusters: HashMap<usize, Box<str>>,
+    /// Images on screen (kitty graphics), in the order sent.
+    images: Vec<Placement>,
 }
 
 impl Snapshot {
@@ -226,11 +241,33 @@ impl Snapshot {
         let (cursor_row, cursor_col) = term.cursor();
         let visible = offset == 0 && term.modes().show_cursor;
         self.cursor = visible.then_some((cursor_row, cursor_col, term.modes().cursor_shape));
+        let (top, bottom) = (self.first_line as i64, (self.first_line + rows as u64) as i64);
+        self.images.clear();
+        self.images.extend(term.image_placements().iter().filter(|p| p.line + p.cells[1] as i64 > top && p.line < bottom).cloned());
     }
 }
 
-/// Quads for one frame.
-pub struct Frame(Vec<Quad>);
+/// Quads for one frame, drawn in batches: each with its texture, `None`
+/// for the glyph atlas.
+pub struct Frame {
+    quads: Vec<Quad>,
+    batches: Vec<(Range<usize>, Option<Id>)>,
+}
+
+impl Frame {
+    /// `quads` drawn next, from `texture` (the atlas for `None`).
+    fn add(&mut self, quads: &[Quad], texture: Option<Id>) {
+        let start = self.quads.len();
+        self.quads.extend_from_slice(quads);
+        self.batches.push((start..self.quads.len(), texture));
+    }
+}
+
+/// An image's texture, and the frame that last drew it.
+struct ImageTexture {
+    texture: Id,
+    used: u64,
+}
 
 #[derive(Clone, Copy)]
 struct Glyph {
@@ -291,6 +328,10 @@ pub struct Renderer {
     pub focused: bool,
     /// `MIGHTTY_SNAPSHOT`: every frame is also written to this PNG.
     snapshot: Option<PathBuf>,
+    /// Textures of images drawn lately, by `ImageData::serial`.
+    images: HashMap<u64, ImageTexture>,
+    /// Frames prepared, for retiring image textures.
+    frames: u64,
 }
 
 impl Renderer {
@@ -338,6 +379,8 @@ impl Renderer {
                 next_vertices: 0,
                 focused: true,
                 snapshot,
+                images: HashMap::new(),
+                frames: 0,
             }
         }
     }
@@ -434,21 +477,121 @@ impl Renderer {
 
     /// Builds a frame from a snapshot; needs no terminal lock.
     pub fn prepare(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Frame {
-        let mut quads = self.build_quads(snapshot, highlights);
+        let (mut quads, mut text) = self.build_quads(snapshot, highlights);
         // The atlas grew or was cleared mid-frame, dropping glyphs already placed.
         for _ in 0..3 {
             if !mem::take(&mut self.atlas_reset) {
                 break;
             }
             self.spare = quads;
-            quads = self.build_quads(snapshot, highlights);
+            (quads, text) = self.build_quads(snapshot, highlights);
         }
-        Frame(quads)
+        self.frames += 1;
+        let frame = self.add_images(snapshot, quads, text);
+        self.retire_images();
+        frame
+    }
+
+    /// Adds `snapshot`'s images to `quads`, whose text starts at `text`:
+    /// those with a negative z-index under the text, above cell
+    /// backgrounds, and the rest over it, as in kitty.
+    fn add_images(&mut self, snapshot: &Snapshot, mut quads: Vec<Quad>, text: usize) -> Frame {
+        if snapshot.images.is_empty() {
+            return Frame { batches: vec![(0..quads.len(), None)], quads };
+        }
+        let (cw, ch) = (self.font.cell_width as f32, self.font.cell_height as f32);
+        let (pad_x, pad_y) = self.padding_px();
+        let mut images: Vec<(i32, Quad, Id)> = Vec::new();
+        for p in &snapshot.images {
+            let Some(texture) = self.image_texture(&p.image) else { continue };
+            let [sx, sy, sw, sh] = p.source.map(|v| v as f32);
+            let ([c, r], [ox, oy]) = (p.size.map(|v| v as f32), p.offset.map(|v| v as f32));
+            // Natural size, unless cells were asked for: then scaled to them,
+            // in proportion if only one way.
+            let size = match (c > 0.0, r > 0.0) {
+                (false, false) => [sw, sh],
+                (true, false) => [c * cw, c * cw * sh / sw],
+                (false, true) => [r * ch * sw / sh, r * ch],
+                (true, true) => [c * cw, r * ch],
+            };
+            let row = (p.line - snapshot.first_line as i64) as f32;
+            let pos = [pad_x as f32 + p.col as f32 * cw + ox, pad_y as f32 + row * ch + oy];
+            let quad = Quad { pos, size, uv: [sx, sy], uv_size: [sw, sh], color: [1.0; 4], mode: IMAGE, _pad: [0; 3] };
+            images.push((p.z, quad, texture));
+        }
+        // By z-index, then in the order sent.
+        images.sort_by_key(|i| i.0);
+        let below = images.partition_point(|i| i.0 < 0);
+        let mut frame = Frame { quads: Vec::with_capacity(quads.len() + images.len()), batches: Vec::new() };
+        frame.add(&quads[..text], None);
+        for &(_, quad, texture) in &images[..below] {
+            frame.add(&[quad], Some(texture));
+        }
+        frame.add(&quads[text..], None);
+        for &(_, quad, texture) in &images[below..] {
+            frame.add(&[quad], Some(texture));
+        }
+        quads.clear();
+        self.spare = quads;
+        frame
+    }
+
+    /// `image`'s texture, uploaded on first use.
+    fn image_texture(&mut self, image: &ImageData) -> Option<Id> {
+        if let Some(t) = self.images.get_mut(&image.serial) {
+            t.used = self.frames;
+            return Some(t.texture);
+        }
+        // SAFETY: Metal calls with the documented signatures; `pixels` holds
+        // width × height RGBA pixels.
+        let texture = unsafe {
+            let desc: Id = msg!(
+                class(c"MTLTextureDescriptor"),
+                c"texture2DDescriptorWithPixelFormat:width:height:mipmapped:",
+                PIXEL_FORMAT_RGBA8,
+                image.width as usize,
+                image.height as usize,
+                NO
+            );
+            call!(desc, c"setUsage:", 1usize); // shader read
+            let texture: Id = msg!(self.device, c"newTextureWithDescriptor:", desc);
+            if texture.is_null() {
+                return None;
+            }
+            let region = MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize { width: image.width as usize, height: image.height as usize, depth: 1 },
+            };
+            call!(
+                texture,
+                c"replaceRegion:mipmapLevel:withBytes:bytesPerRow:",
+                region,
+                0usize,
+                image.pixels.as_ptr() as *const c_void,
+                image.width as usize * 4
+            );
+            texture
+        };
+        self.images.insert(image.serial, ImageTexture { texture, used: self.frames });
+        Some(texture)
+    }
+
+    /// Releases textures of images not drawn for a while.
+    fn retire_images(&mut self) {
+        let frames = self.frames;
+        self.images.retain(|_, t| {
+            let keep = frames - t.used < IMAGE_TEXTURE_FRAMES;
+            if !keep {
+                // SAFETY: ours; command buffers in flight keep their own reference.
+                unsafe { call!(t.texture, c"release") };
+            }
+            keep
+        });
     }
 
     /// Draws `frame`; `presented` is called with the drawable once it's on
     /// screen (or dropped).
-    pub fn present(&mut self, Frame(mut quads): Frame, presented: Option<&'static Block>) {
+    pub fn present(&mut self, Frame { mut quads, batches }: Frame, presented: Option<&'static Block>) {
         // SAFETY: Metal calls with the documented signatures; objects created
         // with `new...` are released, the rest are autoreleased.
         unsafe {
@@ -487,9 +630,19 @@ impl Renderer {
                 call!(encoder, c"setRenderPipelineState:", self.pipeline);
                 call!(encoder, c"setVertexBuffer:offset:atIndex:", buffer, 0usize, 0usize);
                 call!(encoder, c"setVertexBytes:length:atIndex:", viewport.as_ptr() as *const c_void, 8usize, 1usize);
-                call!(encoder, c"setFragmentTexture:atIndex:", self.atlas.texture, 0usize);
                 // Triangle strip, 4 vertices per quad instance.
-                call!(encoder, c"drawPrimitives:vertexStart:vertexCount:instanceCount:", 4usize, 0usize, 4usize, quads.len());
+                for (range, texture) in batches.into_iter().filter(|b| !b.0.is_empty()) {
+                    call!(encoder, c"setFragmentTexture:atIndex:", texture.unwrap_or(self.atlas.texture), 0usize);
+                    call!(
+                        encoder,
+                        c"drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:",
+                        4usize,
+                        0usize,
+                        4usize,
+                        range.len(),
+                        range.start
+                    );
+                }
             }
             call!(encoder, c"endEncoding");
             if let Some(block) = presented {
@@ -539,7 +692,8 @@ impl Renderer {
         }
     }
 
-    fn build_quads(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Vec<Quad> {
+    /// The frame's quads, and where those drawn over cell backgrounds start.
+    fn build_quads(&mut self, snapshot: &Snapshot, highlights: Highlights) -> (Vec<Quad>, usize) {
         let Highlights { selection, matches, current, link } = highlights;
         let within = |(start, end): Selection, at| start <= at && at <= end;
         // Cells go in order, so matches ending before the current cell are
@@ -682,9 +836,10 @@ impl Renderer {
                 }
             }
         }
+        let text = back.len();
         back.append(&mut front);
         self.front = front;
-        back
+        (back, text)
     }
 
     /// Row `r`'s ligatures, and in `cells` each cell's part in one. Text is
@@ -847,6 +1002,13 @@ impl Renderer {
     }
 }
 
+/// A cell's size in pixels with `config`'s font at `scale`, before any
+/// window has one.
+pub fn cell_size_for(config: &Config, scale: f64) -> (u32, u32) {
+    let font = load_font(&config.fonts, config.font_size, config.font_backend, config.ligatures, config.look.cell_adjust, scale);
+    (font.cell_width, font.cell_height)
+}
+
 /// `fonts` at `points`, with its cells adjusted (`adjust-cell-width`,
 /// `adjust-cell-height`).
 fn load_font(fonts: &Fonts, points: f64, backend: FontBackend, ligatures: bool, (width, height): (Adjust, Adjust), scale: f64) -> Font {
@@ -914,6 +1076,9 @@ impl Drop for Renderer {
                         call!(object, c"release");
                     }
                 }
+            }
+            for t in self.images.values() {
+                call!(t.texture, c"release");
             }
             for object in [self.atlas.texture, self.pipeline, self.queue, self.device] {
                 call!(object, c"release");

@@ -1,7 +1,7 @@
-//! PNG images, as colour emoji fonts store them (sbix, CBDT): every colour
-//! type and bit depth, palettes, transparency and interlacing, decoded to
-//! premultiplied RGBA. Images come from font files, so sizes are limited
-//! and damage is an error.
+//! PNG images, as colour emoji fonts store them (sbix, CBDT) and programs
+//! send them (kitty graphics): every colour type and bit depth, palettes,
+//! transparency and interlacing, decoded to premultiplied RGBA. Sizes are
+//! limited and damage is an error.
 
 use crate::inflate;
 
@@ -13,10 +13,16 @@ pub struct Image {
     pub pixels: Vec<u8>,
 }
 
-/// The largest side an image may have: emoji are a few hundred pixels.
+/// The largest side an image may have by default: emoji are a few hundred pixels.
 const MAX_SIDE: u32 = 4096;
 
-pub(crate) fn decode(data: &[u8]) -> Option<Image> {
+/// `data` decoded, if it's a PNG no more than 4096 pixels a side.
+pub fn decode(data: &[u8]) -> Option<Image> {
+    decode_limited(data, MAX_SIDE)
+}
+
+/// `data` decoded, if it's a PNG no more than `max_side` pixels a side.
+pub fn decode_limited(data: &[u8], max_side: u32) -> Option<Image> {
     const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
     if data.get(..8)? != SIGNATURE {
         return None;
@@ -32,7 +38,7 @@ pub(crate) fn decode(data: &[u8]) -> Option<Image> {
         // The CRC after each chunk isn't checked, as in most decoders' release builds.
         at = at + 12 + len;
         match kind {
-            b"IHDR" => header = Some(Header::parse(body)?),
+            b"IHDR" => header = Some(Header::parse(body, max_side)?),
             b"PLTE" => palette = body,
             b"tRNS" => transparency = body,
             b"IDAT" => compressed.extend_from_slice(body),
@@ -88,7 +94,7 @@ struct Header {
 const ADAM7: [(usize, usize, usize, usize); 7] = [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)];
 
 impl Header {
-    fn parse(b: &[u8]) -> Option<Header> {
+    fn parse(b: &[u8], max_side: u32) -> Option<Header> {
         let width = u32::from_be_bytes(b.get(0..4)?.try_into().ok()?);
         let height = u32::from_be_bytes(b.get(4..8)?.try_into().ok()?);
         let (depth, color, compression, filter, interlace) = (*b.get(8)?, *b.get(9)?, *b.get(10)?, *b.get(11)?, *b.get(12)?);
@@ -98,7 +104,7 @@ impl Header {
             2 | 4 | 6 => matches!(depth, 8 | 16),
             _ => false,
         };
-        let sized = (1..=MAX_SIDE).contains(&width) && (1..=MAX_SIDE).contains(&height);
+        let sized = (1..=max_side).contains(&width) && (1..=max_side).contains(&height);
         (valid && sized && compression == 0 && filter == 0 && interlace <= 1).then_some(Header { width, height, depth, color, interlaced: interlace == 1 })
     }
 

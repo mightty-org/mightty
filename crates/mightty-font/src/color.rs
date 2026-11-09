@@ -5,7 +5,7 @@
 //! over another.
 
 use crate::face::{Bytes, Face};
-use crate::png::{self, Image};
+use mightty_image::png::{self, Image};
 use crate::raster::rasterize;
 
 /// Where a face's colour tables are, if it has them.

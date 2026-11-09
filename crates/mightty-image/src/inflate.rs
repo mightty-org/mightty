@@ -108,7 +108,7 @@ const DISTANCE_EXTRA: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6
 
 /// The bytes a zlib stream holds, or `None` if it's damaged or would be
 /// longer than `limit`.
-pub(crate) fn zlib(data: &[u8], limit: usize) -> Option<Vec<u8>> {
+pub fn zlib(data: &[u8], limit: usize) -> Option<Vec<u8>> {
     let (cmf, flags) = (*data.first()?, *data.get(1)?);
     // Deflate, a window of 32K at most, a valid check, no preset dictionary.
     if cmf & 0x0F != 8 || cmf >> 4 > 7 || !(cmf as u16 * 256 + flags as u16).is_multiple_of(31) || flags & 0x20 != 0 {

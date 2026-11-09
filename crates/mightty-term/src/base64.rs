@@ -1,6 +1,18 @@
-//! Standard base64 (RFC 4648), for OSC 52 clipboard text.
+//! Standard base64 (RFC 4648), for OSC 52 clipboard text and kitty graphics.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Each byte's value in `ALPHABET`, or 64 for bytes outside it: images
+/// arrive as megabytes of base64.
+const VALUES: [u8; 256] = {
+    let mut values = [64u8; 256];
+    let mut i = 0;
+    while i < 64 {
+        values[ALPHABET[i] as usize] = i as u8;
+        i += 1;
+    }
+    values
+};
 
 pub fn encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -23,8 +35,11 @@ pub fn decode(text: &[u8]) -> Option<Vec<u8>> {
     for chunk in text.chunks(4) {
         let mut n = 0u32;
         for (i, &c) in chunk.iter().enumerate() {
-            let v = ALPHABET.iter().position(|&a| a == c)? as u32;
-            n |= v << (18 - 6 * i);
+            let v = VALUES[c as usize];
+            if v == 64 {
+                return None;
+            }
+            n |= (v as u32) << (18 - 6 * i);
         }
         out.extend_from_slice(&n.to_be_bytes()[1..chunk.len()]);
     }

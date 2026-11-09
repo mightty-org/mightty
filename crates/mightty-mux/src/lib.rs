@@ -152,16 +152,36 @@ pub struct Pane {
     events: Arc<Events>,
 }
 
+/// A cell's size in pixels in the pane last resized, width in the high
+/// half: new panes start with it, so a program that asks at once (an
+/// image viewer run first thing) gets it before its window lays out.
+static CELL_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the cell size new panes start with, until a pane is resized.
+pub fn set_cell_pixels(width: u32, height: u32) {
+    CELL_PIXELS.store(u64::from(width) << 32 | u64::from(height), Ordering::Relaxed);
+}
+
+fn cell_pixels() -> (u32, u32) {
+    let packed = CELL_PIXELS.load(Ordering::Relaxed);
+    ((packed >> 32) as u32, packed as u32)
+}
+
 impl Pane {
     /// Sends input to the pane's process.
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
         self.writer.lock().unwrap().write_all(bytes)
     }
 
-    /// Resizes the terminal and tells the process (SIGWINCH).
+    /// Resizes the terminal and tells the process (SIGWINCH). The pixel
+    /// size is the grid's, without padding: programs divide it by the
+    /// cells for a cell's size, to size images.
     pub fn resize(&self, cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) {
         let mut term = self.term.lock().unwrap();
-        if (term.cols(), term.rows()) == (cols.into(), rows.into()) {
+        let cell = (u32::from(pixel_width) / u32::from(cols.max(1)), u32::from(pixel_height) / u32::from(rows.max(1)));
+        let cell_changed = term.set_cell_pixels(cell.0, cell.1);
+        set_cell_pixels(cell.0, cell.1);
+        if (term.cols(), term.rows()) == (cols.into(), rows.into()) && !cell_changed {
             return;
         }
         term.resize(cols.into(), rows.into());
@@ -341,9 +361,15 @@ impl Mux {
         }
         let nonce = shell::integrate(&mut cmd, &shell, opts.command.is_none());
 
-        let pty = Pty::spawn(cmd, WindowSize { cols: opts.cols, rows: opts.rows, ..Default::default() })?;
+        let (cw, ch) = cell_pixels();
+        let pixels = |cells: u16, size: u32| (u32::from(cells) * size).min(u16::MAX.into()) as u16;
+        let size = WindowSize { cols: opts.cols, rows: opts.rows, pixel_width: pixels(opts.cols, cw), pixel_height: pixels(opts.rows, ch) };
+        let pty = Pty::spawn(cmd, size)?;
         let reader = pty.reader()?;
         let mut term = Term::with_options(opts.cols.into(), opts.rows.into(), &self.options.lock().unwrap());
+        if cw > 0 && ch > 0 {
+            term.set_cell_pixels(cw, ch);
+        }
         if let Some(nonce) = &nonce {
             term.set_mark_nonce(nonce);
         }

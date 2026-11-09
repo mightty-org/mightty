@@ -6,6 +6,7 @@
 mod base64;
 mod cell;
 mod graphemes;
+mod graphics;
 mod links;
 mod styles;
 mod width;
@@ -16,9 +17,11 @@ use std::{mem, slice};
 use mightty_vt::{Params, Parser, Perform};
 
 use graphemes::Graphemes;
+use graphics::Graphics;
 use links::Links;
 
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
+pub use graphics::{ImageData, Placement};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
 pub type TextRange = ((u64, usize), (u64, usize));
@@ -271,6 +274,11 @@ pub struct Term {
     /// The last character joined a cluster with U+200D (zero-width
     /// joiner), so the next one joins it too.
     joining: bool,
+    /// Kitty graphics, per screen (primary, alternate).
+    graphics: [Graphics; 2],
+    /// A cell's size in pixels, as the window draws it: for sizing images
+    /// and answering size queries.
+    cell_pixels: (u32, u32),
 }
 
 impl Term {
@@ -340,6 +348,8 @@ impl Term {
             link: 0,
             link_gc_backoff: 0,
             joining: false,
+            graphics: Default::default(),
+            cell_pixels: (10, 20),
         }
     }
 
@@ -348,6 +358,21 @@ impl Term {
         let mut parser = mem::take(&mut self.parser);
         parser.advance(self, bytes);
         self.parser = parser;
+        // Images in history that's gone go with it.
+        let first = self.first_line();
+        self.graphics[0].forget_above(first);
+    }
+
+    /// Images placed on the active screen (kitty graphics), in the order
+    /// sent; `Placement::line` says where.
+    pub fn image_placements(&self) -> &[Placement] {
+        self.graphics[usize::from(self.alt_active)].placements()
+    }
+
+    /// Sets the size of a cell in pixels. Returns whether it changed.
+    pub fn set_cell_pixels(&mut self, width: u32, height: u32) -> bool {
+        let size = (width.max(1), height.max(1));
+        mem::replace(&mut self.cell_pixels, size) != size
     }
 
     /// Query replies waiting to be sent, without consuming them.
@@ -692,6 +717,8 @@ impl Term {
         }
         self.cursor.row = 0;
         self.scrollback.clear();
+        let first = self.first_line();
+        self.graphics[0].forget_above(first);
     }
 
     /// Absolute line number of the oldest row still in scrollback.
@@ -1358,6 +1385,9 @@ impl Term {
                 self.scrollback.pop_front();
             }
             self.lines_scrolled += n as u64;
+        } else {
+            let scrolled = self.lines_scrolled;
+            self.graphics_mut().scroll(scrolled, top, bottom, -(n as i64));
         }
     }
 
@@ -1369,6 +1399,8 @@ impl Term {
         let lines = self.lines_mut().make_contiguous();
         lines[top..=bottom].rotate_right(n);
         clear_rows(&mut lines[top..top + n], blank, cols);
+        let scrolled = self.lines_scrolled;
+        self.graphics_mut().scroll(scrolled, top, bottom, n as i64);
     }
 
     fn insert_lines(&mut self, n: usize) {
@@ -1383,6 +1415,8 @@ impl Term {
         let lines = self.lines_mut().make_contiguous();
         lines[row..=bottom].rotate_right(n);
         clear_rows(&mut lines[row..row + n], blank, cols);
+        let scrolled = self.lines_scrolled;
+        self.graphics_mut().scroll(scrolled, row, bottom, n as i64);
         self.cursor.col = 0;
         self.cursor.pending_wrap = false;
     }
@@ -1399,6 +1433,8 @@ impl Term {
         let lines = self.lines_mut().make_contiguous();
         lines[row..=bottom].rotate_left(n);
         clear_rows(&mut lines[bottom + 1 - n..=bottom], blank, cols);
+        let scrolled = self.lines_scrolled;
+        self.graphics_mut().scroll(scrolled, row, bottom, -(n as i64));
         self.cursor.col = 0;
         self.cursor.pending_wrap = false;
     }
@@ -1461,6 +1497,9 @@ impl Term {
                 for r in 0..self.rows {
                     self.clear_row(r);
                 }
+                // As in kitty, clearing the screen clears its images.
+                let (from, rows) = (self.lines_scrolled, self.rows as u64);
+                self.graphics_mut().clear_lines(from, from + rows);
             }
             3 => self.scrollback.clear(),
             _ => {}
@@ -1517,6 +1556,7 @@ impl Term {
             for r in 0..self.rows {
                 self.clear_row(r);
             }
+            self.graphics[1].clear();
         }
     }
 
@@ -1527,9 +1567,9 @@ impl Term {
         let graphemes = mem::take(&mut self.graphemes);
         let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
-        let (mark_nonce, colors) = (self.mark_nonce.take(), self.colors);
+        let (mark_nonce, colors, cell_pixels) = (self.mark_nonce.take(), self.colors, self.cell_pixels);
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
-        (self.mark_nonce, self.colors) = (mark_nonce, colors);
+        (self.mark_nonce, self.colors, self.cell_pixels) = (mark_nonce, colors, cell_pixels);
         // Scrollback keeps its style and cluster ids, so it keeps their tables too.
         self.scrollback = scrollback;
         self.styles = styles;
@@ -1900,6 +1940,17 @@ impl Perform for Term {
                 }
             }
             ([b' '], b'q') => self.modes.cursor_shape = params.arg(0, 0),
+            // XTWINOPS size reports: the text area and a cell in pixels, the grid in cells.
+            ([], b't') => {
+                let (cw, ch) = self.cell_pixels;
+                let reply = match arg(0, 0) {
+                    14 => format!("\x1b[4;{};{}t", ch as usize * self.rows, cw as usize * self.cols),
+                    16 => format!("\x1b[6;{ch};{cw}t"),
+                    18 => format!("\x1b[8;{};{}t", self.rows, self.cols),
+                    _ => return,
+                };
+                self.respond(reply.as_bytes());
+            }
             _ => {}
         }
     }
@@ -1943,6 +1994,10 @@ impl Perform for Term {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.osc(params, bell_terminated);
+    }
+
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        self.apc(data);
     }
 }
 

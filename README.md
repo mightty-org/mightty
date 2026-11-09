@@ -20,10 +20,11 @@ A fast, lean, GPU-rendered terminal built for the agent era.
 | Crate | Role |
 |---|---|
 | `mightty-vt` | Byte-level VT parser (Williams state machine + UTF-8, sub-params, APC) |
-| `mightty-term` | Terminal state: grids, scrollback, cursor, modes, OSC 133 marks |
+| `mightty-term` | Terminal state: grids, scrollback, cursor, modes, OSC 133 marks, kitty graphics |
 | `mightty-pty` | PTY spawning via hand-written `openpty` FFI |
 | `mightty-render` | Platform-independent rendering: palette, procedural box drawing and block elements |
-| `mightty-font` | Font files and glyph rasterization in plain Rust (TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji: sbix, CBDT and COLR with its own PNG and DEFLATE decoders, OpenType shaping: GSUB substitutions and GPOS mark positioning), for platforms without CoreText |
+| `mightty-image` | PNG and DEFLATE decoders in plain Rust, for colour emoji and kitty graphics |
+| `mightty-font` | Font files and glyph rasterization in plain Rust (TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji: sbix, CBDT and COLR, OpenType shaping: GSUB substitutions and GPOS mark positioning), for platforms without CoreText |
 | `mightty-ffi` | **libmightty**: stable C ABI over the core (`include/mightty.h`) |
 | `mightty-json` | Minimal JSON value, parser and serializer |
 | `mightty-mux` | Pane multiplexer, JSON-RPC control socket, zsh, bash and fish shell integration |
@@ -438,6 +439,7 @@ checks the header compiles as C++.
    - ✅ Ligatures (`font-ligatures`, on): `->`, `!=`, `===` and the rest in fonts that have them, drawn as one tile over exactly the cells they cover, shaped once per run of text and kept
    - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor
    - ✅ Kitty keyboard protocol, all five enhancements (disambiguate, event types, alternate keys, every key as an escape code, associated text), with a flag stack per screen: Neovim, Helix, fish and Kakoune can tell Ctrl-I from Tab, Esc from Alt, and see key releases; ⌘ chords no menu item uses reach them as Super
+   - ✅ Kitty graphics protocol: images sent inline, from files or temp files, as PNG or raw RGB/RGBA, zlib-compressed or not, in chunks; placed at natural size or scaled to cells, cropped, offset within a cell, under the text or over it by z-index; they scroll with the text into history, each screen has its own, clearing the screen clears them, every delete command works, and a screen keeps up to 320 MB. Pixel sizes are reported (`TIOCGWINSZ`, `CSI 14/16/18 t`). Not yet: shared memory, animation, Unicode placeholders, relative placements
    - ✅ Search (Cmd-F): scrollback and screen, across wrapped lines, smart case, a match count, kept up to date as output arrives; Return/Cmd-G for older matches, Shift-Return/Cmd-Shift-G for newer, Esc to close; colours from the theme (`search-*`)
    - ✅ Links: hold Cmd to underline an OSC 8 hyperlink or a URL in the text and see where it goes; Cmd-click opens web and mail links and local documents, media and folders (anything else, such as apps, scripts and executables, is shown in Finder instead); other schemes are ignored
 3. ✅ libmightty C ABI, pkg-config, install script

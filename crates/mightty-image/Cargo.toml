@@ -1,0 +1,9 @@
+[package]
+name = "mightty-image"
+description = "Image decoding in plain Rust: PNG and the DEFLATE streams inside it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

@@ -520,6 +520,11 @@ pub fn run(config: Config) -> io::Result<()> {
         if let Err(e) = mightty_mux::listen(mux.clone()) {
             eprintln!("mightty: control socket unavailable: {e}");
         }
+        // The first pane starts before its window: give it the cell size now.
+        let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
+        let scale: f64 = if screen.is_null() { 2.0 } else { msg!(screen, c"backingScaleFactor") };
+        let (cw, ch) = renderer::cell_size_for(&config, scale);
+        mightty_mux::set_cell_pixels(cw, ch);
         let first = SpawnOptions {
             command: config.command.clone(),
             // A command runs under plain sh, not the user's login shell and profile.
@@ -1692,7 +1697,8 @@ impl Surface {
             call!(self.layer, c"setContentsScale:", scale);
             call!(self.layer, c"setDrawableSize:", CGSize { width, height });
             let (cols, rows) = self.renderer.grid_size(width, height);
-            self.pane.resize(cols as u16, rows as u16, width as u16, height as u16);
+            let (cw, ch) = self.renderer.cell_size();
+            self.pane.resize(cols as u16, rows as u16, (cols as u32 * cw) as u16, (rows as u32 * ch) as u16);
         }
         self.render();
     }
