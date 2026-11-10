@@ -17,7 +17,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -139,7 +140,10 @@ pub struct Pane {
     pub term: Arc<Mutex<Term>>,
     /// What was launched, for listings.
     pub command: String,
-    writer: Mutex<File>,
+    /// Input for the writer thread (see [`Pane::write`]).
+    input: Sender<Vec<u8>>,
+    /// Bytes in `input` not yet written.
+    queued: Arc<AtomicUsize>,
     pty: Mutex<Pty>,
     /// `Some(exit code)` once the process is gone; the code is `None` if a signal killed it.
     exit: Mutex<Option<Option<i32>>>,
@@ -155,6 +159,23 @@ pub struct Pane {
 /// A cell's size in pixels in the pane last resized, width in the high
 /// half: new panes start with it, so a program that asks at once (an
 /// image viewer run first thing) gets it before its window lays out.
+/// Input a pane holds while its process isn't reading.
+const MAX_QUEUED: usize = 16 << 20;
+
+/// Writes `input` to the process until it closes or a write fails.
+fn spawn_writer(mut writer: File, input: mpsc::Receiver<Vec<u8>>, queued: Arc<AtomicUsize>) -> io::Result<()> {
+    thread::Builder::new().name("pane-writer".into()).spawn(move || {
+        for bytes in input {
+            let written = writer.write_all(&bytes);
+            queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+            if written.is_err() {
+                return;
+            }
+        }
+    })?;
+    Ok(())
+}
+
 static CELL_PIXELS: AtomicU64 = AtomicU64::new(0);
 
 /// Sets the cell size new panes start with, until a pane is resized.
@@ -169,8 +190,21 @@ fn cell_pixels() -> (u32, u32) {
 
 impl Pane {
     /// Sends input to the pane's process.
+    /// A writer thread does the writing, so a process that stops reading
+    /// holds up neither the window nor control clients; past
+    /// [`MAX_QUEUED`] bytes waiting, input is refused.
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.lock().unwrap().write_all(bytes)
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.queued.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len() > MAX_QUEUED {
+            self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "the pane isn't reading its input"));
+        }
+        self.input.send(bytes.to_vec()).map_err(|_| {
+            self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+            io::Error::from(io::ErrorKind::BrokenPipe)
+        })
     }
 
     /// Resizes the terminal and tells the process (SIGWINCH). The pixel
@@ -375,11 +409,15 @@ impl Mux {
         if let Some(nonce) = &nonce {
             term.set_mark_nonce(nonce);
         }
+        let (input, pending) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        spawn_writer(pty.writer()?, pending, queued.clone())?;
         let pane = Arc::new(Pane {
             id,
             term: Arc::new(Mutex::new(term)),
             command: label,
-            writer: Mutex::new(pty.writer()?),
+            input,
+            queued,
             pty: Mutex::new(pty),
             exit: Mutex::new(None),
             visible: AtomicBool::new(false),
@@ -604,6 +642,17 @@ mod tests {
 
     /// Each integrated shell reports its directory with the pane's nonce,
     /// and odd names (`;`, `%`, spaces) arrive whole; output can't change it.
+    #[test]
+    fn writes_to_a_pane_that_isnt_reading_dont_block() {
+        let mux = Mux::new(Arc::new(Headless));
+        let pane = mux.spawn(SpawnOptions { command: Some("sleep 30".into()), ..Default::default() }).unwrap();
+        let start = Instant::now();
+        let chunk = vec![b'x'; 1 << 20];
+        let refused = (0..=MAX_QUEUED >> 20).any(|_| pane.write(&chunk).is_err());
+        assert!(refused && start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        mux.close(pane.id);
+    }
+
     #[test]
     fn shells_report_their_directory() {
         let dir = std::env::temp_dir().join(format!("mightty cwd;test %41 {}", std::process::id()));

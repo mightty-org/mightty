@@ -1081,7 +1081,7 @@ impl Term {
         }
         text.push(c);
         self.joining = c == '\u{200D}';
-        if self.graphemes.is_full() {
+        if self.graphemes.should_collect(&text) {
             let Self { graphemes, primary, alternate, scrollback, .. } = self;
             graphemes.collect(primary.iter().chain(alternate.iter()).chain(scrollback.iter()));
         }
@@ -1884,7 +1884,8 @@ impl Perform for Term {
             ([], b'Z') => self.tab_back(arg(0, 1)),
             ([], b'b') => {
                 if let Some(c) = self.last_char {
-                    for _ in 0..arg(0, 1) {
+                    // More than a screenful only overwrites itself.
+                    for _ in 0..arg(0, 1).min(self.cols * self.rows) {
                         self.input_char(c);
                     }
                 }

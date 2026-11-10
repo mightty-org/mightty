@@ -249,7 +249,9 @@ impl Server {
             let alive = self.call("pane.list", Value::Null)?.as_array().unwrap_or_default().iter().any(|p| {
                 p["id"].as_u64() == Some(id) && p["alive"].as_bool() == Some(true)
             });
-            if alive {
+            // A reconnect during the listing clears the default: in a new
+            // instance, the same id is another pane.
+            if alive && self.default_pane == Some(id) && self.may_use(id) {
                 args.insert("pane", id);
             }
         }

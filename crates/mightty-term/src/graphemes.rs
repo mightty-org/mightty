@@ -17,7 +17,13 @@ pub(crate) struct Graphemes {
     texts: Vec<Box<str>>,
     ids: HashMap<Box<str>, u32>,
     free: Vec<u32>,
+    /// New clusters to drop before collecting again, after a collection
+    /// that freed few ids: each scans every cell.
+    backoff: usize,
 }
+
+/// Collections are spread at least this many new clusters apart.
+const MIN_COLLECT_GAP: usize = IDS / 4;
 
 impl Graphemes {
     /// The cluster in `cell`, if it holds one.
@@ -56,8 +62,17 @@ impl Graphemes {
         char::from_u32(FIRST + id)
     }
 
-    pub(crate) fn is_full(&self) -> bool {
-        self.free.is_empty() && self.texts.len() == IDS
+    /// Whether `text` needs a new id and none is free, so it's time to
+    /// [`collect`](Self::collect). Clusters asked about while backing off are dropped.
+    pub(crate) fn should_collect(&mut self, text: &str) -> bool {
+        if !self.free.is_empty() || self.texts.len() < IDS || self.ids.contains_key(text) {
+            return false;
+        }
+        if self.backoff > 0 {
+            self.backoff -= 1;
+            return false;
+        }
+        true
     }
 
     /// Frees the ids no cell in `rows` uses.
@@ -71,6 +86,8 @@ impl Graphemes {
             }
         }
         self.free.clear();
+        let freed = live.iter().filter(|&&live| !live).count();
+        self.backoff = MIN_COLLECT_GAP.saturating_sub(freed);
         for (id, live) in live.into_iter().enumerate() {
             if !live {
                 let text = std::mem::take(&mut self.texts[id]);

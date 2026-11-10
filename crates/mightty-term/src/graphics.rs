@@ -29,6 +29,10 @@ const MAX_STORED: usize = 320 << 20;
 const MAX_TRANSMIT: usize = 400 << 20;
 /// The most cells a placement may ask to cover each way.
 const MAX_CELLS: u32 = 1000;
+/// Images and placements a screen keeps; the oldest go first past them.
+/// Lookups scan, and every placement is drawn each frame.
+const MAX_IMAGES: usize = 4096;
+const MAX_PLACEMENTS: usize = 4096;
 
 /// Pixels of a transmitted image: premultiplied RGBA, top row first.
 #[derive(Debug)]
@@ -250,10 +254,15 @@ impl Graphics {
         self.stored += image.data.pixels.len();
         self.images.push(image);
         // Over quota: the oldest images not on screen go first, then any.
-        while self.stored > MAX_STORED && self.images.len() > 1 {
-            let unplaced = self.images.iter().position(|i| !self.placements.iter().any(|p| p.image_id == i.id));
-            let id = self.images[unplaced.unwrap_or(0)].id;
-            self.remove_image(id);
+        let over = |g: &Self| g.stored > MAX_STORED || g.images.len() > MAX_IMAGES;
+        if over(self) {
+            let mut placed: HashSet<u32> = self.placements.iter().map(|p| p.image_id).collect();
+            while over(self) && self.images.len() > 1 {
+                let unplaced = self.images.iter().position(|i| !placed.contains(&i.id));
+                let id = self.images[unplaced.unwrap_or(0)].id;
+                placed.remove(&id);
+                self.remove_image(id);
+            }
         }
     }
 
@@ -403,12 +412,26 @@ fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// A PNG's width and height, from its header: the chunk that must come first.
+fn png_size(data: &[u8]) -> Option<(u32, u32)> {
+    if data.get(..8)? != b"\x89PNG\r\n\x1a\n" || data.get(12..16)? != b"IHDR" {
+        return None;
+    }
+    let be32 = |at: usize| Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    Some((be32(16)?, be32(20)?))
+}
+
 /// Pixels from transmitted bytes, as the command's format says.
 fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
     let raw = matches!(c.format, 24 | 32);
     // Sizes are checked before anything is inflated, which they bound.
     if raw && (!(1..=MAX_SIDE).contains(&c.width) || !(1..=MAX_SIDE).contains(&c.height)) {
         return Err("EINVAL:bad image size");
+    }
+    // Over the quota on its own, an image would push out every other and
+    // still not fit. A PNG's size is checked from its header, below.
+    if raw && c.width as usize * c.height as usize * 4 > MAX_STORED {
+        return Err("EFBIG:image too large");
     }
     if c.compressed {
         let limit = if raw { c.width as usize * c.height as usize * (c.format / 8) as usize } else { MAX_TRANSMIT };
@@ -431,6 +454,9 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
             (w, h, pixels)
         }
         100 => {
+            if png_size(&data).is_none_or(|(w, h)| w as usize * h as usize * 4 > MAX_STORED) {
+                return Err("EBADPNG:can't decode the PNG");
+            }
             let image = mightty_image::png::decode_limited(&data, MAX_SIDE).ok_or("EBADPNG:can't decode the PNG")?;
             (image.width, image.height, image.pixels)
         }
@@ -579,6 +605,9 @@ impl Term {
             p => p,
         };
         graphics.placements.retain(|p| !(p.image_id == id && p.id == placement_id));
+        if graphics.placements.len() >= MAX_PLACEMENTS {
+            graphics.placements.remove(0);
+        }
         graphics.placements.push(Placement {
             image,
             image_id: id,
@@ -741,6 +770,29 @@ mod tests {
         assert_eq!(send(&mut t, "a=T,f=32,s=1,v=10000,c=1000,i=3", &rgba(1, 10000)), "\x1b_Gi=3;OK\x1b\\");
         assert_eq!(t.image_placements()[0].cells, [1000, 1000]);
         assert!(start.elapsed().as_secs() < 2);
+        // One image can't take the whole quota, raw or PNG.
+        assert_eq!(send(&mut t, "a=t,f=32,s=10000,v=10000,i=4", b""), "\x1b_Gi=4;EFBIG:image too large\x1b\\");
+        let mut huge = png(1, 1);
+        huge[16..24].copy_from_slice(&[0, 0, 0x27, 0x10, 0, 0, 0x27, 0x10]);
+        assert_eq!(send(&mut t, "a=t,f=100,i=5", &huge), "\x1b_Gi=5;EBADPNG:can't decode the PNG\x1b\\");
+    }
+
+    #[test]
+    fn counts_are_capped() {
+        let mut t = term();
+        let start = std::time::Instant::now();
+        let pixel = rgba(1, 1);
+        for i in 1..=MAX_IMAGES as u32 + 10 {
+            send(&mut t, &format!("a=t,f=32,s=1,v=1,i={i},q=2"), &pixel);
+        }
+        for _ in 0..MAX_PLACEMENTS + 10 {
+            send(&mut t, "a=p,i=4100,C=1,q=2", b"");
+        }
+        let graphics = t.graphics_mut();
+        assert_eq!(graphics.images.len(), MAX_IMAGES);
+        assert!(graphics.image(1).is_none() && graphics.image(MAX_IMAGES as u32 + 10).is_some());
+        assert_eq!(graphics.placements.len(), MAX_PLACEMENTS);
+        assert!(start.elapsed().as_secs() < 5);
     }
 
     #[test]

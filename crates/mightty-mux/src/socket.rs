@@ -5,14 +5,14 @@
 
 use std::env;
 use std::fs::{self, DirBuilder};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::{process, thread};
 
 use mightty_json::{self as json, Value};
@@ -65,8 +65,19 @@ pub fn listen(mux: Arc<Mux>) -> io::Result<PathBuf> {
     let _ = mux.socket.set(path.clone());
     thread::Builder::new().name("control-socket".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
+            // Past the limit, connections are closed at once.
+            if CLIENTS.fetch_add(1, Ordering::Relaxed) >= MAX_CLIENTS {
+                CLIENTS.fetch_sub(1, Ordering::Relaxed);
+                continue;
+            }
             let mux = mux.clone();
-            let _ = thread::Builder::new().name("control-client".into()).spawn(move || serve(&mux, stream));
+            let spawned = thread::Builder::new().name("control-client".into()).spawn(move || {
+                serve(&mux, stream);
+                CLIENTS.fetch_sub(1, Ordering::Relaxed);
+            });
+            if spawned.is_err() {
+                CLIENTS.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     })?;
     Ok(path)
@@ -74,13 +85,21 @@ pub fn listen(mux: Arc<Mux>) -> io::Result<PathBuf> {
 
 /// Numbers connections, for event subscriptions.
 static CONNECTIONS: AtomicU64 = AtomicU64::new(1);
+/// Connections open now, and how many may be: each has two threads.
+static CLIENTS: AtomicUsize = AtomicUsize::new(0);
+const MAX_CLIENTS: usize = 64;
+/// The longest request accepted; longer ones close the connection.
+const MAX_LINE: usize = 32 << 20;
+/// Replies and events waiting for a client. Replies wait for room; events
+/// past it are dropped, so a client that stops reading can't hold up panes.
+const OUTBOX: usize = 1024;
 
 /// Replies and events go out through one writer thread, so a slow client
 /// holds up neither its own requests nor the panes emitting events.
 fn serve(mux: &Arc<Mux>, stream: UnixStream) {
     let Ok(read_half) = stream.try_clone() else { return };
     let connection = CONNECTIONS.fetch_add(1, Ordering::Relaxed);
-    let (to, outbox) = mpsc::channel::<Value>();
+    let (to, outbox) = mpsc::sync_channel::<Value>(OUTBOX);
     let mut writer = stream;
     let sent = thread::Builder::new().name("control-writer".into()).spawn(move || {
         for message in outbox {
@@ -93,12 +112,26 @@ fn serve(mux: &Arc<Mux>, stream: UnixStream) {
     if sent.is_err() {
         return;
     }
-    for line in BufReader::new(read_half).lines() {
-        let Ok(line) = line else { break };
+    let mut reader = BufReader::new(read_half);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if buf.len() > MAX_LINE {
+            let _ = to.send(error_reply(Value::Null, -32600, "request too long"));
+            break;
+        }
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            let _ = to.send(error_reply(Value::Null, -32700, "parse error: not UTF-8"));
+            continue;
+        };
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = respond(mux, &line, connection, &to)
+        if let Some(reply) = respond(mux, line, connection, &to)
             && to.send(reply).is_err()
         {
             break;
@@ -109,7 +142,7 @@ fn serve(mux: &Arc<Mux>, stream: UnixStream) {
 
 /// Handles one JSON-RPC message from `connection`, whose events go `to`.
 /// Returns `None` for notifications.
-fn respond(mux: &Arc<Mux>, line: &str, connection: u64, to: &Sender<Value>) -> Option<Value> {
+fn respond(mux: &Arc<Mux>, line: &str, connection: u64, to: &SyncSender<Value>) -> Option<Value> {
     let request = match json::parse(line) {
         Ok(request) => request,
         Err(e) => return Some(error_reply(Value::Null, -32700, &format!("parse error: {e}"))),
@@ -135,7 +168,7 @@ fn respond(mux: &Arc<Mux>, line: &str, connection: u64, to: &Sender<Value>) -> O
 }
 
 /// `events`: names, `prefix.*` or `*`; all of them when missing.
-fn subscribe(mux: &Mux, connection: u64, to: &Sender<Value>, params: &Value) -> Result<Value, RpcError> {
+fn subscribe(mux: &Mux, connection: u64, to: &SyncSender<Value>, params: &Value) -> Result<Value, RpcError> {
     let patterns = match params.get("events") {
         None | Some(Value::Null) => vec!["*".to_owned()],
         Some(events) => events
@@ -336,5 +369,26 @@ mod tests {
         assert!(ensure_private(&file).is_err());
 
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn long_requests_close_the_connection() {
+        let mux = Mux::new(Arc::new(Headless));
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        thread::spawn(move || serve(&mux, theirs));
+        let mut writer = ours.try_clone().unwrap();
+        // Unread past the limit, as a request would be that never ends.
+        thread::spawn(move || {
+            let chunk = vec![b'x'; 1 << 20];
+            for _ in 0..=MAX_LINE >> 20 {
+                if writer.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut reply = String::new();
+        BufReader::new(ours).read_line(&mut reply).unwrap();
+        assert!(reply.contains("request too long"), "{reply}");
     }
 }

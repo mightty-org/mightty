@@ -624,3 +624,22 @@ fn kitty_keyboard_flags() {
     t.feed(b"\x1b[>4u\x1bc");
     assert_eq!(t.key_flags(), 0);
 }
+
+#[test]
+fn output_cant_stall_the_terminal() {
+    let start = std::time::Instant::now();
+    let mut t = Term::new(80, 24);
+    // REP with the largest count repeats a screenful at most.
+    t.feed(b"x\x1b[65535b");
+    assert_eq!(t.cursor().0, 23);
+    // Every id in use: new clusters are dropped, without rescanning
+    // every cell for each.
+    let mut combining = Vec::new();
+    for i in 0..70_000u32 {
+        let base = char::from_u32(0x4E00 + i % 20_000).unwrap();
+        let mark = char::from_u32(0x300 + i / 20_000).unwrap();
+        combining.extend(format!("{base}{mark}").bytes());
+    }
+    t.feed(&combining);
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+}

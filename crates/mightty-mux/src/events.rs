@@ -15,7 +15,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 
 use mightty_json::Value;
 
@@ -43,7 +43,7 @@ struct Subscriber {
     connection: u64,
     /// Event names, or prefixes ending in `.*`.
     patterns: Vec<String>,
-    to: Sender<Value>,
+    to: SyncSender<Value>,
 }
 
 impl Subscriber {
@@ -58,7 +58,7 @@ impl Subscriber {
 impl Events {
     /// Sends `connection` the events `patterns` match (all of them for
     /// `*`), replacing what it asked for before. An unknown name is an error.
-    pub fn subscribe(&self, connection: u64, patterns: Vec<String>, to: Sender<Value>) -> Result<(), String> {
+    pub fn subscribe(&self, connection: u64, patterns: Vec<String>, to: SyncSender<Value>) -> Result<(), String> {
         for p in &patterns {
             let known = match p.strip_suffix('*') {
                 Some(prefix) => EVENTS.iter().any(|e| e.starts_with(prefix)),
@@ -98,8 +98,9 @@ impl Events {
             return;
         }
         let message = Value::object([("jsonrpc", "2.0".into()), ("method", event.into()), ("params", params())]);
-        // A connection that has gone away stops listening.
-        subscribers.retain(|s| !s.wants(event) || s.to.send(message.clone()).is_ok());
+        // A connection that has gone away stops listening; one that has
+        // fallen behind misses the event.
+        subscribers.retain(|s| !s.wants(event) || !matches!(s.to.try_send(message.clone()), Err(TrySendError::Disconnected(_))));
         self.any.store(!subscribers.is_empty(), Ordering::Relaxed);
     }
 }
