@@ -20,7 +20,7 @@ use graphemes::Graphemes;
 use graphics::Graphics;
 use links::Links;
 
-pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
+pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell, Underline};
 pub use graphics::{ImageData, PLACEHOLDER, Placement, PlaceholderRun};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
@@ -549,7 +549,15 @@ impl Term {
     pub fn resolve(&self, cell: Cell) -> StyledCell {
         let style = self.style(cell);
         let c = if cell.flags().contains(Flags::GRAPHEME) { self.graphemes.base(cell) } else { cell.c };
-        StyledCell { c, fg: style.fg, bg: style.bg, flags: style.flags | cell.flags(), link: style.link }
+        StyledCell {
+            c,
+            fg: style.fg,
+            bg: style.bg,
+            flags: style.attributes() | cell.flags(),
+            link: style.link,
+            underline: style.underline(),
+            underline_color: style.underline_color,
+        }
     }
 
     /// The target of OSC 8 hyperlink `id` ([`Style::link`]).
@@ -1650,15 +1658,28 @@ impl Term {
                 1 => attrs.flags.insert(Flags::BOLD),
                 2 => attrs.flags.insert(Flags::DIM),
                 3 => attrs.flags.insert(Flags::ITALIC),
-                4 if group.get(1) == Some(&0) => attrs.flags.remove(Flags::UNDERLINE),
-                4 | 21 => attrs.flags.insert(Flags::UNDERLINE),
+                4 => {
+                    let underline = match group.get(1) {
+                        None | Some(1) => Some(Underline::Single),
+                        Some(0) => None,
+                        Some(2) => Some(Underline::Double),
+                        Some(3) => Some(Underline::Curly),
+                        Some(4) => Some(Underline::Dotted),
+                        Some(5) => Some(Underline::Dashed),
+                        // Unknown: as it was.
+                        Some(_) => Some(attrs.underline()).filter(|_| attrs.flags.contains(Flags::UNDERLINE)),
+                    };
+                    attrs.set_underline(underline);
+                }
+                21 => attrs.set_underline(Some(Underline::Double)),
                 5 | 6 => attrs.flags.insert(Flags::BLINK),
                 7 => attrs.flags.insert(Flags::INVERSE),
                 8 => attrs.flags.insert(Flags::HIDDEN),
                 9 => attrs.flags.insert(Flags::STRIKE),
                 22 => attrs.flags.remove(Flags::BOLD | Flags::DIM),
                 23 => attrs.flags.remove(Flags::ITALIC),
-                24 => attrs.flags.remove(Flags::UNDERLINE),
+                24 => attrs.set_underline(None),
+                59 => attrs.underline_color = Color::Default,
                 25 => attrs.flags.remove(Flags::BLINK),
                 27 => attrs.flags.remove(Flags::INVERSE),
                 28 => attrs.flags.remove(Flags::HIDDEN),
@@ -1675,7 +1696,8 @@ impl Term {
                     match (n, color) {
                         (38, Some(c)) => attrs.fg = c,
                         (48, Some(c)) => attrs.bg = c,
-                        _ => {} // 58: underline colour, not stored yet
+                        (58, Some(c)) => attrs.underline_color = c,
+                        _ => {}
                     }
                 }
                 _ => {}

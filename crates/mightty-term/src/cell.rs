@@ -65,22 +65,70 @@ impl BitOr for Flags {
 pub struct Style {
     pub fg: Color,
     pub bg: Color,
-    /// Attributes only (`BOLD` ..= `STRIKE`); layout flags live on the cell.
+    /// Attributes only (`BOLD` ..= `STRIKE`), and in bits 12 to 14 the
+    /// [`underline`](Self::underline) style; layout flags live on the cell.
     pub flags: Flags,
     /// OSC 8 hyperlink, 0 for none: look it up with
     /// [`Term::link`](crate::Term::link).
     pub link: u16,
+    /// SGR 58; `Default` for the text's colour.
+    pub underline_color: Color,
+}
+
+/// Where a style keeps its underline style, as `Underline as u16 - 1`:
+/// in its flags, so a style stays 16 bytes.
+const UNDERLINE_SHIFT: u16 = 12;
+const UNDERLINE_BITS: u16 = 0b111 << UNDERLINE_SHIFT;
+
+/// Underline styles, as SGR 4:1 to 4:5 number them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Underline {
+    #[default]
+    Single = 1,
+    Double = 2,
+    Curly = 3,
+    Dotted = 4,
+    Dashed = 5,
 }
 
 impl Style {
+    /// How `UNDERLINE` is drawn (SGR 4:n); `Single` when it's off.
+    pub fn underline(self) -> Underline {
+        match (self.flags.0 & UNDERLINE_BITS) >> UNDERLINE_SHIFT {
+            1 => Underline::Double,
+            2 => Underline::Curly,
+            3 => Underline::Dotted,
+            4 => Underline::Dashed,
+            _ => Underline::Single,
+        }
+    }
+
+    /// Turns the underline on in `underline`'s style, or off for `None`.
+    pub fn set_underline(&mut self, underline: Option<Underline>) {
+        self.flags.0 &= !(UNDERLINE_BITS | Flags::UNDERLINE.0);
+        if let Some(underline) = underline {
+            self.flags.0 |= Flags::UNDERLINE.0 | (underline as u16 - 1) << UNDERLINE_SHIFT;
+        }
+    }
+
+    /// The flags a cell shows: without the underline style's bits.
+    pub(crate) fn attributes(self) -> Flags {
+        Flags(self.flags.0 & !UNDERLINE_BITS)
+    }
+
     /// Blank cells erased under this style keep only its background (BCE).
     pub fn erased(self) -> Self {
         Self { bg: self.bg, ..Self::default() }
     }
 
-    /// The style table's hash key: every field but `link` exactly, which
-    /// is only mixed in, so a linked style's key must be checked against
-    /// the style itself.
+    /// Whether [`key`](Self::key) tells this style from every other.
+    pub(crate) fn key_is_exact(self) -> bool {
+        self.link == 0 && self.underline_color == Color::Default
+    }
+
+    /// The style table's hash key: every field exactly but `link` and
+    /// `underline_color`, which are only mixed in, so a key that isn't
+    /// [exact](Self::key_is_exact) must be checked against the style itself.
     pub(crate) fn key(self) -> u64 {
         fn color(c: Color) -> u64 {
             match c {
@@ -89,8 +137,13 @@ impl Style {
                 Color::Rgb(r, g, b) => 2 << 24 | (r as u64) << 16 | (g as u64) << 8 | b as u64,
             }
         }
-        let key = color(self.fg) | color(self.bg) << 26 | (self.flags.bits() as u64 & 0xff) << 52;
-        if self.link == 0 { key } else { key ^ (self.link as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 << 63 }
+        let underline = ((self.flags.0 & UNDERLINE_BITS) >> UNDERLINE_SHIFT) as u64;
+        let key = color(self.fg) | color(self.bg) << 26 | (self.flags.bits() as u64 & 0xff) << 52 | underline << 60;
+        if self.key_is_exact() {
+            return key;
+        }
+        let mixed = (self.link as u64) << 26 | color(self.underline_color);
+        key ^ mixed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 << 63
     }
 }
 
@@ -166,11 +219,21 @@ pub struct StyledCell {
     pub flags: Flags,
     /// OSC 8 hyperlink, 0 for none.
     pub link: u16,
+    pub underline: Underline,
+    /// `Default` for the text's colour.
+    pub underline_color: Color,
 }
 
 impl StyledCell {
-    pub const BLANK: StyledCell =
-        StyledCell { c: ' ', fg: Color::Default, bg: Color::Default, flags: Flags::empty(), link: 0 };
+    pub const BLANK: StyledCell = StyledCell {
+        c: ' ',
+        fg: Color::Default,
+        bg: Color::Default,
+        flags: Flags::empty(),
+        link: 0,
+        underline: Underline::Single,
+        underline_color: Color::Default,
+    };
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

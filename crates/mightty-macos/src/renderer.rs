@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, char_width};
+use mightty_term::{Color, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
 
 use crate::config::{Adjust, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
@@ -139,6 +139,8 @@ enum GlyphKey {
     Icon(char),
     Cluster(Box<str>),
     Ligature(Box<[(u16, u16)]>, u16),
+    /// A curly underline (SGR 4:3) across this many cells.
+    Undercurl(u16),
 }
 
 /// A run of text and its style, as shaped.
@@ -248,6 +250,29 @@ impl Snapshot {
         self.images.extend(term.image_placements().iter().filter(|p| p.line + p.cells[1] as i64 > top && p.line < bottom).cloned());
         self.placeholders = term.placeholder_runs(self.first_line, rows);
     }
+}
+
+/// A cell-sized coverage mask holding one wave per `period` pixels below
+/// `baseline`, so waves join across cells.
+fn undercurl(period: u32, width: u32, height: u32, baseline: f32, thickness: f32) -> Vec<u8> {
+    let below = height as f32 - baseline;
+    let amplitude = ((below - thickness) / 2.0 - 0.5).clamp(1.0, 2.0 * thickness);
+    let centre = (baseline + thickness / 2.0 + amplitude).min(height as f32 - amplitude - thickness / 2.0);
+    let k = std::f32::consts::TAU / period as f32;
+    let mut mask = vec![0u8; (width * height) as usize];
+    for px in 0..width {
+        let x = px as f32 + 0.5;
+        let (curve, slope) = (centre - amplitude * (k * x).sin(), -amplitude * k * (k * x).cos());
+        // Distance to the curve across it, not straight down, so the
+        // line keeps its thickness where it's steep.
+        let stretch = (1.0 + slope * slope).sqrt();
+        for py in 0..height {
+            let distance = (py as f32 + 0.5 - curve).abs() / stretch;
+            let coverage = (thickness / 2.0 + 0.5 - distance).clamp(0.0, 1.0);
+            mask[(py * width + px) as usize] = (coverage * 255.0).round() as u8;
+        }
+    }
+    mask
 }
 
 /// The part of a placeholder run's image its cells show, placed from the
@@ -826,7 +851,35 @@ impl Renderer {
                     None => false,
                 };
                 if cell.flags.contains(Flags::UNDERLINE) || hovered {
-                    front.push(Quad::solid(x, y + baseline + thickness, w, thickness, fg));
+                    let mut color = match cell.underline_color {
+                        Color::Default => fg,
+                        other => rgba(theme.resolve(other, theme.foreground)),
+                    };
+                    color[3] = fg[3];
+                    let top = y + baseline + thickness;
+                    match if cell.flags.contains(Flags::UNDERLINE) { cell.underline } else { Underline::Single } {
+                        Underline::Single => front.push(Quad::solid(x, top, w, thickness, color)),
+                        Underline::Double => {
+                            // Kept inside the cell, where the next row can't cover it.
+                            let top = top.min(y + ch - 3.0 * thickness);
+                            front.push(Quad::solid(x, top, w, thickness, color));
+                            front.push(Quad::solid(x, top + 2.0 * thickness, w, thickness, color));
+                        }
+                        Underline::Dotted => {
+                            let mut dot = x;
+                            while dot + thickness <= x + w {
+                                front.push(Quad::solid(dot, top, thickness, thickness, color));
+                                dot += 2.0 * thickness;
+                            }
+                        }
+                        Underline::Dashed => front.push(Quad::solid(x + (w / 4.0).round(), top, (w / 2.0).round(), thickness, color)),
+                        Underline::Curly => {
+                            let cells = if wide { 2 } else { 1 };
+                            if let Some(g) = self.glyph(GlyphKey::Undercurl(cells), Style::default(), cells.into()) {
+                                front.push(Quad { pos: [x, y], size: g.size, uv: g.uv, uv_size: g.size, color, mode: MASK, _pad: [0; 3] });
+                            }
+                        }
+                    }
                 }
                 if cell.flags.contains(Flags::STRIKE) {
                     front.push(Quad::solid(x, y + (ch / 2.0).round(), w, thickness, fg));
@@ -963,6 +1016,15 @@ impl Renderer {
                 return glyph;
             }
             GlyphKey::Char(c) | GlyphKey::Icon(c) => *c,
+            GlyphKey::Undercurl(_) => {
+                let (cw, ch) = self.cell_size();
+                let thickness = (self.scale as f32).round().max(1.0);
+                let mask = undercurl(cw, cw * cells, ch, self.font.baseline as f32, thickness);
+                let raster = RasterGlyph { pixels: mask.iter().flat_map(|&a| [a; 4]).collect(), width: cw * cells, height: ch, color: false };
+                let glyph = Some(self.upload(&raster)?);
+                self.glyphs.insert((key, style), glyph);
+                return glyph;
+            }
             GlyphKey::Cluster(text) => {
                 // An atlas overflow returns early, uncached, as below.
                 let glyph = match self.font.rasterize_cluster(text, style, cells) {
@@ -1162,5 +1224,23 @@ mod tests {
         // A run in the margin beside a tall image shows nothing.
         let tall = PlaceholderRun { at: [0, 0], len: 1, cells: [4, 1], source: [0, 0, 1, 2], ..run(0) };
         assert!(placeholder_quad(&tall, 10.0, 20.0).is_none());
+    }
+
+    #[test]
+    fn undercurls_stay_in_the_cell_and_join() {
+        // The last has a pixel below the baseline: the wave rises over it.
+        for (w, h, baseline, t) in [(9, 18, 14.0, 1.0), (18, 36, 28.0, 2.0), (10, 15, 14.0, 1.0)] {
+            let mask = undercurl(w, w, h, baseline, t);
+            let ink = |x: u32| (0..h).map(|y| mask[(y * w + x) as usize] as u32).sum::<u32>();
+            assert!((0..w).all(|x| ink(x) > 0), "{w}x{h}");
+            if h as f32 - baseline >= 4.0 * t {
+                assert!(mask[..(baseline as u32 * w) as usize].iter().all(|&a| a == 0), "{w}x{h}: ink above the baseline");
+            }
+            // A wide cell's second half starts as the next cell would.
+            let column = |x: u32| (0..h).map(|y| mask[(y * w + x) as usize]).collect::<Vec<_>>();
+            let doubled = undercurl(w, 2 * w, h, baseline, t);
+            let column2 = |x: u32| (0..h).map(|y| doubled[(y * 2 * w + x) as usize]).collect::<Vec<_>>();
+            assert_eq!(column(0), column2(w));
+        }
     }
 }

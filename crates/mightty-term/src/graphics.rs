@@ -7,8 +7,7 @@
 //! file (`t=t`), as RGB, RGBA or PNG (`f=24/32/100`), zlib-compressed or
 //! not (`o=z`), in chunks (`m=1`); `a=t/T/p/q/d` with every delete
 //! specifier; source rectangles, cell offsets, cell sizes and z-index;
-//! Unicode placeholders (`U=1`), except placement ids in the underline
-//! colour. Not yet: shared memory (`t=s`), animation and relative
+//! Unicode placeholders (`U=1`). Not yet: shared memory (`t=s`), animation and relative
 //! placements, which are refused with an error.
 
 use std::collections::HashSet;
@@ -471,8 +470,9 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
 }
 
 /// U+10EEEE: a cell showing part of an image placed with `U=1`. Its
-/// foreground colour is the image id; diacritics after it give the row,
-/// the column and the id's top byte, each as an index into [`DIACRITICS`].
+/// foreground colour is the image id and its underline colour, if any,
+/// the placement id; diacritics after it give the row, the column and the
+/// image id's top byte, each as an index into [`DIACRITICS`].
 pub const PLACEHOLDER: char = '\u{10EEEE}';
 
 /// Combining characters standing for 0, 1, 2…, in code point order
@@ -537,8 +537,8 @@ impl Term {
         }
         for line in first..first + rows as u64 {
             let Some(row) = self.line(line) else { continue };
-            // The cell before, if a placeholder: its colour, image id, row and column.
-            let mut before: Option<(Color, u32, u32, u32)> = None;
+            // The cell before, if a placeholder: its colours, image id, row and column.
+            let mut before: Option<((Color, Color), u32, u32, u32)> = None;
             for (col, &cell) in row.cells.iter().enumerate() {
                 let text = match self.graphemes.get(cell) {
                     Some(text) => text,
@@ -553,21 +553,24 @@ impl Term {
                     before = None;
                     continue;
                 }
-                let fg = self.style(cell).fg;
-                let id = match fg {
+                let style = self.style(cell);
+                let colors = (style.fg, style.underline_color);
+                let number = |color| match color {
                     Color::Rgb(r, g, b) => u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b),
                     Color::Indexed(i) => i.into(),
                     Color::Default => 0,
                 };
+                let (id, placement) = (number(colors.0), number(colors.1));
                 // Left out, each continues the cell before: same row, next column.
-                let follows = before.filter(|b| b.0 == fg);
+                let follows = before.filter(|b| b.0 == colors);
                 let mut marks = chars.map(diacritic);
                 let (r, c, top) = (marks.next().flatten(), marks.next().flatten(), marks.next().flatten());
                 let r = r.or(follows.map(|b| b.2)).unwrap_or(0);
                 let c = c.or(follows.filter(|b| b.2 == r).map(|b| b.3 + 1)).unwrap_or(0);
                 let id = top.map_or(follows.map_or(id, |b| b.1), |top| id | top << 24);
-                before = Some((fg, id, r, c));
-                let Some(p) = graphics.virtuals.iter().find(|p| p.image_id == id) else { continue };
+                before = Some((colors, id, r, c));
+                let found = graphics.virtuals.iter().find(|p| p.image_id == id && (placement == 0 || p.id == placement));
+                let Some(p) = found else { continue };
                 if r >= p.cells[1] || c >= p.cells[0] {
                     continue;
                 }
@@ -934,6 +937,11 @@ mod tests {
         // Past the box, or another image: nothing.
         t.feed("\r\n\x1b[38;5;7m\u{10EEEE}\u{30E}\x1b[38;5;8m\u{10EEEE}".as_bytes());
         assert!(t.placeholder_runs(2, 1).is_empty());
+        // Two placements of one image, told apart by the underline colour.
+        send(&mut t, "a=p,U=1,c=1,r=1,i=7,p=3,q=2", b"");
+        t.feed("\r\n\x1b[38;5;7;58;5;3m\u{10EEEE}\x1b[58;5;9m\u{10EEEE}".as_bytes());
+        let runs = t.placeholder_runs(3, 1);
+        assert_eq!(runs.iter().map(|r| r.cells).collect::<Vec<_>>(), [[1, 1]]);
         // Every diacritic joins its placeholder.
         assert!(DIACRITICS.iter().all(|&d| crate::char_width(char::from_u32(d).unwrap()) == 0));
         // Deleting the image takes the virtual placement with it.

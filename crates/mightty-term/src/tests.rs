@@ -650,3 +650,29 @@ fn position_report_above_the_origin_region() {
     t.feed(b"\x1b[?6h\x1b7\x1b[5;10r\x1b8\x1b[6n");
     assert_eq!(t.take_responses(), b"\x1b[1;1R");
 }
+
+#[test]
+fn underline_styles_and_colours() {
+    let mut t = Term::new(20, 2);
+    t.feed(b"\x1b[4:3;58:2::255:0:0ma\x1b[58;5;4mb\x1b[59mc\x1b[21md\x1b[4:0me\x1b[4;4:9mf\x1b[24mg\x1b[4:5mh\x1b[0mi");
+    let cells: Vec<_> = (0..9).map(|c| t.resolve(t.lines()[0].cells[c])).collect();
+    let shape: Vec<_> = cells.iter().map(|c| (c.flags.contains(Flags::UNDERLINE), c.underline, c.underline_color)).collect();
+    use Underline::*;
+    assert_eq!(shape, [
+        (true, Curly, Color::Rgb(255, 0, 0)),
+        (true, Curly, Color::Indexed(4)),
+        (true, Curly, Color::Default),
+        (true, Double, Color::Default),
+        (false, Single, Color::Default),
+        // An unknown style keeps what was set.
+        (true, Single, Color::Default),
+        (false, Single, Color::Default),
+        (true, Dashed, Color::Default),
+        (false, Single, Color::Default),
+    ]);
+    // Off again, a cell is as blank as one never styled; the style
+    // bits don't show in a cell's flags.
+    assert_eq!(cells[1].flags.bits() & 0xF000, 0);
+    assert_eq!(std::mem::size_of::<Style>(), 16);
+    assert_eq!(t.lines()[0].cells[8].style(), StyleId::DEFAULT);
+}
