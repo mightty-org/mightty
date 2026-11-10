@@ -80,10 +80,15 @@ fn install() -> Option<&'static Path> {
         // Inside the checked private directory, so no one else can have
         // put anything here for the shell to run.
         let dir = private_dir().ok()?.join("shell");
+        // Each file is swapped in whole: another mightty's shell may be
+        // reading the old one now.
         for (path, text) in FILES {
             let path = dir.join(path);
             fs::create_dir_all(path.parent()?).ok()?;
-            fs::write(path, text).ok()?;
+            let mut temp = path.clone().into_os_string();
+            temp.push(format!(".{}.tmp", std::process::id()));
+            fs::write(&temp, text).ok()?;
+            fs::rename(&temp, path).ok()?;
         }
         Some(dir)
     })

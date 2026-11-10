@@ -1909,8 +1909,9 @@ impl Perform for Term {
             ([], b'n') => match arg(0, 0) {
                 5 => self.respond(b"\x1b[0n"),
                 6 => {
+                    // A restored cursor can sit above a region set since.
                     let base = if self.modes.origin { self.top } else { 0 };
-                    let reply = format!("\x1b[{};{}R", self.cursor.row - base + 1, self.cursor.col + 1);
+                    let reply = format!("\x1b[{};{}R", self.cursor.row.saturating_sub(base) + 1, self.cursor.col + 1);
                     self.respond(reply.as_bytes());
                 }
                 _ => {}

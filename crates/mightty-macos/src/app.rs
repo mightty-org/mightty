@@ -20,7 +20,7 @@ use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, St
 use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Behaviour, Config, ConfirmClose, OptionAsAlt, Permission, SaveState};
+use crate::config::{self, Behaviour, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
@@ -63,9 +63,6 @@ const MIN_PANE: f64 = 60.0;
 const NS_WINDOW_OCCLUSION_STATE_VISIBLE: usize = 1 << 1;
 /// Around a pane that needs the user, in points.
 const ATTENTION_BORDER: f64 = 2.0;
-/// Limits for ⌘+ and ⌘-, in points.
-const MIN_FONT_SIZE: f64 = 4.0;
-const MAX_FONT_SIZE: f64 = 200.0;
 /// How long a blinking cursor stays on, and off.
 const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 /// How often a selection dragged past the top or bottom edge scrolls.
@@ -1678,7 +1675,9 @@ impl Surface {
                     NSBeep();
                 }
                 let clipboard = term.take_clipboard_requests();
-                let mut title = if term.title().is_empty() { self.pane.command.clone() } else { term.title().to_owned() };
+                // A program can't set the attention marker itself.
+                let own = term.title().trim_start_matches(['●', ' ']);
+                let mut title = if own.is_empty() { self.pane.command.clone() } else { own.to_owned() };
                 if let Some(code) = self.pane.exit_status() {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
                 }

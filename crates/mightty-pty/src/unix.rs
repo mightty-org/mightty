@@ -5,6 +5,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::ptr;
+use std::sync::Mutex;
 
 use crate::WindowSize;
 
@@ -47,7 +48,18 @@ unsafe extern "C" {
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn setsid() -> c_int;
     fn tcgetpgrp(fd: c_int) -> c_int;
+    fn signal(signal: c_int, handler: usize) -> usize;
+    fn kill(pid: c_int, signal: c_int) -> c_int;
 }
+
+const SIG_DFL: usize = 0;
+const SIGHUP: c_int = 1;
+/// Signals 1 to 31 have the same numbers on macOS and Linux.
+const LAST_CLASSIC_SIGNAL: c_int = 31;
+
+/// Held from `openpty` until the descriptors are close-on-exec and the
+/// child has its copies, so no other pane's child inherits them.
+static SPAWNING: Mutex<()> = Mutex::new(());
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -66,6 +78,7 @@ impl Pty {
     pub fn spawn(mut cmd: Command, size: WindowSize) -> io::Result<Self> {
         let (mut master, mut slave) = (-1, -1);
         let ws = Winsize::from(size);
+        let _spawning = SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: out-pointers are valid; name and termios may be null.
         if unsafe { openpty(&mut master, &mut slave, ptr::null_mut(), ptr::null(), &ws) } != 0 {
             return Err(io::Error::last_os_error());
@@ -89,6 +102,13 @@ impl Pty {
             // SAFETY: plain syscalls on fd 0, which std has set to the slave.
             if unsafe { setsid() } < 0 || unsafe { ioctl(0, TIOCSCTTY, 0 as c_int) } < 0 {
                 return Err(io::Error::last_os_error());
+            }
+            // Signals we ignore (SIGUSR2 reloads the config) would stay
+            // ignored through exec; the shell starts with the defaults.
+            // Those that can't be changed just fail.
+            for n in 1..=LAST_CLASSIC_SIGNAL {
+                // SAFETY: signal is async-signal-safe.
+                unsafe { signal(n, SIG_DFL) };
             }
             Ok(())
         };
@@ -134,6 +154,19 @@ impl Pty {
 
     pub fn kill(&mut self) -> io::Result<()> {
         self.child.kill()
+    }
+
+    /// Sends SIGHUP, as closing a terminal does: shells pass it on to
+    /// their jobs, and programs can save before they exit.
+    pub fn hangup(&mut self) -> io::Result<()> {
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        // SAFETY: plain syscall; the child hasn't been reaped, so the pid is still its own.
+        if unsafe { kill(self.child.id() as c_int, SIGHUP) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// The process the terminal's foreground belongs to: the shell, or the
@@ -243,5 +276,30 @@ mod tests {
         }
         assert!(pty.wait().unwrap().success());
         assert_eq!(String::from_utf8_lossy(&out), "13 77\r\ntty\r\n");
+    }
+
+    #[test]
+    fn children_start_with_default_signals_and_hang_up() {
+        let mut cmd = Command::new("/bin/sh");
+        // A shell can't undo a signal ignored when it started, so with
+        // SIGUSR2 still ignored this would sleep.
+        cmd.args(["-c", "trap - USR2; kill -USR2 $$; sleep 5"]);
+        // SAFETY: ignored as the app does; restored below.
+        let before = unsafe { signal(31, 1) };
+        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        // SAFETY: as above.
+        unsafe { signal(31, before) };
+        // Killed by its own SIGUSR2, not still sleeping.
+        let status = pty.wait().unwrap();
+        assert!(status.code().is_none(), "{status:?}");
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 5"]);
+        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        let start = std::time::Instant::now();
+        pty.hangup().unwrap();
+        assert!(pty.wait().unwrap().code().is_none());
+        assert!(start.elapsed().as_secs() < 2);
+        pty.hangup().unwrap();
     }
 }

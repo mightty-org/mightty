@@ -136,8 +136,15 @@ pub extern "C" fn mightty_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
 }
 
+/// The most columns or rows a terminal may have: past this, allocating
+/// the grid could abort the process, which no error code can report.
+const MAX_SIDE: u32 = 10_000;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn mightty_term_new(cols: u32, rows: u32, scrollback_lines: u32) -> *mut mightty_term {
+    if cols > MAX_SIDE || rows > MAX_SIDE {
+        return ptr::null_mut();
+    }
     catch_unwind(|| {
         let term = Term::with_scrollback(cols as usize, rows as usize, scrollback_lines as usize);
         Box::into_raw(Box::new(mightty_term(term)))
@@ -181,6 +188,9 @@ pub unsafe extern "C" fn mightty_term_resize(term: *mut mightty_term, cols: u32,
     guard(|| {
         // SAFETY: caller contract.
         let Some(term) = (unsafe { term_mut(term) }) else { return MIGHTTY_ERR_NULL };
+        if cols > MAX_SIDE || rows > MAX_SIDE {
+            return MIGHTTY_ERR_INVALID;
+        }
         term.resize(cols as usize, rows as usize);
         MIGHTTY_OK
     })
@@ -425,4 +435,22 @@ pub unsafe extern "C" fn mightty_term_marks(
         // SAFETY: caller contract.
         unsafe { copy_out(&marks, out, cap, len) }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_are_bounded() {
+        assert!(mightty_term_new(u32::MAX, 24, 0).is_null());
+        let term = mightty_term_new(0, 0, u32::MAX);
+        assert!(!term.is_null());
+        // SAFETY: a live handle, freed once.
+        unsafe {
+            assert_eq!(mightty_term_resize(term, 80, u32::MAX), MIGHTTY_ERR_INVALID);
+            assert_eq!(mightty_term_resize(term, MAX_SIDE, 1), MIGHTTY_OK);
+            mightty_term_free(term);
+        }
+    }
 }

@@ -643,3 +643,10 @@ fn output_cant_stall_the_terminal() {
     t.feed(&combining);
     assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
 }
+
+#[test]
+fn position_report_above_the_origin_region() {
+    let mut t = Term::new(80, 24);
+    t.feed(b"\x1b[?6h\x1b7\x1b[5;10r\x1b8\x1b[6n");
+    assert_eq!(t.take_responses(), b"\x1b[1;1R");
+}

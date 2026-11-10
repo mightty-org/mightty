@@ -452,17 +452,28 @@ impl Mux {
         self.panes.lock().unwrap().values().cloned().collect()
     }
 
-    /// Kills the pane's process and forgets the pane. False if unknown.
+    /// Hangs up the pane's process and forgets the pane. False if unknown.
+    /// A process still running [`HANGUP_GRACE`] later is killed.
     pub fn close(&self, id: PaneId) -> bool {
         let Some(pane) = self.panes.lock().unwrap().remove(&id) else { return false };
         if pane.is_alive() {
-            let _ = pane.pty.lock().unwrap().kill();
+            let _ = pane.pty.lock().unwrap().hangup();
+            let pane = pane.clone();
+            let _ = thread::Builder::new().name("pane-hangup".into()).spawn(move || {
+                thread::sleep(HANGUP_GRACE);
+                if pane.is_alive() {
+                    let _ = pane.pty.lock().unwrap().kill();
+                }
+            });
         }
         self.events.emit("pane.closed", || Value::object([("pane", id.into())]));
         self.host.pane_closed(id);
         true
     }
 }
+
+/// How long a closed pane's process has to exit before it's killed.
+const HANGUP_GRACE: Duration = Duration::from_secs(3);
 
 /// How often statuses are re-derived: agents going quiet produce no event.
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);

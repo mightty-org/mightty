@@ -21,6 +21,32 @@ use crate::{EVENTS, Mux, RpcError, rpc};
 
 unsafe extern "C" {
     fn getuid() -> u32;
+    #[cfg(target_os = "macos")]
+    fn getpeereid(fd: i32, uid: *mut u32, gid: *mut u32) -> i32;
+    #[cfg(target_os = "linux")]
+    fn getsockopt(fd: i32, level: i32, name: i32, value: *mut std::ffi::c_void, len: *mut u32) -> i32;
+}
+
+/// The user on the other end of `stream`.
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: a valid socket and out-pointers.
+    (unsafe { getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0).then_some(uid)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    const SOL_SOCKET: i32 = 1;
+    const SO_PEERCRED: i32 = 17;
+    // struct ucred: pid, uid, gid.
+    let mut cred = [0u32; 3];
+    let mut len = size_of_val(&cred) as u32;
+    // SAFETY: a valid socket; `cred` is writable for `len` bytes.
+    let ok = unsafe { getsockopt(stream.as_raw_fd(), SOL_SOCKET, SO_PEERCRED, cred.as_mut_ptr().cast(), &mut len) } == 0;
+    ok.then_some(cred[1])
 }
 
 /// Per-user directory for sockets and shell-integration files.
@@ -65,6 +91,12 @@ pub fn listen(mux: Arc<Mux>) -> io::Result<PathBuf> {
     let _ = mux.socket.set(path.clone());
     thread::Builder::new().name("control-socket".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
+            // The directory keeps others out already; this holds even if
+            // its permissions are loosened.
+            // SAFETY: getuid cannot fail.
+            if peer_uid(&stream) != Some(unsafe { getuid() }) {
+                continue;
+            }
             // Past the limit, connections are closed at once.
             if CLIENTS.fetch_add(1, Ordering::Relaxed) >= MAX_CLIENTS {
                 CLIENTS.fetch_sub(1, Ordering::Relaxed);
@@ -369,6 +401,13 @@ mod tests {
         assert!(ensure_private(&file).is_err());
 
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn peers_are_this_user() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        // SAFETY: getuid cannot fail.
+        assert_eq!(peer_uid(&ours), Some(unsafe { getuid() }));
     }
 
     #[test]

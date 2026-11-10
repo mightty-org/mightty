@@ -24,7 +24,8 @@ wait_for() {
 for round in $(seq 1 "$rounds"); do
   echo "round $round/$rounds"
   part=$root/$out/mightty.part
-  pane=$("$mightty" ctl spawn -- "$root/bench/run.sh $root/bench/data $part $runs")
+  # One string, which the pane's shell splits: quoted for paths with spaces.
+  pane=$("$mightty" ctl spawn -- "'$root/bench/run.sh' '$root/bench/data' '$part' $runs")
   wait_for "$part"
   "$mightty" ctl close "$pane" >/dev/null
   cat "$part" >> "$out/mightty.tsv" && rm "$part"

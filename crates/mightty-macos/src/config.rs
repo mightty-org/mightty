@@ -245,14 +245,21 @@ pub enum Adjust {
     Percent(f64),
 }
 
+/// Font sizes allowed, in points.
+pub const MIN_FONT_SIZE: f64 = 4.0;
+pub const MAX_FONT_SIZE: f64 = 200.0;
+/// The largest cell side an adjustment can make, in pixels: glyph tiles
+/// are several cells, four bytes a pixel.
+const MAX_CELL_PIXELS: f64 = 1024.0;
+
 impl Adjust {
-    /// `pixels` adjusted, at `scale` pixels per point; at least 1.
+    /// `pixels` adjusted, at `scale` pixels per point; 1 to [`MAX_CELL_PIXELS`].
     pub fn apply(self, pixels: u32, scale: f64) -> u32 {
         let adjusted = match self {
             Self::Points(p) => pixels as f64 + p * scale,
             Self::Percent(p) => pixels as f64 * (1.0 + p / 100.0),
         };
-        adjusted.round().max(1.0) as u32
+        adjusted.round().clamp(1.0, MAX_CELL_PIXELS) as u32
     }
 
     fn parse(v: &str) -> Result<Self, String> {
@@ -492,7 +499,8 @@ const SETTINGS: &[Setting] = &[
         help: "font size",
         color: false,
         set: |c, v| {
-            c.font_size = v.parse().ok().filter(|&p: &f64| p.is_finite() && p > 0.0).ok_or("expects a positive number")?;
+            let range = MIN_FONT_SIZE..=MAX_FONT_SIZE;
+            c.font_size = v.parse().ok().filter(|p| range.contains(p)).ok_or(format!("expects {MIN_FONT_SIZE} to {MAX_FONT_SIZE}"))?;
             Ok(())
         },
         get: |c| Some(c.font_size.to_string()),
@@ -1348,6 +1356,7 @@ mod tests {
             "--window-width=0",
             "--window-width=x",
             "--font-size=-1",
+            "--font-size=1000",
             "--window-vsync=no",
             "--macos-option-as-alt=both",
             "--nope=1",

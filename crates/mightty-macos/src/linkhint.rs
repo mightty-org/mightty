@@ -83,9 +83,23 @@ pub fn describe(uri: &str) -> String {
             .collect::<String>()
     };
     match host(uri).filter(|h| !h.is_empty()) {
-        Some(host) => format!("{}  —  {}", visible(host, true), visible(uri, false)),
+        Some(host) => format!("{}  —  {}", tail(&visible(host, true), MAX_HOST_CHARS), visible(uri, false)),
         None => visible(uri, false),
     }
+}
+
+/// The most of a host the hint shows. A long one is cut at the front: a
+/// host is read from the end, and a cut at the window's edge would leave
+/// `google.com.aaaa…` with `.evil.com` out of sight.
+const MAX_HOST_CHARS: usize = 48;
+
+fn tail(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().skip(count - (max - 1)).collect();
+    format!("…{kept}")
 }
 
 /// The host a URL with an authority goes to: past any `user@` (so
@@ -135,5 +149,10 @@ mod tests {
         // Look-alike letters, variation selectors and tag characters.
         assert_eq!(describe("https://\u{0430}pple.com"), "<U+0430>pple.com  —  https://\u{0430}pple.com");
         assert_eq!(describe("https://x.com/a\u{FE0F}\u{E0041}"), "x.com  —  https://x.com/a<U+FE0F><U+E0041>");
+        // A long host keeps its end, where the real domain is.
+        let long = format!("https://google.com.{}.evil.com/", "a".repeat(100));
+        let shown = describe(&long);
+        assert!(shown.starts_with("…") && shown.split("  —  ").next().unwrap().ends_with("aaa.evil.com"), "{shown}");
+        assert_eq!(shown.split("  —  ").next().unwrap().chars().count(), MAX_HOST_CHARS);
     }
 }

@@ -127,7 +127,8 @@ const char *mightty_version(void);
 
 /* ---- Lifecycle ---- */
 
-/* cols and rows are clamped to at least 1. Returns NULL on failure. */
+/* cols and rows are clamped to at least 1; more than 10000 is an error.
+ * Returns NULL on failure. */
 mightty_term *mightty_term_new(uint32_t cols, uint32_t rows, uint32_t scrollback_lines);
 /* Ignores NULL. */
 void mightty_term_free(mightty_term *term);
@@ -136,6 +137,7 @@ void mightty_term_free(mightty_term *term);
 
 /* Feeds program output. Partial escape sequences and UTF-8 carry over between calls. */
 mightty_result mightty_term_feed(mightty_term *term, const uint8_t *bytes, size_t len);
+/* As mightty_term_new: more than 10000 cols or rows is MIGHTTY_ERR_INVALID. */
 mightty_result mightty_term_resize(mightty_term *term, uint32_t cols, uint32_t rows);
 
 /* ---- Output ---- */
