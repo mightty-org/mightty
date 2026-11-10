@@ -179,7 +179,8 @@ fn write_string(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
             '\n' => f.write_str("\\n")?,
             '\r' => f.write_str("\\r")?,
             '\t' => f.write_str("\\t")?,
-            c if (c as u32) < 0x20 => write!(f, "\\u{:04x}", c as u32)?,
+            // DEL and C1 too, so printed JSON can't carry terminal controls.
+            c if c.is_control() => write!(f, "\\u{:04x}", c as u32)?,
             c => f.write_char(c)?,
         }
     }
@@ -437,6 +438,7 @@ mod tests {
         let v = parse(r#""é 😀 中""#).unwrap();
         assert_eq!(v.as_str(), Some("é 😀 中"));
         assert_eq!(Value::from("\u{1}").to_string(), r#""\u0001""#);
+        assert_eq!(Value::from("\u{7f}\u{9b}é").to_string(), r#""\u007f\u009bé""#);
     }
 
     #[test]

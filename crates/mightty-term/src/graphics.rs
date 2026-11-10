@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -328,6 +328,15 @@ const O_NOFOLLOW: i32 = 0x0100;
 #[cfg(not(target_os = "linux"))]
 const O_NONBLOCK: i32 = 0x0004;
 
+/// The user this process runs as.
+fn current_uid() -> u32 {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: getuid takes nothing and always succeeds.
+    unsafe { getuid() }
+}
+
 /// Every failure to read a file, or an image from it: output can come
 /// from other machines (ssh), and the reply mustn't tell them whether a
 /// file exists, how big it is or what it holds.
@@ -355,23 +364,30 @@ fn temp_file(path: &Path) -> Option<PathBuf> {
 /// /dev; temp files only as `temp_file` allows, never through a symlink,
 /// and deleted once read. Errors say nothing (see `FILE_ERROR`).
 fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
-    let mut path = PathBuf::from(std::str::from_utf8(path).ok()?);
-    let temp = c.medium == b't';
-    if !path.is_absolute() || ["/proc", "/sys", "/dev"].iter().any(|dir| path.starts_with(dir)) {
+    let path = PathBuf::from(std::str::from_utf8(path).ok()?);
+    if !path.is_absolute() {
         return None;
     }
+    let temp = c.medium == b't';
     let mut options = fs::OpenOptions::new();
     options.read(true);
-    if temp {
-        path = temp_file(&path)?;
+    let path = if temp {
         options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+        temp_file(&path)?
     } else {
+        // Resolved first, so a symlink can't lead into them.
+        let path = fs::canonicalize(&path).ok()?;
+        if ["/proc", "/sys", "/dev"].iter().any(|dir| path.starts_with(dir)) {
+            return None;
+        }
         options.custom_flags(O_NONBLOCK);
-    }
+        path
+    };
     let mut file = options.open(&path).ok()?;
-    // Checked on what was opened, not the path, which could change meanwhile.
+    // Checked on what was opened, not the path, which could change meanwhile;
+    // a temp file must be the user's, not one planted in a shared /tmp.
     let meta = file.metadata().ok()?;
-    if !meta.is_file() {
+    if !meta.is_file() || (temp && meta.uid() != current_uid()) {
         return None;
     }
     file.seek(SeekFrom::Start(c.read_offset)).ok()?;
@@ -470,10 +486,12 @@ impl Term {
             b't' | b'T' | b'q' => {
                 let pixels = match c.medium {
                     b'd' => decode(&c, data),
-                    // Any file can be named, so only as a PNG, uncompressed:
-                    // raw pixels, offsets and zlib would tell a remote
+                    // Any file can be named, so only as a whole, uncompressed
+                    // PNG: raw pixels, offsets and zlib would tell a remote
                     // program about the file by whether they decode.
-                    b'f' if c.format != 100 || c.compressed => Err("EINVAL:a file must be sent as an uncompressed PNG"),
+                    b'f' if c.format != 100 || c.compressed || c.read_offset != 0 || c.read_size != 0 => {
+                        Err("EINVAL:a file must be sent as a whole, uncompressed PNG")
+                    }
                     b'f' | b't' => read_file(&c, &data).and_then(|data| decode(&c, data).ok()).ok_or(FILE_ERROR),
                     b's' => Err("EINVAL:shared memory isn't supported"),
                     _ => Err("EINVAL:unknown transmission medium"),
@@ -755,15 +773,18 @@ mod tests {
         let dir = std::env::temp_dir();
         let error = |id: u32| format!("\x1b_Gi={id};{FILE_ERROR}\x1b\\");
         let plain = dir.join(format!("mightty-graphics-test-{}.png", std::process::id()));
-        fs::write(&plain, [vec![0; 8], png(2, 2)].concat()).unwrap();
+        fs::write(&plain, png(2, 2)).unwrap();
         let mut t = term();
         let path = plain.to_str().unwrap().as_bytes();
-        assert_eq!(send(&mut t, "a=T,t=f,f=100,O=8,i=1", path), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(send(&mut t, "a=T,t=f,f=100,i=1", path), "\x1b_Gi=1;OK\x1b\\");
         assert_eq!(t.image_placements()[0].image.pixels, [0, 255, 0, 255].repeat(4));
         // Any file can be named, so only as a PNG: raw pixels or zlib would
         // tell a remote program what the file holds by whether they decode.
-        assert_eq!(send(&mut t, "a=t,t=f,f=32,s=1,v=1,i=8", path), "\x1b_Gi=8;EINVAL:a file must be sent as an uncompressed PNG\x1b\\");
-        assert_eq!(send(&mut t, "a=t,t=f,f=100,o=z,i=8", path), "\x1b_Gi=8;EINVAL:a file must be sent as an uncompressed PNG\x1b\\");
+        let refused = "\x1b_Gi=8;EINVAL:a file must be sent as a whole, uncompressed PNG\x1b\\";
+        assert_eq!(send(&mut t, "a=t,t=f,f=32,s=1,v=1,i=8", path), refused);
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,o=z,i=8", path), refused);
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,O=8,i=8", path), refused);
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,S=8,i=8", path), refused);
         // A temp file must be named for the protocol, and is deleted once read.
         assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,O=8,i=2", path), error(2));
         assert!(plain.exists());
@@ -786,8 +807,13 @@ mod tests {
         assert!(outside.exists());
         fs::remove_file(&link).unwrap();
         fs::remove_file(&outside).unwrap();
-        // Missing, not a file, not an image: the same answer.
+        // Missing, not a file, not an image, a link into /dev: the same answer.
         assert_eq!(send(&mut t, "a=t,t=f,f=100,i=4", b"/dev/null"), error(4));
+        let to_dev = dir.join(format!("mightty-graphics-dev-{}", std::process::id()));
+        let _ = fs::remove_file(&to_dev);
+        std::os::unix::fs::symlink("/dev/zero", &to_dev).unwrap();
+        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=4", to_dev.to_str().unwrap().as_bytes()), error(4));
+        fs::remove_file(&to_dev).unwrap();
         assert_eq!(send(&mut t, "a=t,t=f,f=100,i=5", b"/nonexistent/x"), error(5));
         assert_eq!(send(&mut t, "a=t,t=f,f=100,i=5", b"/etc/hosts"), error(5));
         // A pipe with no writer is refused at once, not waited on.

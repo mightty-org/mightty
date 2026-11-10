@@ -89,7 +89,8 @@ cursor-color = #ff79c6
 | `cursor-style-blink` | as the program asks | `true` or `false`; typing keeps it on for a moment |
 | `adjust-cell-width`, `adjust-cell-height` | `0` | Wider or taller cells than the font gives: points (`1`, `-1`) or a percentage (`10%`); taller cells space lines out |
 | `unfocused-split-opacity` | `0.7` | Panes keys aren't going to are dimmed to this, 0.15 to 1 |
-| `clipboard-write`, `clipboard-read` | `allow`, `ask` | Programs setting and reading the clipboard through OSC 52, as vim, tmux and ssh sessions do to copy: `allow`, `ask` (a sheet with the text, Allow and Deny) or `deny`, as in Ghostty |
+| `clipboard-write`, `clipboard-read` | `allow`, `ask` | Programs setting and reading the clipboard through OSC 52, as vim, tmux and ssh sessions do to copy: `allow`, `ask` (a sheet with the text, control characters shown, Deny first so Return refuses) or `deny`, as in Ghostty. Once you deny a pane, it isn't asked again for a minute |
+| `clipboard-paste-protection` | `true` | Ask before pasting text that would run at once (line breaks into a shell not using bracketed paste) or act as keys (control characters): a program may have set the clipboard |
 | `copy-on-select` | `false` | Copy text to the clipboard as soon as it's selected (a drag, or a double- or triple-click) |
 | `mouse-hide-while-typing` | `false` | Hide the pointer while typing, until the mouse moves |
 | `mouse-scroll-multiplier` | `1` | Scroll this many times as far as the wheel or trackpad says |
@@ -204,7 +205,12 @@ agent opens go in a split beside the agent's own pane, further ones stacking
 below the first, without taking the keyboard from you (`placement` asks for
 a tab or window instead), and stay open after they exit. `list_panes` says
 which window and tab each pane is in and which one you're focused on. With
-no mightty running, `mightty mcp` hosts headless panes itself.
+no mightty running, `mightty mcp` hosts headless panes itself. An agent sees
+and drives only its own pane and the panes it opens, not your other sessions
+(`mightty mcp --all-panes` lifts that); tools take only the arguments they
+declare. This keeps an agent, or text on screen trying to steer it, to its
+own work; it isn't a sandbox, since an agent that runs commands can reach
+the control socket like any program of yours.
 
 **Agents that need you** are easy to miss in a background tab. mightty
 recognizes agents it runs (`claude`, `codex`, `gemini`, `aider`, `opencode`,
@@ -226,9 +232,14 @@ needs a permission, add a notification hook to `~/.claude/settings.json`:
 **Shell integration** (zsh, bash 3.2 and later, fish 3.0 and later) loads
 automatically in every pane, with no dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
 OSC 633;E, OSC 7). That's what lets `run`, `commands` and `run_command`
-return exact output and exit codes. Marks carry a random per-shell nonce
-that child processes never see, and mightty ignores marks without it, so a
-program's output can't fake a finished command. Each shell is pointed at a
+return exact output and exit codes. Marks and the directory carry a random
+per-pane nonce that child processes never see, and mightty ignores them
+without it, so a program's output can't fake a finished command or choose
+where new tabs start; panes without the integration (`ssh` run directly,
+other shells) get a nonce too, so they take no marks at all. Titles and
+command lines lose control characters, and `mightty ctl` prints pane text
+with control characters made visible, so output can't smuggle escape
+sequences through them. Each shell is pointed at a
 small bootstrap that runs your startup files as usual, then loads the
 integration: zsh through `ZDOTDIR`, bash through `--rcfile` (it then reads
 the login files, `/etc/profile` and the first of `~/.bash_profile`,

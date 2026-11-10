@@ -33,12 +33,14 @@ end
 set -g _mightty_running 0
 
 function _mightty_prompt --on-event fish_prompt
-    printf '\e]7;file://%s%s\a' $hostname (string replace -a ' ' '%20' -- $PWD)
+    # Percent-encoded so `;` can't split it; with the nonce, like marks.
+    set -l dir (string replace -a '%' '%25' -- $PWD | string replace -a ';' '%3B' | string replace -a ' ' '%20')
+    printf '\e]7;file://%s%s%s\a' $hostname "$dir" "$_mightty_mark"
     printf '\e]133;A%s\a' $_mightty_mark
 end
 
 function _mightty_preexec --on-event fish_preexec
-    set -l cmd (string join \n -- $argv[1] | string replace -a '\\' '\\\\' | string replace -a ';' '\\x3b' | string join '\\x0a')
+    set -l cmd (string join \n -- $argv[1] | string replace -a '\\' '\\\\' | string replace -a ';' '\\x3b' | string replace -a \a '\\x07' | string replace -a \e '\\x1b' | string replace -a \x18 '\\x18' | string replace -a \x1a '\\x1a' | string join '\\x0a')
     printf '\e]633;E;%s%s\a' "$cmd" $_mightty_mark
     printf '\e]133;C%s\a' $_mightty_mark
     set -g _mightty_running 1

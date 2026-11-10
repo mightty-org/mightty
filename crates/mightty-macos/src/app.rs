@@ -107,6 +107,8 @@ struct Surface {
     scroll_remainder: f64,
     title: String,
     selection: Option<Selection>,
+    /// When the user last denied a program here the clipboard.
+    clipboard_refused: Option<Instant>,
     /// The mouse button that started `selection` is still down.
     dragging: bool,
     /// While dragging past the top (> 0) or bottom edge: lines to scroll
@@ -355,6 +357,8 @@ thread_local! {
     static BEHAVIOUR: Cell<Behaviour> = Cell::new(Behaviour::default());
     /// A clipboard request waiting on a sheet's answer, and its pane.
     static ASKING: RefCell<Option<(Id, ClipboardRequest)>> = const { RefCell::new(None) };
+    /// A paste waiting on a sheet's answer: its pane and bytes.
+    static PASTING: RefCell<Option<(Id, Vec<u8>)>> = const { RefCell::new(None) };
 }
 
 thread_local! {
@@ -694,6 +698,7 @@ impl App {
                 scroll_remainder: 0.0,
                 title: String::new(),
                 selection: None,
+                clipboard_refused: None,
                 dragging: false,
                 autoscroll: 0,
                 next_frame: Instant::now(),
@@ -1501,6 +1506,10 @@ fn show_problems(title: &str, problems: &[String]) {
 
 /// NSAlertFirstButtonReturn: "Close".
 const ALERT_FIRST_BUTTON: isize = 1000;
+const ALERT_SECOND_BUTTON: isize = 1001;
+/// After the user denies a program the clipboard, its pane's next requests
+/// are refused without asking for this long, so it can't keep asking.
+const CLIPBOARD_REFUSED_FOR: Duration = Duration::from_secs(60);
 
 /// An alert asking `title`, explained by `detail`, with Close and Cancel.
 unsafe fn close_alert(title: &str, detail: &str) -> Id {
@@ -1549,9 +1558,13 @@ fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str
     static ANSWERED: Block = Block::with_response(answered);
     unsafe extern "C" fn answered(_: *const Block, response: isize) {
         let Some((view, request)) = ASKING.with_borrow_mut(Option::take) else { return };
-        if response == ALERT_FIRST_BUTTON {
-            with_surface(view, |s| s.do_clipboard(request));
-        }
+        with_surface(view, |s| {
+            if response == ALERT_SECOND_BUTTON {
+                s.do_clipboard(request);
+            } else {
+                s.clipboard_refused = Some(Instant::now());
+            }
+        });
     }
     // SAFETY: main thread; documented signatures; the handler is a global block.
     unsafe {
@@ -1563,8 +1576,42 @@ fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring(question));
         call!(alert, c"setInformativeText:", nsstring(detail));
-        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Allow"));
+        // Deny first, so Return (typed as the sheet appears) refuses.
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Deny"));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Allow"));
+        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+    }
+}
+
+/// Asks on a sheet over `window` before pasting `bytes` into the pane
+/// `view`, showing `text` (see `keys::paste_is_risky`).
+fn ask_paste(window: Id, view: Id, text: &str, bytes: Vec<u8>) {
+    static ANSWERED: Block = Block::with_response(answered);
+    unsafe extern "C" fn answered(_: *const Block, response: isize) {
+        let Some((view, bytes)) = PASTING.with_borrow_mut(Option::take) else { return };
+        if response == ALERT_SECOND_BUTTON {
+            with_surface(view, |s| s.write(&bytes));
+        }
+    }
+    // SAFETY: main thread; documented signatures; the handler is a global block.
+    unsafe {
+        let sheet: Id = msg!(window, c"attachedSheet");
+        if !sheet.is_null() || PASTING.with_borrow(Option::is_some) {
+            return;
+        }
+        PASTING.with_borrow_mut(|pasting| *pasting = Some((view, bytes)));
+        let lines = text.lines().count();
+        let question = if lines > 1 { format!("Paste {lines} lines?") } else { "Paste text with control characters?".to_owned() };
+        let detail = format!(
+            "Pasted into a shell, each line may run as a command, and control characters act as keys.\n\n{}",
+            keys::visible_controls(text, 300)
+        );
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(alert, c"setMessageText:", nsstring(&question));
+        call!(alert, c"setInformativeText:", nsstring(&detail));
+        // Cancel first, so Return doesn't paste.
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Paste"));
         call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
     }
 }
@@ -1956,12 +2003,13 @@ impl Surface {
                 "A program in this pane is asking for what you last copied.".to_owned(),
             ),
             ClipboardRequest::Write(text) => {
-                let preview: String = text.chars().take(200).collect();
-                let more = if text.chars().count() > 200 { "…" } else { "" };
-                (behaviour.clipboard_write, "Let this program copy to the clipboard?", format!("It would copy:\n\n{preview}{more}"))
+                let preview = keys::visible_controls(text, 200);
+                (behaviour.clipboard_write, "Let this program copy to the clipboard?", format!("It would copy:\n\n{preview}"))
             }
         };
+        let refused = self.clipboard_refused.is_some_and(|at| at.elapsed() < CLIPBOARD_REFUSED_FOR);
         match permission {
+            Permission::Ask if refused => {}
             Permission::Allow => self.do_clipboard(request),
             Permission::Deny => {}
             Permission::Ask => ask_clipboard(self.window, self.view, request, question, &detail),
@@ -2367,7 +2415,12 @@ unsafe fn register_view_class() -> Id {
             }
             with_surface(view, |w| {
                 let bracketed = w.pane.term.lock().unwrap().modes().bracketed_paste;
-                w.write(&keys::paste(&text, bracketed));
+                let bytes = keys::paste(&text, bracketed);
+                if BEHAVIOUR.get().paste_protection && keys::paste_is_risky(&text, bracketed) {
+                    ask_paste(w.window, view, &text, bytes);
+                } else {
+                    w.write(&bytes);
+                }
             });
         }
     }

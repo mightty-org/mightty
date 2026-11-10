@@ -58,8 +58,8 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                     None => "-".to_owned(),
                 };
                 let title = p["title"].as_str().filter(|t| !t.is_empty()).or(p["command"].as_str()).unwrap_or("");
-                let cwd = p["cwd"].as_str().unwrap_or("");
-                println!("{:<4} {:<8} {:<9} {:<30} {cwd}", p["id"].to_string(), state, window, truncate(title, 30));
+                let cwd = shown(p["cwd"].as_str().unwrap_or(""), false);
+                println!("{:<4} {:<8} {:<9} {:<30} {cwd}", p["id"].to_string(), state, window, truncate(&shown(title, false), 30));
             }
         }
         "spawn" => {
@@ -93,7 +93,7 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             params.insert("command", cmd);
             opts.finish()?;
             let result = client.call("pane.run", params)?;
-            println!("{}", result["output"].as_str().unwrap_or_default());
+            println!("{}", shown(result["output"].as_str().unwrap_or_default(), true));
             if result["timed_out"].as_bool() == Some(true) {
                 eprintln!("mightty: still running in pane {}", result["pane"]);
                 return Ok(ExitCode::from(124));
@@ -134,7 +134,7 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                 params.insert("max_lines", number(&lines)?);
             }
             opts.finish()?;
-            println!("{}", client.call("pane.read", params)?["text"].as_str().unwrap_or_default());
+            println!("{}", shown(client.call("pane.read", params)?["text"].as_str().unwrap_or_default(), true));
         }
         "commands" => {
             let pane = opts.pane()?;
@@ -149,10 +149,10 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                     (_, Some(code)) => format!("exit {code}"),
                     _ => "done".to_owned(),
                 };
-                println!("$ {}  [{status}]", block["command"].as_str().unwrap_or("?"));
+                println!("$ {}  [{status}]", shown(block["command"].as_str().unwrap_or("?"), false));
                 let output = block["output"].as_str().unwrap_or_default();
                 if !output.is_empty() {
-                    println!("{output}");
+                    println!("{}", shown(output, true));
                 }
             }
         }
@@ -189,7 +189,7 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             opts.finish()?;
             for p in client.call("attention.list", Value::Null)?.as_array().unwrap_or_default() {
                 let seconds = p["attention"]["waiting_ms"].as_u64().unwrap_or(0) / 1000;
-                println!("{:<4} {:>5}s  {}", p["id"].to_string(), seconds, p["attention"]["message"].as_str().unwrap_or(""));
+                println!("{:<4} {:>5}s  {}", p["id"].to_string(), seconds, shown(p["attention"]["message"].as_str().unwrap_or(""), false));
             }
         }
         "focus" => {
@@ -224,6 +224,13 @@ fn obj<const N: usize>(pane: u64, rest: [(&str, Value); N]) -> Value {
 
 fn number(s: &str) -> Result<u64, String> {
     s.parse().map_err(|_| format!("expected a number, got `{s}`"))
+}
+
+/// Text from panes, printed to a terminal: control characters (escape
+/// sequences, from whatever ran in them) become U+FFFD, keeping line
+/// breaks and tabs only for `multiline` text.
+fn shown(s: &str, multiline: bool) -> String {
+    s.chars().map(|c| if c.is_control() && !(multiline && matches!(c, '\n' | '\t')) { '\u{FFFD}' } else { c }).collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -282,5 +289,18 @@ impl Opts {
             Some(extra) => Err(format!("unexpected argument `{extra}`")),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_text_is_printed_without_controls() {
+        // An OSC 52 smuggled in a directory or title doesn't reach the terminal.
+        assert_eq!(shown("/tmp/\u{1b}]52;c;ZXZpbA==\u{7}x", false), "/tmp/\u{FFFD}]52;c;ZXZpbA==\u{FFFD}x");
+        assert_eq!(shown("a\nb\tc\u{9b}d", true), "a\nb\tc\u{FFFD}d");
+        assert_eq!(shown("a\nb", false), "a\u{FFFD}b");
     }
 }

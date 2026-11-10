@@ -33,6 +33,8 @@ pub const DEFAULT_SCROLLBACK: usize = 10_000;
 const MAX_MARKS: usize = 10_000;
 /// Longer command lines (OSC 633;E) are cut, so the kept ones stay small.
 const MAX_COMMAND_LEN: usize = 4096;
+/// Titles (OSC 0/2) are cut to this many characters.
+const MAX_TITLE_CHARS: usize = 1024;
 /// Style tables smaller than this are never garbage-collected.
 const MIN_STYLE_GC: usize = 4096;
 /// Characters that end a word for double-click selection. `/ . : - _ ~ = @`
@@ -664,6 +666,12 @@ impl Term {
     }
 
     fn push_cell(&self, out: &mut String, cell: Cell) {
+        // Hidden text (SGR 8) isn't shown, so it isn't copied either: a
+        // command that looks harmless mustn't paste with more in it.
+        if self.style(cell).flags.contains(Flags::HIDDEN) {
+            out.push(' ');
+            return;
+        }
         match self.graphemes.get(cell) {
             Some(text) => out.push_str(text),
             None => out.push(cell.c),
@@ -1722,9 +1730,11 @@ impl Term {
                 }
             }
             [b"0" | b"2", rest @ ..] => {
-                self.title = String::from_utf8_lossy(&rest.join(&b';')).into_owned();
+                self.title = displayable(&String::from_utf8_lossy(&rest.join(&b';')), MAX_TITLE_CHARS);
             }
-            [b"7", url, ..] => match parse_file_url(url) {
+            // The directory decides where new tabs start, so like marks it
+            // must carry the nonce: output can't choose it.
+            [b"7", url, rest @ ..] if self.mark_trusted(rest) => match parse_file_url(url) {
                 Some((host, path)) => (self.cwd_host, self.cwd) = (host, Some(path)),
                 None => (self.cwd_host, self.cwd) = (String::new(), None),
             },
@@ -2046,7 +2056,7 @@ fn unescape_command(raw: &[u8]) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    displayable(&String::from_utf8_lossy(&out), MAX_COMMAND_LEN)
 }
 
 /// `file://host/path` → `/path`, percent-decoded.
@@ -2055,6 +2065,9 @@ fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
     let rest = url.strip_prefix(b"file://")?;
     let (host, path) = rest.split_at(rest.iter().position(|&c| c == b'/')?);
     let host = String::from_utf8(host.to_vec()).ok()?;
+    if host.chars().any(char::is_control) {
+        return None;
+    }
     let mut out = Vec::with_capacity(path.len());
     let mut i = 0;
     while i < path.len() {
@@ -2070,7 +2083,21 @@ fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
             }
         }
     }
-    Some((host, String::from_utf8(out).ok()?))
+    // Paths are shown and printed (`mightty ctl list`): no control characters.
+    let path = String::from_utf8(out).ok()?;
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    Some((host, path))
+}
+
+/// `text` with control and bidirectional-override characters replaced by
+/// U+FFFD, and cut to `max` characters: for titles and command lines that
+/// are shown in the UI or printed to terminals, where they could otherwise
+/// run escape sequences or reorder what's shown.
+fn displayable(text: &str, max: usize) -> String {
+    let bidi = |c: char| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
+    text.chars().map(|c| if c.is_control() || bidi(c) { '\u{FFFD}' } else { c }).take(max).collect()
 }
 
 /// DEC Special Graphics (`ESC ( 0`): line drawing used by many TUIs.

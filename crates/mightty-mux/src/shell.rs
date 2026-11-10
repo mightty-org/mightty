@@ -68,7 +68,7 @@ pub fn integrate(cmd: &mut Command, shell: &str, interactive: bool) -> Option<St
 }
 
 /// 128 random bits as hex.
-fn nonce() -> Option<String> {
+pub(crate) fn nonce() -> Option<String> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())

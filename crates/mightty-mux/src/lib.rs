@@ -359,7 +359,9 @@ impl Mux {
         if let Some(socket) = self.socket_path() {
             cmd.env("MIGHTTY_SOCKET", socket);
         }
-        let nonce = shell::integrate(&mut cmd, &shell, opts.command.is_none());
+        // Every pane gets a nonce, integrated or not: without one, output
+        // could fake marks and the directory (an `ssh` pane, another shell).
+        let nonce = shell::integrate(&mut cmd, &shell, opts.command.is_none()).or_else(shell::nonce);
 
         let (cw, ch) = cell_pixels();
         let pixels = |cells: u16, size: u32| (u32::from(cells) * size).min(u16::MAX.into()) as u16;
@@ -569,6 +571,7 @@ impl Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn account_shell_exists() {
@@ -597,6 +600,35 @@ mod tests {
         assert!(handle(&mux, "pane.spawn", &bad).unwrap_err().message.contains("unknown placement"));
         assert!(handle(&mux, "pane.focus", &pane_param(pane["id"].as_u64().unwrap())).is_err());
         mux.close(pane["id"].as_u64().unwrap());
+    }
+
+    /// Each integrated shell reports its directory with the pane's nonce,
+    /// and odd names (`;`, `%`, spaces) arrive whole; output can't change it.
+    #[test]
+    fn shells_report_their_directory() {
+        let dir = std::env::temp_dir().join(format!("mightty cwd;test %41 {}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let mux = Mux::new(Arc::new(Headless));
+        for shell in ["/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            let opts = SpawnOptions { shell: Some(shell.into()), cwd: Some(dir.clone()), ..Default::default() };
+            let pane = mux.spawn(opts).unwrap();
+            let cwd = || pane.term.lock().unwrap().cwd().map(str::to_owned);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while cwd().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(cwd().as_deref(), dir.to_str(), "{shell}");
+            // A program's output naming another directory is ignored.
+            pane.write(b"printf '\\033]7;file://h/etc\\a'\r").unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            assert_eq!(cwd().as_deref(), dir.to_str(), "{shell}");
+            mux.close(pane.id);
+        }
+        fs::remove_dir(&dir).unwrap();
     }
 
     fn pane_param(id: u64) -> mightty_json::Value {

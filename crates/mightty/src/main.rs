@@ -13,7 +13,10 @@ usage: mightty [--setting=value...] [-e <program> [args...]]
                               <program> in the current directory and closes
                               when the program exits (see `mightty --help`)
        mightty ctl <command>   control a running mightty (see `mightty ctl`)
-       mightty mcp             MCP server for AI agents (stdio)
+       mightty mcp [--all-panes]
+                              MCP server for AI agents (stdio); an agent
+                              uses its own pane and those it opens, or every
+                              pane with --all-panes
        mightty run [--cols N] [--rows N] [--screen] [--] <program> [args...]
 
 `run` executes a program in a headless terminal and prints what it left
@@ -27,8 +30,17 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("ctl") => ctl::main(&args[1..]).map_err(io::Error::other),
-        Some("mcp") => mightty_mcp::serve(mightty_mcp::Backend::connect(), io::stdin().lock(), io::stdout().lock())
-            .map(|()| ExitCode::SUCCESS),
+        Some("mcp") => {
+            let panes = match &args[1..] {
+                [] => mightty_mcp::Panes::Own,
+                [flag] if flag == "--all-panes" => mightty_mcp::Panes::All,
+                _ => {
+                    eprintln!("usage: mightty mcp [--all-panes]");
+                    return ExitCode::from(2);
+                }
+            };
+            mightty_mcp::serve(mightty_mcp::Backend::connect(), panes, io::stdin().lock(), io::stdout().lock()).map(|()| ExitCode::SUCCESS)
+        }
         Some("--version" | "-V") => {
             println!("mightty {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)

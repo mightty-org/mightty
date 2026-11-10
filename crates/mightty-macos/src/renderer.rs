@@ -24,7 +24,7 @@ use crate::snapshot;
 /// a full maximum-size atlas is cleared instead. At 4 bytes a pixel, the
 /// largest is 16 MiB, while plain text fits in the first 1 MiB.
 const ATLAS_MIN: u32 = 512;
-const ATLAS_MAX: u32 = 2048;
+const ATLAS_MAX: u32 = font::MAX_TILE_WIDTH;
 const PIXEL_FORMAT_BGRA8: usize = 80;
 const PIXEL_FORMAT_RGBA8: usize = 70;
 /// Frames an image's texture outlives its last use (a few seconds), so
@@ -950,13 +950,18 @@ impl Renderer {
 
     /// Copies a tile into the atlas. On overflow the atlas is recycled and `None` returned.
     fn upload(&mut self, raster: &RasterGlyph) -> Option<Glyph> {
+        // Larger than any atlas: not drawn, rather than written out of bounds.
+        if raster.width > ATLAS_MAX || raster.height > ATLAS_MAX {
+            return None;
+        }
         let atlas = &mut self.atlas;
         if atlas.x + raster.width > atlas.size {
             atlas.x = 0;
             atlas.y += atlas.row_height;
             atlas.row_height = 0;
         }
-        if atlas.y + raster.height > atlas.size {
+        // Wider than the atlas, or no room left: grow it (or clear it).
+        if raster.width > atlas.size || atlas.y + raster.height > atlas.size {
             if atlas.size < ATLAS_MAX {
                 atlas.size *= 2;
                 // SAFETY: command buffers in flight keep their own reference.

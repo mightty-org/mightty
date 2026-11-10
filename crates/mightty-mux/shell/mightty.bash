@@ -22,7 +22,10 @@ _mightty_precmd() {
     builtin printf '\e]133;D;%d%s\a' "$ret" "$_mightty_mark"
     _mightty_running=0
   fi
-  builtin printf '\e]7;file://%s%s\a' "$HOSTNAME" "${PWD// /%20}"
+  # Percent-encoded so `;` can't split it; with the nonce, like marks.
+  local dir=${PWD//\%/%25}
+  dir=${dir//;/%3B}
+  builtin printf '\e]7;file://%s%s%s\a' "$HOSTNAME" "${dir// /%20}" "$_mightty_mark"
   builtin printf '\e]133;A%s\a' "$_mightty_mark"
   builtin return $ret
 }
@@ -32,6 +35,11 @@ _mightty_preexec() {
   local cmd=${1//\\/\\\\}
   cmd=${cmd//;/\\x3b}
   cmd=${cmd//$'\n'/\\x0a}
+  # Bytes that would end or cancel the sequence early.
+  cmd=${cmd//$'\a'/\\x07}
+  cmd=${cmd//$'\e'/\\x1b}
+  cmd=${cmd//$'\x18'/\\x18}
+  cmd=${cmd//$'\x1a'/\\x1a}
   builtin printf '\e]633;E;%s%s\a' "$cmd" "$_mightty_mark"
   builtin printf '\e]133;C%s\a' "$_mightty_mark"
   _mightty_running=1

@@ -27,6 +27,13 @@ impl Style {
     }
 }
 
+/// The widest tile drawn: the glyph atlas's largest side (`ATLAS_MAX` in
+/// the renderer).
+pub const MAX_TILE_WIDTH: u32 = 2048;
+/// Cells one ligature tile covers at most; real ligatures span a few, and
+/// longer runs of changed glyphs are split.
+const MAX_LIGATURE_CELLS: u32 = 16;
+
 pub struct RasterGlyph {
     /// Premultiplied BGRA, top row first.
     pub pixels: Vec<u8>,
@@ -340,6 +347,9 @@ impl Font {
         }
         // Characters the font lacks (glyph 0) are left to fallback fonts.
         let changed: Vec<bool> = (0..text.len()).map(|i| nominal[i] != 0 && !per_char[i].contains(&0) && per_char[i] != [nominal[i]]).collect();
+        // Runs of changed glyphs can be long (`====…` in Fira Code), and
+        // each is one tile: cut them so a tile fits the glyph atlas.
+        let longest = (MAX_TILE_WIDTH / self.cell_width.max(1)).clamp(1, MAX_LIGATURE_CELLS) as usize;
         let mut out = Vec::new();
         let mut i = 0;
         while i < text.len() {
@@ -348,7 +358,7 @@ impl Font {
                 continue;
             }
             let start = i;
-            while i < text.len() && changed[i] {
+            while i < text.len() && changed[i] && i - start < longest {
                 i += 1;
             }
             let glyphs = (start..i).flat_map(|c| per_char[c].iter().map(move |&g| (g, (c - start) as u16))).collect();
@@ -991,6 +1001,33 @@ mod tests {
                 let wide = font.rasterize(c, Style(0), 2).unwrap();
                 let wide_ink = wide.pixels.iter().filter(|&&p| p > 0).count();
                 assert!(wide_ink > ink, "U+{:X}: two cells draw it no larger", c as u32);
+            }
+        }
+    }
+
+    /// A long run of changed glyphs (`====…` in Fira Code) is cut into
+    /// tiles that fit the glyph atlas, however large the font. Skipped
+    /// where the font isn't installed.
+    #[test]
+    fn long_ligature_runs_fit_the_atlas() {
+        let name = "FiraCode-Regular";
+        for size in [28.0, 400.0] {
+            let font = Font::new(name, size, FontBackend::CoreText);
+            // SAFETY: a live CTFont; the copied name is released.
+            let found = unsafe {
+                let ps = CTFontCopyPostScriptName(font.variants[0]);
+                let found = string_from_ns(ps as Id);
+                CFRelease(ps);
+                found
+            };
+            if found != name {
+                return eprintln!("{name} isn't installed; skipped");
+            }
+            let run: Vec<char> = "=".repeat(200).chars().collect();
+            let ligatures = font.ligatures(&run, Style(0));
+            assert!(ligatures.len() > 1, "{size}: one tile for 200 cells");
+            for lig in &ligatures {
+                assert!(lig.cells as u32 * font.cell_width <= MAX_TILE_WIDTH, "{size}: {} cells", lig.cells);
             }
         }
     }

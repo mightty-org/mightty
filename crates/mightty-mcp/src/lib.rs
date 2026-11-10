@@ -24,6 +24,19 @@ pane to the front when you want the user to look at it, and notify_user flags yo
 as needing them without taking their keyboard. list_panes shows each pane's status: agents are \
 working or waiting, and panes needing the user carry an attention reason.";
 
+/// Which panes an agent may see and drive. Agents can read whatever is on
+/// screen and type anywhere they're allowed, and text they read can try to
+/// steer them, so by default that's only their own work. This guards the
+/// tools, not the machine: an agent that can run commands can still reach
+/// the control socket itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panes {
+    /// The pane the agent runs in and the panes it opens.
+    Own,
+    /// Every pane (`mightty mcp --all-panes`).
+    All,
+}
+
 pub enum Backend {
     /// A running mightty, over its control socket.
     Remote(Client),
@@ -51,15 +64,19 @@ struct Server {
     own_pane: Option<u64>,
     /// The last pane opened in a split by default: the next one stacks below it.
     last_split: Option<u64>,
+    /// With `Panes::Own`, the panes the agent may use; `None` for all.
+    allowed: Option<Vec<u64>>,
 }
 
-/// Serves MCP over newline-delimited JSON-RPC until `input` closes.
-pub fn serve(backend: Backend, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+/// Serves MCP over newline-delimited JSON-RPC until `input` closes, letting
+/// the agent use `panes`.
+pub fn serve(backend: Backend, panes: Panes, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     let own_pane = match &backend {
         Backend::Remote(_) => std::env::var("MIGHTTY_PANE_ID").ok().and_then(|id| id.parse().ok()),
         Backend::Local(_) => None,
     };
-    let mut server = Server { backend, default_pane: None, own_pane, last_split: None };
+    let allowed = (panes == Panes::Own).then(|| own_pane.into_iter().collect());
+    let mut server = Server { backend, default_pane: None, own_pane, last_split: None, allowed };
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -88,6 +105,9 @@ impl Server {
                 *client = fresh;
                 // Pane ids were for the old instance.
                 (self.default_pane, self.own_pane, self.last_split) = (None, None, None);
+                if let Some(allowed) = &mut self.allowed {
+                    allowed.clear();
+                }
                 if !params["pane"].is_null() {
                     return Err("mightty was restarted and pane ids changed; call list_panes".into());
                 }
@@ -129,9 +149,40 @@ impl Server {
     }
 
     fn call_tool(&mut self, name: &str, args: &Value) -> Value {
-        let args = if args.is_null() { Value::object::<&str>([]) } else { args.clone() };
-        let outcome = match name {
-            "list_panes" => self.call("pane.list", args).map(|v| v.to_string()),
+        let args = declared(name, if args.is_null() { Value::object::<&str>([]) } else { args.clone() });
+        let outcome = match args["pane"].as_u64() {
+            Some(pane) if !self.may_use(pane) => Err(format!(
+                "pane {pane} isn't this agent's: it can use its own pane and those it opens \
+                 (the user can allow every pane with `mightty mcp --all-panes`)"
+            )),
+            _ => self.run_tool(name, args),
+        };
+        let (text, is_error) = match outcome {
+            Ok(text) => (text, false),
+            Err(message) => (message, true),
+        };
+        let content = Value::object([("type", "text".into()), ("text", text.into())]);
+        Value::object([("content", vec![content].into()), ("isError", is_error.into())])
+    }
+
+    fn may_use(&self, pane: u64) -> bool {
+        self.allowed.as_ref().is_none_or(|allowed| allowed.contains(&pane))
+    }
+
+    fn allow(&mut self, pane: Option<u64>) {
+        if let (Some(allowed), Some(pane)) = (&mut self.allowed, pane)
+            && !allowed.contains(&pane)
+        {
+            allowed.push(pane);
+        }
+    }
+
+    fn run_tool(&mut self, name: &str, args: Value) -> Result<String, String> {
+        match name {
+            "list_panes" => self.call("pane.list", args).map(|v| {
+                let panes = v.as_array().unwrap_or_default().iter().filter(|p| p["id"].as_u64().is_some_and(|id| self.may_use(id)));
+                Value::Array(panes.cloned().collect()).to_string()
+            }),
             "open_pane" => self.open_pane(args),
             "focus_pane" => self.call("pane.focus", args).map(|_| "focused".into()),
             "notify_user" => self.notify_user(args),
@@ -148,13 +199,7 @@ impl Server {
             "wait_for" => self.call("pane.wait", args).map(|v| v.to_string()),
             "close_pane" => self.call("pane.close", args).map(|_| "closed".into()),
             _ => Err(format!("unknown tool `{name}`")),
-        };
-        let (text, is_error) = match outcome {
-            Ok(text) => (text, false),
-            Err(message) => (message, true),
-        };
-        let content = Value::object([("type", "text".into()), ("text", text.into())]);
-        Value::object([("content", vec![content].into()), ("isError", is_error.into())])
+        }
     }
 
     /// Without a placement, a visible pane goes in a split: below the last
@@ -181,6 +226,7 @@ impl Server {
             }
         }
         let pane = self.call("pane.spawn", args.clone())?;
+        self.allow(pane["id"].as_u64());
         if default && !args["placement"].is_null() {
             self.last_split = pane["id"].as_u64();
         }
@@ -210,6 +256,7 @@ impl Server {
         let result = self.call("pane.run", args.clone())?;
         if args["pane"].is_null() {
             self.default_pane = result["pane"].as_u64();
+            self.allow(self.default_pane);
         }
         let mut text = format_block(&result);
         let pane = result["pane"].as_u64().unwrap_or_default();
@@ -221,6 +268,19 @@ impl Server {
             text.push_str(&format!("\n[pane {pane}]"));
         }
         Ok(text)
+    }
+}
+
+/// `args` with only the arguments tool `name` declares: anything else would
+/// reach the control socket unchecked (`pane.spawn`'s `env` and `shell`).
+fn declared(name: &str, args: Value) -> Value {
+    let tools = tools();
+    let tool = tools.as_array().unwrap_or_default().iter().find(|t| t["name"].as_str() == Some(name));
+    match (args, tool.map(|t| &t["inputSchema"]["properties"])) {
+        (Value::Object(fields), Some(Value::Object(known))) => {
+            Value::Object(fields.into_iter().filter(|(key, _)| known.iter().any(|(k, _)| k == key)).collect())
+        }
+        (args, _) => args,
     }
 }
 
@@ -368,7 +428,7 @@ mod tests {
     fn session(lines: &[&str]) -> Vec<Value> {
         let input = lines.join("\n");
         let mut output = Vec::new();
-        serve(Backend::Local(Mux::new(Arc::new(Headless))), input.as_bytes(), &mut output).unwrap();
+        serve(Backend::Local(Mux::new(Arc::new(Headless))), Panes::All, input.as_bytes(), &mut output).unwrap();
         String::from_utf8(output).unwrap().lines().map(|l| json::parse(l).unwrap()).collect()
     }
 
@@ -403,5 +463,32 @@ mod tests {
         assert_eq!(replies[3]["result"]["isError"].as_bool(), Some(false));
         assert_eq!(replies[4]["result"]["isError"].as_bool(), Some(true));
         assert!(text(4).contains("no pane 1"));
+    }
+
+    /// With `Panes::Own`, panes the agent didn't open are off limits, and
+    /// arguments a tool doesn't declare are dropped.
+    #[test]
+    fn agents_keep_to_their_own_panes() {
+        let mux = Mux::new(Arc::new(Headless));
+        let theirs = handle(&mux, "pane.spawn", &Value::object([("command", "sleep 5".into())])).unwrap()["id"].as_u64().unwrap();
+        let input = [
+            format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"read_pane","arguments":{{"pane":{theirs}}}}}}}"#),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"open_pane","arguments":{"command":"echo x${SECRET}x; sleep 5","visible":false,"env":{"SECRET":"leaked"}}}}"#.into(),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_panes"}}"#.into(),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+        serve(Backend::Local(mux.clone()), Panes::Own, input.as_bytes(), &mut output).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output).unwrap().lines().map(|l| json::parse(l).unwrap()).collect();
+        let text = |i: usize| replies[i]["result"]["content"].as_array().unwrap()[0]["text"].as_str().unwrap().to_owned();
+        assert_eq!(replies[0]["result"]["isError"].as_bool(), Some(true));
+        assert!(text(0).contains("isn't this agent's"), "{}", text(0));
+        let opened = json::parse(&text(1)).unwrap()["id"].as_u64().unwrap();
+        let listed = json::parse(&text(2)).unwrap();
+        let ids: Vec<u64> = listed.as_array().unwrap().iter().filter_map(|p| p["id"].as_u64()).collect();
+        assert_eq!(ids, [opened]);
+        // `env` isn't an open_pane argument, so it never reached the shell.
+        let found = handle(&mux, "pane.wait", &Value::object([("pane", opened.into()), ("text", "xx".into()), ("timeout_ms", 5000.into())]));
+        assert_eq!(found.unwrap()["matched"].as_str(), Some("text"));
     }
 }
