@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Flags, ImageData, Placement, Row, StyledCell, Term, char_width};
+use mightty_term::{Color, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, char_width};
 
 use crate::config::{Adjust, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
@@ -172,6 +172,8 @@ pub struct Snapshot {
     clusters: HashMap<usize, Box<str>>,
     /// Images on screen (kitty graphics), in the order sent.
     images: Vec<Placement>,
+    /// Parts of images shown by placeholder characters.
+    placeholders: Vec<PlaceholderRun>,
 }
 
 impl Snapshot {
@@ -244,7 +246,35 @@ impl Snapshot {
         let (top, bottom) = (self.first_line as i64, (self.first_line + rows as u64) as i64);
         self.images.clear();
         self.images.extend(term.image_placements().iter().filter(|p| p.line + p.cells[1] as i64 > top && p.line < bottom).cloned());
+        self.placeholders = term.placeholder_runs(self.first_line, rows);
     }
+}
+
+/// The part of a placeholder run's image its cells show, placed from the
+/// run's first cell. The image is scaled to fit its box of cells, keeping
+/// its aspect, and centred, as in kitty; `None` where the run falls in
+/// the margin.
+fn placeholder_quad(run: &PlaceholderRun, cw: f32, ch: f32) -> Option<Quad> {
+    let [sx, sy, sw, sh] = run.source.map(|v| v as f32);
+    let (bw, bh) = (run.cells[0] as f32 * cw, run.cells[1] as f32 * ch);
+    let scale = (bw / sw).min(bh / sh);
+    // The image within the box, and the run, in box pixels.
+    let (ix, iy, iw, ih) = ((bw - sw * scale) / 2.0, (bh - sh * scale) / 2.0, sw * scale, sh * scale);
+    let (rx, ry, rw) = (run.at[0] as f32 * cw, run.at[1] as f32 * ch, run.len as f32 * cw);
+    let (left, top) = (ix.max(rx), iy.max(ry));
+    let (right, bottom) = ((ix + iw).min(rx + rw), (iy + ih).min(ry + ch));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Quad {
+        pos: [left - rx, top - ry],
+        size: [right - left, bottom - top],
+        uv: [sx + (left - ix) / scale, sy + (top - iy) / scale],
+        uv_size: [(right - left) / scale, (bottom - top) / scale],
+        color: [1.0; 4],
+        mode: IMAGE,
+        _pad: [0; 3],
+    })
 }
 
 /// Quads for one frame, drawn in batches: each with its texture, `None`
@@ -496,7 +526,7 @@ impl Renderer {
     /// those with a negative z-index under the text, above cell
     /// backgrounds, and the rest over it, as in kitty.
     fn add_images(&mut self, snapshot: &Snapshot, mut quads: Vec<Quad>, text: usize) -> Frame {
-        if snapshot.images.is_empty() {
+        if snapshot.images.is_empty() && snapshot.placeholders.is_empty() {
             return Frame { batches: vec![(0..quads.len(), None)], quads };
         }
         let (cw, ch) = (self.font.cell_width as f32, self.font.cell_height as f32);
@@ -518,6 +548,15 @@ impl Renderer {
             let pos = [pad_x as f32 + p.col as f32 * cw + ox, pad_y as f32 + row * ch + oy];
             let quad = Quad { pos, size, uv: [sx, sy], uv_size: [sw, sh], color: [1.0; 4], mode: IMAGE, _pad: [0; 3] };
             images.push((p.z, quad, texture));
+        }
+        for run in &snapshot.placeholders {
+            let Some(texture) = self.image_texture(&run.image) else { continue };
+            let row = (run.line - snapshot.first_line) as f32;
+            if let Some(mut quad) = placeholder_quad(run, cw, ch) {
+                quad.pos[0] += pad_x as f32 + run.col as f32 * cw;
+                quad.pos[1] += pad_y as f32 + row * ch;
+                images.push((run.z, quad, texture));
+            }
         }
         // By z-index, then in the order sent.
         images.sort_by_key(|i| i.0);
@@ -806,7 +845,9 @@ impl Renderer {
                     }
                     None => {}
                 }
+                // A placeholder shows its part of an image instead.
                 let blank = cell.c == ' '
+                    || cell.c == PLACEHOLDER
                     || cell.flags.contains(Flags::HIDDEN)
                     || cell.flags.contains(Flags::WIDE_SPACER)
                     || cell.flags.contains(Flags::WRAP_SPACER);
@@ -855,7 +896,11 @@ impl Renderer {
         let apart = Flags::HIDDEN | Flags::WIDE | Flags::WIDE_SPACER | Flags::WRAP_SPACER;
         let shapeable = |c: usize| {
             let cell = &row[c];
-            cell.flags.bits() & apart.bits() == 0 && Some(c) != cursor && !snapshot.clusters.contains_key(&(r * cols + c)) && !(0x2500..=0x259F).contains(&(cell.c as u32))
+            cell.flags.bits() & apart.bits() == 0
+                && Some(c) != cursor
+                && !snapshot.clusters.contains_key(&(r * cols + c))
+                && !(0x2500..=0x259F).contains(&(cell.c as u32))
+                && cell.c != PLACEHOLDER
         };
         let drawn = (Flags::BOLD | Flags::ITALIC | Flags::INVERSE | Flags::DIM).bits();
         let looks = |c: usize| {
@@ -1100,4 +1145,22 @@ pub fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
 
 fn rgba((r, g, b): Rgb) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn placeholders_fit_their_image_in_the_box() {
+        // A 4×2 image in a 2×2 box of 10×20 cells: 20×10 pixels, centred down.
+        let image = Arc::new(ImageData { serial: 0, width: 4, height: 2, pixels: vec![0; 32] });
+        let run = |row: u32| PlaceholderRun { image: image.clone(), line: 0, col: 0, len: 2, at: [0, row], cells: [2, 2], source: [0, 0, 4, 2], z: 0 };
+        let parts: Vec<_> = (0..2).map(|r| placeholder_quad(&run(r), 10.0, 20.0).map(|q| (q.pos, q.size, q.uv, q.uv_size))).collect();
+        assert_eq!(parts, [Some(([0.0, 15.0], [20.0, 5.0], [0.0, 0.0], [4.0, 1.0])), Some(([0.0, 0.0], [20.0, 5.0], [0.0, 1.0], [4.0, 1.0]))]);
+        // A run in the margin beside a tall image shows nothing.
+        let tall = PlaceholderRun { at: [0, 0], len: 1, cells: [4, 1], source: [0, 0, 1, 2], ..run(0) };
+        assert!(placeholder_quad(&tall, 10.0, 20.0).is_none());
+    }
 }

@@ -6,9 +6,10 @@
 //! Supported: transmission inline (`t=d`), from a file (`t=f`) or a temp
 //! file (`t=t`), as RGB, RGBA or PNG (`f=24/32/100`), zlib-compressed or
 //! not (`o=z`), in chunks (`m=1`); `a=t/T/p/q/d` with every delete
-//! specifier; source rectangles, cell offsets, cell sizes and z-index.
-//! Not yet: shared memory (`t=s`), animation, Unicode placeholders and
-//! relative placements, which are refused with an error.
+//! specifier; source rectangles, cell offsets, cell sizes and z-index;
+//! Unicode placeholders (`U=1`), except placement ids in the underline
+//! colour. Not yet: shared memory (`t=s`), animation and relative
+//! placements, which are refused with an error.
 
 use std::collections::HashSet;
 use std::fs;
@@ -18,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cell::{Color, Flags};
 use crate::{Term, base64};
 
 /// The largest image side accepted, in pixels.
@@ -87,6 +89,8 @@ pub(crate) struct Graphics {
     /// Oldest first.
     images: Vec<Image>,
     placements: Vec<Placement>,
+    /// Placed with `U=1`: shown only where text holds [`PLACEHOLDER`]s.
+    virtuals: Vec<Placement>,
     /// A transmission arriving in chunks.
     loading: Option<Loading>,
     stored: usize,
@@ -256,7 +260,7 @@ impl Graphics {
         // Over quota: the oldest images not on screen go first, then any.
         let over = |g: &Self| g.stored > MAX_STORED || g.images.len() > MAX_IMAGES;
         if over(self) {
-            let mut placed: HashSet<u32> = self.placements.iter().map(|p| p.image_id).collect();
+            let mut placed: HashSet<u32> = self.placements.iter().chain(&self.virtuals).map(|p| p.image_id).collect();
             while over(self) && self.images.len() > 1 {
                 let unplaced = self.images.iter().position(|i| !placed.contains(&i.id));
                 let id = self.images[unplaced.unwrap_or(0)].id;
@@ -272,6 +276,7 @@ impl Graphics {
             self.stored -= image.data.pixels.len();
         }
         self.placements.retain(|p| p.image_id != id);
+        self.virtuals.retain(|p| p.image_id != id);
     }
 
     /// Counting down from the top, clear of the small ids clients pick.
@@ -465,6 +470,135 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
     Ok(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels })
 }
 
+/// U+10EEEE: a cell showing part of an image placed with `U=1`. Its
+/// foreground colour is the image id; diacritics after it give the row,
+/// the column and the id's top byte, each as an index into [`DIACRITICS`].
+pub const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// Combining characters standing for 0, 1, 2…, in code point order
+/// (kitty's gen/rowcolumn-diacritics.txt).
+static DIACRITICS: [u32; 297] = [
+    0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C,
+    0x0350, 0x0351, 0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
+    0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592,
+    0x0593, 0x0594, 0x0595, 0x0597, 0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
+    0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611, 0x0612, 0x0613, 0x0614, 0x0615,
+    0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6, 0x06D7, 0x06D8,
+    0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2, 0x06E4, 0x06E7, 0x06E8, 0x06EB,
+    0x06EC, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743,
+    0x0745, 0x0747, 0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x07F3,
+    0x0816, 0x0817, 0x0818, 0x0819, 0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822,
+    0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A, 0x082B, 0x082C, 0x082D, 0x0951, 0x0953, 0x0954,
+    0x0F82, 0x0F83, 0x0F86, 0x0F87, 0x135D, 0x135E, 0x135F, 0x17DD, 0x193A, 0x1A17, 0x1A75, 0x1A76,
+    0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F, 0x1B70, 0x1B71,
+    0x1B72, 0x1B73, 0x1CD0, 0x1CD1, 0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+    0x1DC5, 0x1DC6, 0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1, 0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5,
+    0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9, 0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF, 0x1DE0, 0x1DE1,
+    0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1, 0x20D4, 0x20D5, 0x20D6, 0x20D7,
+    0x20DB, 0x20DC, 0x20E1, 0x20E7, 0x20E9, 0x20F0, 0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2,
+    0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6, 0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA, 0x2DEB, 0x2DEC, 0x2DED, 0x2DEE,
+    0x2DEF, 0x2DF0, 0x2DF1, 0x2DF2, 0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+    0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1,
+    0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED,
+    0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1,
+    0xFE20, 0xFE21, 0xFE22, 0xFE23, 0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
+    0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
+];
+
+fn diacritic(c: char) -> Option<u32> {
+    DIACRITICS.binary_search(&(c as u32)).ok().map(|i| i as u32)
+}
+
+/// A run of placeholder cells in a row, showing one image.
+#[derive(Clone, Debug)]
+pub struct PlaceholderRun {
+    pub image: Arc<ImageData>,
+    /// Absolute line, and the column of the run's first cell.
+    pub line: u64,
+    pub col: usize,
+    pub len: usize,
+    /// The cell of the image's box the first cell shows: column, row.
+    pub at: [u32; 2],
+    /// The box, in cells, the image is fitted into, centred: columns, rows.
+    pub cells: [u32; 2],
+    /// The part of the image shown: x, y, width, height in its pixels.
+    pub source: [u32; 4],
+    pub z: i32,
+}
+
+impl Term {
+    /// Placeholder runs in lines `first..first + rows` showing images
+    /// placed with `U=1` on the active screen.
+    pub fn placeholder_runs(&self, first: u64, rows: usize) -> Vec<PlaceholderRun> {
+        let graphics = &self.graphics[usize::from(self.alt_active)];
+        let mut runs: Vec<PlaceholderRun> = Vec::new();
+        if graphics.virtuals.is_empty() {
+            return runs;
+        }
+        for line in first..first + rows as u64 {
+            let Some(row) = self.line(line) else { continue };
+            // The cell before, if a placeholder: its colour, image id, row and column.
+            let mut before: Option<(Color, u32, u32, u32)> = None;
+            for (col, &cell) in row.cells.iter().enumerate() {
+                let text = match self.graphemes.get(cell) {
+                    Some(text) => text,
+                    None if cell.c == PLACEHOLDER && !cell.flags().contains(Flags::GRAPHEME) => "",
+                    None => {
+                        before = None;
+                        continue;
+                    }
+                };
+                let mut chars = text.chars();
+                if !text.is_empty() && chars.next() != Some(PLACEHOLDER) {
+                    before = None;
+                    continue;
+                }
+                let fg = self.style(cell).fg;
+                let id = match fg {
+                    Color::Rgb(r, g, b) => u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b),
+                    Color::Indexed(i) => i.into(),
+                    Color::Default => 0,
+                };
+                // Left out, each continues the cell before: same row, next column.
+                let follows = before.filter(|b| b.0 == fg);
+                let mut marks = chars.map(diacritic);
+                let (r, c, top) = (marks.next().flatten(), marks.next().flatten(), marks.next().flatten());
+                let r = r.or(follows.map(|b| b.2)).unwrap_or(0);
+                let c = c.or(follows.filter(|b| b.2 == r).map(|b| b.3 + 1)).unwrap_or(0);
+                let id = top.map_or(follows.map_or(id, |b| b.1), |top| id | top << 24);
+                before = Some((fg, id, r, c));
+                let Some(p) = graphics.virtuals.iter().find(|p| p.image_id == id) else { continue };
+                if r >= p.cells[1] || c >= p.cells[0] {
+                    continue;
+                }
+                match runs.last_mut() {
+                    Some(run)
+                        if run.line == line
+                            && run.col + run.len == col
+                            && Arc::ptr_eq(&run.image, &p.image)
+                            && c.checked_sub(run.len as u32) == Some(run.at[0])
+                            && r == run.at[1]
+                            && run.cells == p.cells =>
+                    {
+                        run.len += 1
+                    }
+                    _ => runs.push(PlaceholderRun {
+                        image: p.image.clone(),
+                        line,
+                        col,
+                        len: 1,
+                        at: [c, r],
+                        cells: p.cells,
+                        source: p.source,
+                        z: p.z,
+                    }),
+                }
+            }
+        }
+        runs
+    }
+}
+
 impl Term {
     /// Where a graphics command goes: the active screen's images.
     pub(crate) fn graphics_mut(&mut self) -> &mut Graphics {
@@ -567,9 +701,6 @@ impl Term {
 
     /// Shows image `id` at the cursor, which then moves past it unless `C=1`.
     fn place(&mut self, c: &Command, id: u32) {
-        if c.unicode {
-            return self.graphics_reply(c, "EINVAL:Unicode placeholders aren't supported");
-        }
         if c.relative {
             return self.graphics_reply(c, "EINVAL:relative placements aren't supported");
         }
@@ -604,11 +735,12 @@ impl Term {
             }
             p => p,
         };
-        graphics.placements.retain(|p| !(p.image_id == id && p.id == placement_id));
-        if graphics.placements.len() >= MAX_PLACEMENTS {
-            graphics.placements.remove(0);
+        let placements = if c.unicode { &mut graphics.virtuals } else { &mut graphics.placements };
+        placements.retain(|p| !(p.image_id == id && p.id == placement_id));
+        if placements.len() >= MAX_PLACEMENTS {
+            placements.remove(0);
         }
-        graphics.placements.push(Placement {
+        placements.push(Placement {
             image,
             image_id: id,
             id: placement_id,
@@ -621,7 +753,8 @@ impl Term {
             z: c.z,
         });
         self.graphics_reply(c, "OK");
-        if !c.cursor_stays {
+        // Placeholders take the room, as the program prints them.
+        if !c.cursor_stays && !c.unicode {
             for _ in 1..rows {
                 self.index();
             }
@@ -658,12 +791,18 @@ impl Term {
         };
         let mut touched: HashSet<u32> = graphics.placements.iter().filter(|p| doomed(p)).map(|p| p.image_id).collect();
         graphics.placements.retain(|p| !doomed(p));
+        // Virtual placements have no place on the grid to match.
+        if matches!(c.delete.to_ascii_lowercase(), b'a' | b'i' | b'n' | b'r' | b'z') {
+            let gone = |p: &Placement| c.delete.eq_ignore_ascii_case(&b'a') || doomed(p);
+            touched.extend(graphics.virtuals.iter().filter(|p| gone(p)).map(|p| p.image_id));
+            graphics.virtuals.retain(|p| !gone(p));
+        }
         if c.delete.is_ascii_uppercase() {
             if matches!(c.delete, b'I' | b'N') {
                 touched.extend(target);
             }
             for id in touched {
-                if !graphics.placements.iter().any(|p| p.image_id == id) {
+                if !graphics.placements.iter().chain(&graphics.virtuals).any(|p| p.image_id == id) {
                     graphics.remove_image(id);
                 }
             }
@@ -775,6 +914,31 @@ mod tests {
         let mut huge = png(1, 1);
         huge[16..24].copy_from_slice(&[0, 0, 0x27, 0x10, 0, 0, 0x27, 0x10]);
         assert_eq!(send(&mut t, "a=t,f=100,i=5", &huge), "\x1b_Gi=5;EBADPNG:can't decode the PNG\x1b\\");
+    }
+
+    #[test]
+    fn unicode_placeholders() {
+        let mut t = term();
+        // A 2×2-cell virtual placement: nothing drawn, the cursor stays.
+        assert_eq!(send(&mut t, "a=T,U=1,f=32,s=4,v=4,c=2,r=2,i=7", &rgba(4, 4)), "\x1b_Gi=7;OK\x1b\\");
+        assert!(t.image_placements().is_empty());
+        assert_eq!(t.cursor(), (0, 0));
+        // Row and column diacritics, or left out after the first cell;
+        // image 7 as a 256-colour index, then as RGB with a top byte.
+        t.feed("\x1b[38;5;7m\u{10EEEE}\u{305}\u{305}\u{10EEEE}\r\n\u{10EEEE}\u{30D}\u{10EEEE}\u{30D}\u{30D}".as_bytes());
+        t.feed("\x1b[38;2;0;0;7m x\u{10EEEE}\u{305}\u{305}\u{305}".as_bytes());
+        let runs = t.placeholder_runs(0, 3);
+        let shape: Vec<_> = runs.iter().map(|r| (r.line, r.col, r.len, r.at)).collect();
+        assert_eq!(shape, [(0, 0, 2, [0, 0]), (1, 0, 2, [0, 1]), (1, 4, 1, [0, 0])]);
+        assert_eq!(runs[0].cells, [2, 2]);
+        // Past the box, or another image: nothing.
+        t.feed("\r\n\x1b[38;5;7m\u{10EEEE}\u{30E}\x1b[38;5;8m\u{10EEEE}".as_bytes());
+        assert!(t.placeholder_runs(2, 1).is_empty());
+        // Every diacritic joins its placeholder.
+        assert!(DIACRITICS.iter().all(|&d| crate::char_width(char::from_u32(d).unwrap()) == 0));
+        // Deleting the image takes the virtual placement with it.
+        send(&mut t, "a=d,d=I,i=7", b"");
+        assert!(t.placeholder_runs(0, 3).is_empty());
     }
 
     #[test]

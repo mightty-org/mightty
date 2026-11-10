@@ -21,7 +21,7 @@ use graphics::Graphics;
 use links::Links;
 
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell};
-pub use graphics::{ImageData, Placement};
+pub use graphics::{ImageData, PLACEHOLDER, Placement, PlaceholderRun};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
 pub type TextRange = ((u64, usize), (u64, usize));
