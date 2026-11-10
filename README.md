@@ -444,7 +444,7 @@ checks the header compiles as C++.
 1. ✅ VT parser, terminal state, PTY, headless runner
 2. ✅ macOS window: Cocoa via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas, keyboard input
    - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line) + copy, mouse reporting
-   - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters
+   - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters. Character widths follow Unicode 17 (East Asian Width and combining marks), so CJK text and new emoji line up
    - ✅ Nerd Font icons built in (Symbols Nerd Font Mono, as in Ghostty and kitty): prompt, `eza` and editor icons show with any font, fitted to the cell, or to two when a space follows
    - ✅ Bold and italic for families without them: made from the regular face (grown outlines, 12° slant)
    - ✅ Ligatures (`font-ligatures`, on): `->`, `!=`, `===` and the rest in fonts that have them, drawn as one tile over exactly the cells they cover, shaped once per run of text and kept
