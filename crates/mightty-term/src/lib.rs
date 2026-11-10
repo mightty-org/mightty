@@ -27,7 +27,7 @@ pub use styles::Styles;
 pub type TextRange = ((u64, usize), (u64, usize));
 
 pub use width::char_width;
-use width::width_class;
+use width::{emoji_style, width_class};
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 const MAX_MARKS: usize = 10_000;
@@ -52,11 +52,13 @@ pub struct TermOptions {
     /// Reported to programs that ask (OSC 10/11), to match what is drawn.
     pub foreground: (u8, u8, u8),
     pub background: (u8, u8, u8),
+    /// Whether [mode 2027](Modes::grapheme_cluster) starts set.
+    pub wide_emoji: bool,
 }
 
 impl Default for TermOptions {
     fn default() -> Self {
-        Self { scrollback_lines: DEFAULT_SCROLLBACK, foreground: DEFAULT_FG, background: DEFAULT_BG }
+        Self { scrollback_lines: DEFAULT_SCROLLBACK, foreground: DEFAULT_FG, background: DEFAULT_BG, wide_emoji: true }
     }
 }
 
@@ -84,6 +86,11 @@ pub struct Modes {
     pub bracketed_paste: bool,
     pub focus_events: bool,
     pub sync_output: bool,
+    /// Mode 2027: emoji written with VS16 (U+FE0F) take two cells, as
+    /// Unicode's grapheme clusters say. On unless [`TermOptions::wide_emoji`]
+    /// says otherwise, as in Ghostty; reset, a cluster takes its first
+    /// character's width, as `wcwidth` counts.
+    pub grapheme_cluster: bool,
     pub mouse: MouseMode,
     pub mouse_sgr: bool,
     /// DECSCUSR value (0 = default).
@@ -103,6 +110,7 @@ impl Default for Modes {
             bracketed_paste: false,
             focus_events: false,
             sync_output: false,
+            grapheme_cluster: true,
             mouse: MouseMode::Off,
             mouse_sgr: false,
             cursor_shape: 0,
@@ -251,6 +259,8 @@ pub struct Term {
     mark_nonce: Option<Box<[u8]>>,
     /// Reported for OSC 10/11.
     colors: [(u8, u8, u8); 2],
+    /// What RIS sets mode 2027 back to: [`TermOptions::wide_emoji`].
+    wide_emoji: bool,
     responses: Vec<u8>,
     bell: bool,
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
@@ -291,14 +301,20 @@ impl Term {
     pub fn with_options(cols: usize, rows: usize, options: &TermOptions) -> Self {
         let mut term = Self::with_scrollback(cols, rows, options.scrollback_lines);
         term.colors = [options.foreground, options.background];
+        term.wide_emoji = options.wide_emoji;
+        term.modes.grapheme_cluster = options.wide_emoji;
         term
     }
 
     /// Applies changed options to a running terminal: the colours it
-    /// reports, and how much history it keeps (dropping the oldest lines
-    /// past a lower limit).
+    /// reports, how much history it keeps (dropping the oldest lines
+    /// past a lower limit), and how wide VS16 emoji are from now on.
     pub fn set_options(&mut self, options: &TermOptions) {
         self.colors = [options.foreground, options.background];
+        if options.wide_emoji != self.wide_emoji {
+            self.wide_emoji = options.wide_emoji;
+            self.modes.grapheme_cluster = options.wide_emoji;
+        }
         self.scrollback_limit = options.scrollback_lines;
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
@@ -335,6 +351,7 @@ impl Term {
             pending_command: None,
             mark_nonce: None,
             colors: [DEFAULT_FG, DEFAULT_BG],
+            wide_emoji: true,
             responses: Vec::new(),
             bell: false,
             bells: 0,
@@ -1066,7 +1083,9 @@ impl Term {
     /// or a flag's second letter. Returns whether `c` was used up.
     ///
     /// The cluster keeps its first character's width, as in kitty and
-    /// Ghostty, except that a flag takes the second letter's cell too.
+    /// Ghostty, except that a flag takes the second letter's cell too, and
+    /// so does a narrow character with an emoji style followed by VS16
+    /// (in [mode 2027](Modes::grapheme_cluster)).
     fn join(&mut self, c: char, width: usize) -> bool {
         let (row, col) = (self.cursor.row, self.cursor.col);
         let Some(col) = (if self.cursor.pending_wrap { Some(col) } else { col.checked_sub(1) }) else { return false };
@@ -1076,7 +1095,9 @@ impl Term {
         let mut text = String::new();
         self.push_cell(&mut text, cell);
         let wide = cell.flags().contains(Flags::WIDE);
-        let flag = is_regional(c) && !wide && text.chars().count() == 1 && text.chars().all(is_regional);
+        let single = text.chars().count() == 1;
+        let flag = is_regional(c) && !wide && single && text.chars().all(is_regional);
+        let emoji = c == '\u{FE0F}' && self.modes.grapheme_cluster && !wide && single && text.chars().all(emoji_style);
         let joins = width == 0
             || (self.joining && text.ends_with('\u{200D}'))
             || (wide && matches!(c, '\u{1F3FB}'..='\u{1F3FF}'))
@@ -1096,8 +1117,9 @@ impl Term {
         // Out of ids even so: the character is dropped.
         let Some(id) = self.graphemes.intern(&text) else { return true };
         let mut flags = cell.flags() | Flags::GRAPHEME;
-        // The flag spreads over the cell its second letter would have taken.
-        let widen = flag && !self.cursor.pending_wrap && col + 1 < self.cols;
+        // The flag spreads over the cell its second letter would have
+        // taken; the emoji over the next cell.
+        let widen = (flag || emoji) && !self.cursor.pending_wrap && col + 1 < self.cols;
         if widen {
             self.erase_split_wide(row, col + 1, col + 2);
             flags.insert(Flags::WIDE);
@@ -1583,9 +1605,10 @@ impl Term {
         let graphemes = mem::take(&mut self.graphemes);
         let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
-        let (mark_nonce, colors, cell_pixels) = (self.mark_nonce.take(), self.colors, self.cell_pixels);
+        let (mark_nonce, colors, cell_pixels, wide_emoji) = (self.mark_nonce.take(), self.colors, self.cell_pixels, self.wide_emoji);
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
-        (self.mark_nonce, self.colors, self.cell_pixels) = (mark_nonce, colors, cell_pixels);
+        (self.mark_nonce, self.colors, self.cell_pixels, self.wide_emoji) = (mark_nonce, colors, cell_pixels, wide_emoji);
+        self.modes.grapheme_cluster = wide_emoji;
         // Scrollback keeps its style and cluster ids, so it keeps their tables too.
         self.scrollback = scrollback;
         self.styles = styles;
@@ -1603,6 +1626,36 @@ impl Term {
                 _ => {}
             }
         }
+    }
+
+    fn ansi_mode(&self, mode: u16) -> Option<bool> {
+        match mode {
+            4 => Some(self.modes.insert),
+            20 => Some(self.modes.linefeed_newline),
+            _ => None,
+        }
+    }
+
+    /// The modes [`set_dec_modes`](Self::set_dec_modes) changes, and DECNKM.
+    fn dec_mode(&self, mode: u16) -> Option<bool> {
+        let m = &self.modes;
+        Some(match mode {
+            1 => m.app_cursor,
+            6 => m.origin,
+            7 => m.autowrap,
+            25 => m.show_cursor,
+            47 | 1047 | 1049 => self.alt_active,
+            66 => m.app_keypad,
+            1000 => m.mouse == MouseMode::Click,
+            1002 => m.mouse == MouseMode::Drag,
+            1003 => m.mouse == MouseMode::Motion,
+            1004 => m.focus_events,
+            1006 => m.mouse_sgr,
+            2004 => m.bracketed_paste,
+            2026 => m.sync_output,
+            2027 => m.grapheme_cluster,
+            _ => return None,
+        })
     }
 
     fn set_dec_modes(&mut self, params: &Params, on: bool) {
@@ -1639,6 +1692,7 @@ impl Term {
                 1006 => self.modes.mouse_sgr = on,
                 2004 => self.modes.bracketed_paste = on,
                 2026 => self.modes.sync_output = on,
+                2027 => self.modes.grapheme_cluster = on,
                 _ => {}
             }
         }
@@ -1927,6 +1981,18 @@ impl Perform for Term {
             ([], b'l') => self.set_ansi_modes(params, false),
             ([b'?'], b'h') => self.set_dec_modes(params, true),
             ([b'?'], b'l') => self.set_dec_modes(params, false),
+            // DECRQM: whether a mode is set (1), reset (2) or unknown (0).
+            ([b'$'] | [b'?', b'$'], b'p') => {
+                let mode = params.arg(0, 0);
+                let dec = intermediates[0] == b'?';
+                let state = if dec { self.dec_mode(mode) } else { self.ansi_mode(mode) };
+                let reply = format!(
+                    "\x1b[{}{mode};{}$y",
+                    if dec { "?" } else { "" },
+                    state.map_or(0, |on| if on { 1 } else { 2 })
+                );
+                self.respond(reply.as_bytes());
+            }
             ([], b'm') => self.sgr(params),
             ([], b'n') => match arg(0, 0) {
                 5 => self.respond(b"\x1b[0n"),

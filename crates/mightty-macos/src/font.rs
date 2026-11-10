@@ -317,8 +317,19 @@ impl Font {
                 return None;
             }
             let width = CTLineGetTypographicBounds(line, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
-            let raster = self.draw(cells, width, style, |ctx, origin| {
-                CGContextSetTextPosition(ctx, origin.x, origin.y);
+            // Too wide for its cells (an emoji the shell counts as one cell
+            // wide): shrunk about the cell's middle, rather than cut off.
+            let room = (self.cell_width * cells) as f64;
+            let scale = if width > room * 1.05 { room / width } else { 1.0 };
+            let middle = self.cell_height as f64 / 2.0;
+            let raster = self.draw(cells, width * scale, style, |ctx, origin| {
+                if scale < 1.0 {
+                    CGContextTranslateCTM(ctx, origin.x, middle);
+                    CGContextScaleCTM(ctx, scale, scale);
+                    CGContextSetTextPosition(ctx, 0.0, origin.y - middle);
+                } else {
+                    CGContextSetTextPosition(ctx, origin.x, origin.y);
+                }
                 CTLineDraw(line, ctx);
             });
             CFRelease(line);
@@ -530,7 +541,9 @@ impl Font {
             let coverage = mightty_font::rasterize(&outline, scale, x, baseline, width as usize, height as usize);
             Some(RasterGlyph { pixels: coverage.iter().flat_map(|&c| [c; 4]).collect(), width, height, color: false })
         };
+        // VS16 asks for the emoji, which a text face's glyph isn't.
         if let Some(face) = &self.own[style.0 as usize]
+            && (!chars.contains(&'\u{FE0F}') || face.glyph(chars[0]).is_some_and(|g| face.color_glyph(g, self.size as f32).is_some()))
             && chars.iter().all(|&c| face.glyph(c).is_some() || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}'))
         {
             return draw(face);
@@ -986,6 +999,23 @@ mod tests {
 
     /// Nerd Font icons come from the built-in symbols font, with either
     /// backend: git branch, folder, Apple logo (Font Logos), a Material icon.
+    #[test]
+    fn emoji_in_one_cell_fit_it() {
+        let font = Font::new("Menlo", 32.0, FontBackend::CoreText);
+        for text in ["\u{2764}\u{FE0F}", "\u{2600}\u{FE0F}"] {
+            let raster = font.rasterize_cluster(text, Style(0), 1).unwrap();
+            assert!(raster.color, "{text}");
+            let (w, h) = (raster.width as usize, raster.height as usize);
+            let inked = |x: usize, y: usize| raster.pixels[(y * w + x) * 4 + 3] > 0;
+            let columns: Vec<usize> = (0..w).filter(|&x| (0..h).any(|y| inked(x, y))).collect();
+            let rows = (0..h).filter(|&y| (0..w).any(|x| inked(x, y))).count();
+            // Shrunk to the cell's width, square as an emoji is; cut off,
+            // it would be half as wide as it's tall.
+            assert!(columns.len() * 10 >= w * 8, "{text}: {} of {w} columns", columns.len());
+            assert!(rows * 10 <= columns.len() * 12, "{text}: {rows} rows, {} columns", columns.len());
+        }
+    }
+
     #[test]
     fn nerd_font_icons() {
         for backend in [FontBackend::CoreText, FontBackend::Mightty] {

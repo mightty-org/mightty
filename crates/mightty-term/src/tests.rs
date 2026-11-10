@@ -264,7 +264,7 @@ fn hidden_text_isnt_copied() {
 
 #[test]
 fn options_set_scrollback_and_reported_colors() {
-    let options = TermOptions { scrollback_lines: 2, foreground: (1, 2, 3), background: (0xaa, 0xbb, 0xcc) };
+    let options = TermOptions { scrollback_lines: 2, foreground: (1, 2, 3), background: (0xaa, 0xbb, 0xcc), ..TermOptions::default() };
     let mut t = Term::with_options(5, 1, &options);
     t.feed(b"a\r\nb\r\nc\r\nd\x1bc\x1b]10;?\x07\x1b]11;?\x1b\\");
     assert_eq!(t.scrollback().len(), 2);
@@ -310,7 +310,7 @@ fn set_options_changes_a_running_terminal() {
     let mut t = Term::with_options(5, 1, &TermOptions { scrollback_lines: 10, ..TermOptions::default() });
     t.feed(b"a\r\nb\r\nc\r\nd");
     assert_eq!(t.scrollback().len(), 3);
-    t.set_options(&TermOptions { scrollback_lines: 1, foreground: (1, 2, 3), background: (4, 5, 6) });
+    t.set_options(&TermOptions { scrollback_lines: 1, foreground: (1, 2, 3), background: (4, 5, 6), ..TermOptions::default() });
     assert_eq!(t.scrollback().len(), 1);
     t.feed(b"\x1b]10;?\x07\x1b]11;?\x07");
     assert_eq!(t.take_responses(), b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:0404/0505/0606\x07");
@@ -432,14 +432,58 @@ fn emoji_sequences_are_one_cluster() {
     let rainbow = "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}";
     let t = term(20, 1, &format!("{family}|{thumbs}|{rainbow}|"));
     assert_eq!(t.screen_text(), format!("{family}|{thumbs}|{rainbow}|"));
-    // Each takes its first character's width.
-    assert_eq!(t.cursor(), (0, 2 + 1 + 2 + 1 + 1 + 1));
+    // Each takes its first character's width, the white flag widened by VS16.
+    assert_eq!(t.cursor(), (0, 2 + 1 + 2 + 1 + 2 + 1));
     let cells = &t.lines()[0].cells;
     assert_eq!(t.cell_text(cells[0]), Some(family));
     assert!(cells[1].flags().contains(Flags::WIDE_SPACER));
     // A skin tone alone stays a character of its own.
     let t = term(20, 1, "a\u{1F3FD}");
     assert_eq!(t.cursor(), (0, 3));
+}
+
+#[test]
+fn vs16_makes_emoji_wide() {
+    let heart = "\u{2764}\u{FE0F}";
+    let keycap = "1\u{FE0F}\u{20E3}";
+    let t = term(10, 1, &format!("{heart}|{keycap}|\u{2764}|"));
+    assert_eq!(t.screen_text(), format!("{heart}|{keycap}|\u{2764}|"));
+    let cells = &t.lines()[0].cells;
+    assert_eq!(t.cell_text(cells[0]), Some(heart));
+    assert!(cells[0].flags().contains(Flags::WIDE) && cells[1].flags().contains(Flags::WIDE_SPACER));
+    assert_eq!(t.cell_text(cells[3]), Some(keycap));
+    assert!(cells[3].flags().contains(Flags::WIDE));
+    // Without VS16 the heart stays narrow.
+    assert_eq!(t.cursor(), (0, 2 + 1 + 2 + 1 + 1 + 1));
+    // Not for characters without an emoji style, nor emoji already wide.
+    let t = term(10, 1, "a\u{FE0F}\u{1F600}\u{FE0F}|");
+    assert_eq!(t.cursor(), (0, 1 + 2 + 1));
+    // At the right margin it can't grow.
+    let t = term(3, 2, &format!("ab{heart}"));
+    assert_eq!(t.cursor(), (0, 2));
+    assert_eq!(t.cell_text(t.lines()[0].cells[2]), Some(heart));
+    // Mode 2027 reset: the first character's width, as wcwidth counts.
+    let t = term(10, 1, &format!("\x1b[?2027l{heart}|"));
+    assert_eq!(t.cursor(), (0, 2));
+    // grapheme-width = legacy: reset from the start, after RIS too, until set.
+    let legacy = TermOptions { wide_emoji: false, ..TermOptions::default() };
+    let mut t = Term::with_options(10, 1, &legacy);
+    t.feed(format!("{heart}|\x1bc{heart}|").as_bytes());
+    assert_eq!(t.cursor(), (0, 2));
+    t.feed(format!("\x1b[?2027h\r{heart}|").as_bytes());
+    assert_eq!(t.cursor(), (0, 3));
+    // Changed on a running terminal, it applies from then on.
+    t.set_options(&TermOptions::default());
+    t.feed(b"\x1bc\x1b[?2027$p");
+    assert_eq!(t.take_responses(), b"\x1b[?2027;1$y");
+}
+
+#[test]
+fn mode_reports() {
+    let mut t = term(10, 2, "\x1b[?2027$p\x1b[?2004h\x1b[?2004$p\x1b[?25l\x1b[?25$p\x1b[4$p\x1b[?9999$p\x1b[?1049h\x1b[?1049$p");
+    assert_eq!(t.take_responses(), b"\x1b[?2027;1$y\x1b[?2004;1$y\x1b[?25;2$y\x1b[4;2$y\x1b[?9999;0$y\x1b[?1049;1$y");
+    t.feed(b"\x1b[?2027l\x1b[?2027$p\x1b[?1002h\x1b[?1000$p\x1b[?1002$p");
+    assert_eq!(t.take_responses(), b"\x1b[?2027;2$y\x1b[?1000;2$y\x1b[?1002;1$y");
 }
 
 #[test]

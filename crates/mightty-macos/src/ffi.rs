@@ -332,6 +332,8 @@ unsafe extern "C" {
     pub fn CGContextSetLineWidth(ctx: CGContextRef, width: f64);
     pub fn CGContextSetTextDrawingMode(ctx: CGContextRef, mode: i32);
     pub fn CGContextSetTextPosition(ctx: CGContextRef, x: f64, y: f64);
+    pub fn CGContextTranslateCTM(ctx: CGContextRef, x: f64, y: f64);
+    pub fn CGContextScaleCTM(ctx: CGContextRef, x: f64, y: f64);
     pub fn CGContextSetAllowsFontSmoothing(ctx: CGContextRef, allows: bool);
     pub fn CGContextSetShouldSmoothFonts(ctx: CGContextRef, should: bool);
 }

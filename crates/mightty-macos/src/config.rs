@@ -38,6 +38,8 @@ pub struct Config {
     pub confirm_close: ConfirmClose,
     pub save_state: SaveState,
     pub font_backend: FontBackend,
+    /// `grapheme-width`: whether VS16 emoji take two cells (unicode) or one (legacy).
+    pub wide_emoji: bool,
     /// Draw the font's ligatures and contextual alternates (`->` as an arrow).
     pub ligatures: bool,
     /// `keybind`: the defaults, changed by each setting in order.
@@ -357,6 +359,7 @@ impl Default for Config {
             confirm_close: ConfirmClose::Running,
             save_state: SaveState::Default,
             font_backend: FontBackend::CoreText,
+            wide_emoji: true,
             ligatures: true,
             keybinds: Bindings::default(),
             look: Look::default(),
@@ -628,6 +631,22 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(if c.font_backend == FontBackend::Mightty { "mightty" } else { "coretext" }.into()),
+    },
+    Setting {
+        name: "grapheme-width",
+        value: "METHOD",
+        help: "unicode or legacy: unicode draws emoji written with VS16 (\u{2764}\u{FE0F}) two cells wide, as Ghostty \
+               and kitty do; legacy keeps them one, as shells count them, so command lines with them redraw cleanly",
+        color: false,
+        set: |c, v| {
+            c.wide_emoji = match v {
+                "unicode" => true,
+                "legacy" => false,
+                _ => return Err("expects unicode or legacy".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(if c.wide_emoji { "unicode" } else { "legacy" }.into()),
     },
     Setting {
         name: "window-save-state",
@@ -1256,6 +1275,7 @@ impl Config {
             scrollback_lines: self.scrollback_lines,
             foreground: self.theme.foreground,
             background: self.theme.background,
+            wide_emoji: self.wide_emoji,
         }
     }
 
