@@ -28,6 +28,7 @@ use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
 use crate::open;
 use crate::palette::{self, Palette};
+use crate::scrollbar::{self, Scrollbar};
 use crate::linkhint::{self, LinkHint};
 use crate::notify;
 use crate::session::{self, Layout, Session};
@@ -147,6 +148,7 @@ struct Surface {
     search: Option<Search>,
     /// The command palette, while open.
     palette: Option<Palette>,
+    scrollbar: Scrollbar,
     /// A title the user gave the pane (Change Title…), shown instead of its program's.
     title_override: Option<String>,
     /// What the container's background was last set to (see `Renderer::backing`).
@@ -572,6 +574,7 @@ pub fn run(config: Config) -> io::Result<()> {
         call!(ns_app, c"setActivationPolicy:", 0isize); // regular app: Dock icon, menu bar
         install_menu(ns_app, &config.keybinds);
         register_global_keys(&config.keybinds);
+        scrollbar::set_mouse_handler(on_scrollbar_mouse);
         let delegate: Id = msg!(register_delegate_class(), c"new");
         call!(ns_app, c"setDelegate:", delegate);
         notify::set_delegate(delegate);
@@ -833,6 +836,7 @@ impl App {
             call!(view, c"addTrackingArea:", area);
             call!(area, c"release");
             call!(container, c"addSubview:", view);
+            let scrollbar = Scrollbar::new(container);
             call!(msg!(window, c"contentView"), c"addSubview:", container);
             call!(container, c"release");
             call!(view, c"release");
@@ -867,6 +871,7 @@ impl App {
                 keys_down: Vec::new(),
                 search: None,
                 palette: None,
+                scrollbar,
                 title_override: None,
                 backing: None,
                 hover: None,
@@ -1990,6 +1995,34 @@ fn quick_frames(position: QuickPosition, (deep, along): (Extent, Option<Extent>)
     }
 }
 
+thread_local! {
+    /// `on_scrollbar_fade` is scheduled.
+    static FADE_SCHEDULED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The mouse on a pane's scrollbar.
+fn on_scrollbar_mouse(bar: Id, drag: scrollbar::Drag) {
+    with_app(|app| app.surfaces.iter_mut().find(|s| s.scrollbar.bar == bar).map(|s| s.scrollbar_mouse(drag)));
+}
+
+/// Hides scrollbars once they've lingered, unless already scheduled to.
+fn schedule_scrollbar_fade() {
+    if !FADE_SCHEDULED.replace(true) {
+        run_on_main_after(scrollbar::LINGER, on_scrollbar_fade);
+    }
+}
+
+/// Fades the scrollbars due to, and waits for the next.
+extern "C" fn on_scrollbar_fade(_: *mut c_void) {
+    FADE_SCHEDULED.set(false);
+    let now = Instant::now();
+    let next = with_app(|app| app.surfaces.iter_mut().filter_map(|s| s.scrollbar.fade(now)).min()).flatten();
+    if let Some(next) = next {
+        FADE_SCHEDULED.set(true);
+        run_on_main_after(next.saturating_duration_since(now), on_scrollbar_fade);
+    }
+}
+
 /// Shows `shape` as the mouse pointer.
 fn set_pointer(shape: PointerShape) {
     let name = match shape {
@@ -2057,7 +2090,7 @@ impl Surface {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let pool = objc_autoreleasePoolPush();
-            let (frame, clipboard, pointer) = {
+            let (frame, clipboard, pointer, bar) = {
                 let mut term = self.pane.term.lock().unwrap();
                 // Animated images' next frames, or a stale progress bar to take down.
                 self.animation_due = match (term.animate(Instant::now()), term.progress_expiry()) {
@@ -2072,6 +2105,7 @@ impl Surface {
                 }
                 let clipboard = term.take_clipboard_requests();
                 let pointer = term.pointer_shape();
+                let bar = (term.scrollback().len(), term.rows(), term.is_alt_screen());
                 // A program can't set the attention marker itself.
                 let own = match &self.title_override {
                     Some(title) => title.as_str(),
@@ -2110,10 +2144,16 @@ impl Surface {
                     }
                     Some(selection_range(self.selection, &term))
                 };
-                (frame, clipboard, pointer)
+                (frame, clipboard, pointer, bar)
             };
             for request in clipboard {
                 self.clipboard_request(request);
+            }
+            let (history, rows, alt) = bar;
+            let dark = self.dark();
+            self.scrollbar.update(history, rows, self.scroll_offset, BEHAVIOUR.get().scrollbar && !alt, dark);
+            if self.scrollbar.fade(Instant::now()).is_some() {
+                schedule_scrollbar_fade();
             }
             if pointer != self.pointer {
                 self.pointer = pointer;
@@ -2512,6 +2552,18 @@ impl Surface {
             self.scroll_offset = offset;
             self.render();
         }
+    }
+
+    /// The mouse on the scrollbar: dragging the knob, or clicking beside it.
+    fn scrollbar_mouse(&mut self, drag: scrollbar::Drag) {
+        let (history, rows) = {
+            let term = self.pane.term.lock().unwrap();
+            (term.scrollback().len(), term.rows())
+        };
+        let to = self.scrollbar.drag(drag, history, rows, self.scroll_offset);
+        self.scrollbar.flash();
+        schedule_scrollbar_fade();
+        self.scroll_to(|_, _, _| to);
     }
 
     /// A dark terminal theme, for the overlays to match.

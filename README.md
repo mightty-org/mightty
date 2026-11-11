@@ -99,6 +99,7 @@ cursor-color = #ff79c6
 | `clipboard-paste-protection` | `true` | Ask before pasting text that would run at once (line breaks into a shell not using bracketed paste) or act as keys (control characters): a program may have set the clipboard |
 | `copy-on-select` | `false` | Copy text to the clipboard as soon as it's selected (a drag, or a double- or triple-click) |
 | `mouse-hide-while-typing` | `false` | Hide the pointer while typing, until the mouse moves |
+| `scrollbar` | `system` | `system`: macOS's overlay scrollbar at a pane's right edge while scrolling through history, to drag or click, hidden a moment after; not for output arriving, nor on the alternate screen. `never`: none, as in Ghostty |
 | `password-mask` | `true` | A `*` at the cursor for each character typed at a password prompt (a program reading a line without echoing it, as sudo and ssh do), so typing can be seen to work. mightty draws them; the program and scrollback never see them. Backspace takes one away; Ctrl-U clears them |
 | `mouse-scroll-multiplier` | `1` | Scroll this many times as far as the wheel or trackpad says |
 | `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |

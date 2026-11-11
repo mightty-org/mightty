@@ -169,6 +169,8 @@ pub struct Behaviour {
     pub paste_protection: bool,
     /// `mouse-hide-while-typing`.
     pub hide_mouse: bool,
+    /// `scrollbar`: system (an overlay scroller while scrolling) or never.
+    pub scrollbar: bool,
     /// `password-mask`: a `*` at the cursor for each character typed at a
     /// password prompt, drawn by mightty and sent nowhere.
     pub password_mask: bool,
@@ -185,6 +187,7 @@ impl Default for Behaviour {
             copy_on_select: false,
             paste_protection: true,
             hide_mouse: false,
+            scrollbar: true,
             password_mask: true,
             scroll_multiplier: 1.0,
         }
@@ -1007,6 +1010,22 @@ const SETTINGS: &[Setting] = &[
         get: |c| Some(c.behaviour.hide_mouse.to_string()),
     },
     Setting {
+        name: "scrollbar",
+        value: "WHEN",
+        help: "system or never: system shows macOS's overlay scrollbar at a pane's right edge while scrolling \
+               through history, to drag or click, as in Ghostty",
+        color: false,
+        set: |c, v| {
+            c.behaviour.scrollbar = match v {
+                "system" => true,
+                "never" => false,
+                _ => return Err("expects system or never".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(if c.behaviour.scrollbar { "system" } else { "never" }.into()),
+    },
+    Setting {
         name: "password-mask",
         value: "BOOL",
         help: "show a * for each character typed at a password prompt (a program reading a line without echoing \
@@ -1615,12 +1634,14 @@ mod tests {
             "--clipboard-paste-protection=false",
             "--mouse-hide-while-typing=true",
             "--mouse-scroll-multiplier=3",
+            "--scrollbar=never",
         ]))
         .unwrap();
         let b = c.behaviour;
         assert!(!b.paste_protection && Config::default().behaviour.paste_protection);
+        assert!(!b.scrollbar && Config::default().behaviour.scrollbar);
         assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
-        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary"] {
+        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }

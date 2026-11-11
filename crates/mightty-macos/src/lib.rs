@@ -17,6 +17,7 @@ mod notify;
 mod open;
 mod palette;
 mod renderer;
+mod scrollbar;
 mod session;
 mod snapshot;
 mod split;
