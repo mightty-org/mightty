@@ -21,6 +21,7 @@ mod scrollbar;
 mod session;
 mod snapshot;
 mod split;
+mod tabbar;
 
 pub use app::run;
 pub use config::Config;

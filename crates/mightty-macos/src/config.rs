@@ -312,6 +312,8 @@ pub enum Titlebar {
     Transparent,
     /// None: the terminal reaches the top; its top padding drags the window.
     Hidden,
+    /// mightty's own tab bar in the title bar, beside the window's buttons.
+    Tabs,
 }
 
 /// `quick-terminal-position`, as in Ghostty.
@@ -1053,16 +1055,16 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "macos-titlebar-style",
         value: "STYLE",
-        help: "native, transparent (in the terminal's background colour) or hidden (none, the window dragged by \
-               its top padding), as in Ghostty",
+        help: "native, transparent (in the terminal's background colour), tabs (tabs in the title bar) or hidden \
+               (none, the window dragged by its top padding; tabs, if any, at the top), as in Ghostty",
         color: false,
         set: |c, v| {
             c.behaviour.titlebar = match v {
                 "native" => Titlebar::Native,
                 "transparent" => Titlebar::Transparent,
                 "hidden" => Titlebar::Hidden,
-                "tabs" => return Err("tabs isn't supported yet: native, transparent or hidden".into()),
-                _ => return Err("expects native, transparent or hidden".into()),
+                "tabs" => Titlebar::Tabs,
+                _ => return Err("expects native, transparent, tabs or hidden".into()),
             };
             Ok(())
         },
@@ -1702,7 +1704,7 @@ mod tests {
         assert!(!b.scrollbar && Config::default().behaviour.scrollbar);
         assert_eq!((b.titlebar, Config::default().behaviour.titlebar), (Titlebar::Hidden, Titlebar::Native));
         assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
-        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto", "--macos-titlebar-style=tabs"] {
+        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto", "--macos-titlebar-style=chrome"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }
