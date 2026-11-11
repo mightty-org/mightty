@@ -11,6 +11,7 @@ mod graphics;
 mod links;
 mod styles;
 mod width;
+mod window;
 
 use std::collections::VecDeque;
 use std::{mem, slice};
@@ -29,6 +30,7 @@ pub use styles::Styles;
 pub type TextRange = ((u64, usize), (u64, usize));
 
 pub use width::char_width;
+pub use window::{PointerShape, Progress};
 use width::{emoji_style, width_class};
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -259,6 +261,9 @@ pub struct Term {
     /// When set, shell-integration marks count only if they carry
     /// `nonce=<this>`, so programs can't fake a finished command.
     mark_nonce: Option<Box<[u8]>>,
+    /// The progress bar a program asked for (OSC 9 ; 4), and when.
+    progress: Option<(Progress, std::time::Instant)>,
+    pointer_shape: PointerShape,
     /// The theme's colours, and those programs set over them.
     theme: Colors,
     set_colors: colors::SetColors,
@@ -353,6 +358,8 @@ impl Term {
             commands: Vec::new(),
             pending_command: None,
             mark_nonce: None,
+            progress: None,
+            pointer_shape: PointerShape::Default,
             theme: Colors::default(),
             set_colors: Box::new([None; colors::FOREGROUND + 3]),
             wide_emoji: true,
@@ -1807,7 +1814,8 @@ impl Term {
                     self.pen_changed();
                 }
             }
-            // ConEmu's OSC 9 ; n ; … (progress and others), not a notification.
+            [b"9", b"4", rest @ ..] => self.set_progress(rest),
+            // ConEmu's other OSC 9 ; n ; …, not notifications.
             [b"9", n, ..] if (1..=2).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => {}
             // iTerm2's notification: OSC 9 ; text.
             [b"9", text @ ..] => self.notify(b"", &text.join(&b';')),
@@ -1830,6 +1838,7 @@ impl Term {
                 None => (self.cwd_host, self.cwd) = (String::new(), None),
             },
             [b"4", pairs @ ..] => self.osc_palette(pairs, terminator),
+            [b"22", name] => self.set_pointer_shape(name),
             [b"104", indices @ ..] => self.osc_reset_palette(indices),
             [code @ (b"10" | b"11" | b"12"), specs @ ..] => self.osc_dynamic(usize::from(code[1] - b'0') + 10, specs, terminator),
             [code @ (b"110" | b"111" | b"112"), ..] => self.osc_reset_dynamic(usize::from(code[2] - b'0') + 110),

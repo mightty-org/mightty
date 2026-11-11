@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Colors, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
+use mightty_term::{Color, Colors, Flags, Progress, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
 
 use crate::config::{Adjust, Colorspace, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
@@ -179,6 +179,8 @@ pub struct Snapshot {
     /// The theme's colours, with those programs set (OSC 4, 10–12);
     /// `None` before the first capture.
     colors: Option<Colors>,
+    /// The progress bar a program asked for (OSC 9 ; 4).
+    progress: Option<Progress>,
 }
 
 impl Snapshot {
@@ -255,6 +257,7 @@ impl Snapshot {
         let shown = |p: &Placement| p.line + p.cells[1] as i64 > top && p.line < bottom;
         self.images.extend(term.image_placements().iter().cloned().chain(floating).filter(shown));
         self.colors = Some(term.colors());
+        self.progress = term.progress();
     }
 }
 
@@ -570,9 +573,30 @@ impl Renderer {
             (quads, text) = self.build_quads(snapshot, highlights);
         }
         self.frames += 1;
-        let frame = self.add_images(snapshot, quads, text);
+        let mut frame = self.add_images(snapshot, quads, text);
+        if let Some(bar) = snapshot.progress.map(|p| self.progress_bar(p)) {
+            frame.batches.push((frame.quads.len()..frame.quads.len() + 1, None));
+            frame.quads.push(bar);
+        }
         self.retire_images();
         frame
+    }
+
+    /// A bar along the top edge, over everything: blue as far as done, red
+    /// for an error, yellow when paused, and dimmed all the way when busy
+    /// for an unknown time. Colours from the palette, so themes match.
+    fn progress_bar(&self, progress: Progress) -> Quad {
+        // SAFETY: documented signature; `layer` is a CAMetalLayer.
+        let size: CGSize = unsafe { msg!(self.layer, c"drawableSize") };
+        let height = (2.0 * self.scale as f32).round();
+        let palette = |i: usize| rgba(self.theme.palette[i]);
+        let (done, color) = match progress {
+            Progress::Normal(p) => (p, palette(4)),
+            Progress::Error(p) => (p, palette(1)),
+            Progress::Paused(p) => (p, palette(3)),
+            Progress::Indeterminate => (100, { let [r, g, b, _] = palette(4); [r, g, b, 0.5] }),
+        };
+        Quad::solid(0.0, 0.0, size.width as f32 * f32::from(done) / 100.0, height, color)
     }
 
     /// Adds `snapshot`'s images to `quads`, whose text starts at `text`:

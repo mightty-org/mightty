@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
-use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, Term, clipboard_reply};
+use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
 use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, SaveState};
@@ -135,6 +135,9 @@ struct Surface {
     search: Option<Search>,
     /// The link under the pointer while Cmd is held, and where it goes.
     hover: Option<(HoveredLink, String)>,
+    /// The pointer's shape a program asked for (OSC 22), shown over the
+    /// terminal except over a link.
+    pointer: PointerShape,
     /// Shows `hover`'s target; made on first use.
     hint: Option<LinkHint>,
     /// The pane keys go to in its window (it shows the window's title).
@@ -744,6 +747,7 @@ impl App {
                 keys_down: Vec::new(),
                 search: None,
                 hover: None,
+                pointer: PointerShape::Default,
                 hint: None,
                 active,
                 window_attention: false,
@@ -1666,6 +1670,30 @@ fn from_rect(r: Rect) -> CGRect {
     CGRect { origin: CGPoint { x: r.x, y: r.y }, size: CGSize { width: r.width, height: r.height } }
 }
 
+/// Shows `shape` as the mouse pointer.
+fn set_pointer(shape: PointerShape) {
+    let name = match shape {
+        PointerShape::Default => c"arrowCursor",
+        PointerShape::Text => c"IBeamCursor",
+        PointerShape::VerticalText => c"IBeamCursorForVerticalLayout",
+        PointerShape::Pointer => c"pointingHandCursor",
+        PointerShape::Crosshair => c"crosshairCursor",
+        PointerShape::NotAllowed => c"operationNotAllowedCursor",
+        PointerShape::Grab => c"openHandCursor",
+        PointerShape::Grabbing => c"closedHandCursor",
+        PointerShape::ColResize => c"resizeLeftRightCursor",
+        PointerShape::RowResize => c"resizeUpDownCursor",
+        PointerShape::Copy => c"dragCopyCursor",
+        PointerShape::Alias => c"dragLinkCursor",
+        PointerShape::ContextMenu => c"contextualMenuCursor",
+    };
+    // SAFETY: main thread; NSCursor class methods with no arguments.
+    unsafe {
+        let cursor: Id = msg!(class(c"NSCursor"), name);
+        call!(cursor, c"set");
+    }
+}
+
 /// A `CGColor` in `space` (autoreleased with its `NSColor`).
 fn color_alpha((r, g, b): (u8, u8, u8), alpha: f64, space: Colorspace) -> Id {
     let c = |v: u8| v as f64 / 255.0;
@@ -1709,9 +1737,13 @@ impl Surface {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let pool = objc_autoreleasePoolPush();
-            let (frame, clipboard) = {
+            let (frame, clipboard, pointer) = {
                 let mut term = self.pane.term.lock().unwrap();
-                self.animation_due = term.animate(Instant::now());
+                // Animated images' next frames, or a stale progress bar to take down.
+                self.animation_due = match (term.animate(Instant::now()), term.progress_expiry()) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
                 if let Some(due) = self.animation_due {
                     schedule_animation(due);
                 }
@@ -1719,6 +1751,7 @@ impl Surface {
                     NSBeep();
                 }
                 let clipboard = term.take_clipboard_requests();
+                let pointer = term.pointer_shape();
                 // A program can't set the attention marker itself.
                 let own = term.title().trim_start_matches(['●', ' ']);
                 let mut title = if own.is_empty() { self.pane.command.clone() } else { own.to_owned() };
@@ -1747,10 +1780,16 @@ impl Surface {
                     }
                     Some(selection_range(self.selection, &term))
                 };
-                (frame, clipboard)
+                (frame, clipboard, pointer)
             };
             for request in clipboard {
                 self.clipboard_request(request);
+            }
+            if pointer != self.pointer {
+                self.pointer = pointer;
+                if self.hover.is_none() && self.mouse_inside() {
+                    set_pointer(pointer);
+                }
             }
             // The terminal is unlocked again: build and draw the frame.
             if let Some(selection) = frame {
@@ -2109,13 +2148,11 @@ impl Surface {
     /// hyperlink or a URL in the text. Underlines it, shows where it goes
     /// and turns the pointer into a hand.
     fn update_hover(&mut self, cmd: bool) {
-        // SAFETY: main thread; documented signatures.
-        let location = self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") });
-        let bounds = unsafe { send_rect(self.view, c"bounds") };
-        let inside = (0.0..bounds.size.width).contains(&location.x) && (0.0..bounds.size.height).contains(&location.y);
+        let inside = self.mouse_inside();
         let hover = (cmd && inside)
             .then(|| {
-                let (col, row) = self.cell_at(location);
+                // SAFETY: main thread; documented signature.
+                let (col, row) = self.cell_at(self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") }));
                 let term = self.pane.term.lock().unwrap();
                 let line = term.lines_scrolled() - self.scroll_offset as u64 + row as u64;
                 match term.link_at(line, col) {
@@ -2125,12 +2162,15 @@ impl Surface {
             })
             .flatten();
         if hover == self.hover {
+            // Entering the view, AppKit puts the arrow back.
+            if inside && hover.is_none() && self.pointer != PointerShape::Default {
+                set_pointer(self.pointer);
+            }
             return;
         }
+        set_pointer(if hover.is_some() { PointerShape::Pointer } else { self.pointer });
         // SAFETY: main thread; documented signatures.
         unsafe {
-            let cursor: Id = msg!(class(c"NSCursor"), if hover.is_some() { c"pointingHandCursor" } else { c"arrowCursor" });
-            call!(cursor, c"set");
             if hover.is_some() && self.hint.is_none() {
                 self.hint = Some(LinkHint::new(self.container, self.dark()));
             }
@@ -2140,6 +2180,14 @@ impl Surface {
         }
         self.hover = hover;
         self.render();
+    }
+
+    /// Whether the mouse is over the terminal.
+    fn mouse_inside(&self) -> bool {
+        // SAFETY: main thread; documented signatures.
+        let location = self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") });
+        let bounds = unsafe { send_rect(self.view, c"bounds") };
+        (0.0..bounds.size.width).contains(&location.x) && (0.0..bounds.size.height).contains(&location.y)
     }
 
     fn set_focused(&mut self, focused: bool) {
