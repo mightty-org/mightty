@@ -2,9 +2,10 @@
 """Draws mightty's app icon: a wizard on a terminal screen. The wizard's face
 is a block cursor whose eyes are the prompt `>_`, under a violet hat and over
 a white beard. Writes a 1024x1024 PNG; scripts/make-icon.sh turns it into
-assets/mightty.icns. Standard library only.
+assets/mightty.icns. With --wizard, writes just the wizard on a transparent
+square, for the website. Standard library only.
 
-usage: make-icon.py OUT.png
+usage: make-icon.py [--wizard] OUT.png
 """
 import math
 import struct
@@ -195,6 +196,18 @@ def draw(canvas):
     canvas.paint(field(screen, 150, 150, 874, 874), vertical([(0, "#1C2240"), (1, "#0A0D18")], 150, 874))
     canvas.paint(field(lambda x, y: abs(screen(x, y)) - 3, 145, 145, 879, 879), solid("#000000", 0.45))
 
+    wizard(canvas)
+
+    # A faint shine across the top of the glass.
+    canvas.paint(field(lambda x, y: rounded_rect(x, y, c, 300, 362, 150, 138), 150, 150, 874, 450),
+                 lambda x, y: (255, 255, 255, 0.10 * (1 - (y - 150) / 300)))
+
+
+# The square around the wizard, (x, y, side), for --wizard.
+WIZARD_BOX = (100, 171, 450)
+
+
+def wizard(canvas):
     # The wizard sits in the top-left of the screen, like Terminal's prompt.
     ox, oy = -25, -50
 
@@ -240,26 +253,32 @@ def draw(canvas):
                                     ("Q", (560, 642), (534, 642)), ("Q", (560, 642), (560, 616))]))
     canvas.paint(fill(star), solid("#FFD36E"))
 
-    # A faint shine across the top of the glass.
-    canvas.paint(field(lambda x, y: rounded_rect(x, y, c, 300, 362, 150, 138), 150, 150, 874, 450),
-                 lambda x, y: (255, 255, 255, 0.10 * (1 - (y - 150) / 300)))
 
-
-def write_png(path, rows):
+def write_png(path, rows, size=SIZE):
     raw = b"".join(b"\x00" + bytes(round(v) for px in row for v in px) for row in rows)
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-    header = struct.pack(">IIBBBBB", SIZE, SIZE, 8, 6, 0, 0, 0)
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
     with open(path, "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    only_wizard = args[:1] == ["--wizard"]
+    if only_wizard:
+        args = args[1:]
+    if len(args) != 1:
         sys.exit(__doc__)
     canvas = Canvas()
-    draw(canvas)
-    write_png(sys.argv[1], canvas.rows())
+    if only_wizard:
+        wizard(canvas)
+        x, y, side = WIZARD_BOX
+        rows = (row[x:x + side] for row in list(canvas.rows())[y:y + side])
+        write_png(args[0], rows, side)
+    else:
+        draw(canvas)
+        write_png(args[0], canvas.rows())
 
 
 if __name__ == "__main__":
