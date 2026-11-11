@@ -300,9 +300,14 @@ conditions; medians on an M2, macOS 15:
 medians of 258 and 263 MiB/s (ratio 0.98, 95% CI 0.89–1.08). Both sit at the
 macOS PTY ceiling, where single runs range from 150 to 320 MiB/s.
 
-Each terminal runs with its shipped defaults apart from grid and font
-(kitty with `--config NONE`). Single runs swing ±10% on a busy machine; long_lines and scroll_region
-sit at the PTY ceiling for both terminals and trade places between runs.
+Ghostty and kitty are launched fresh for each round with their shipped
+defaults apart from grid and font (kitty with `--config NONE`). mightty is
+not: `bench/compare.sh` runs it as a pane of the mightty already open
+(`mightty ctl spawn`), with that instance's settings, so these numbers don't
+compare like for like. The full suite below launches all three fresh; there
+plain ASCII comes out at 213, 200 and 99 MiB/s. Single runs swing ±10% on a
+busy machine; long_lines and scroll_region sit at the PTY ceiling for both
+terminals and trade places between runs.
 
 ### Full suite
 
