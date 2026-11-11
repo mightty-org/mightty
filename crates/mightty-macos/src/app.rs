@@ -12,7 +12,7 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::env;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -672,6 +672,10 @@ pub fn run(config: Config) -> io::Result<()> {
             with_app(|app| app.open_window(pane, false));
         }
         run_on_main_after(SAVE_INTERVAL, on_save_tick);
+        // What the config file is now; changes to it are applied as they're saved.
+        let path = with_app(|app| app.config.file().map(Path::to_path_buf).or_else(|| Some(config::config_dir()?.join("config")))).flatten();
+        CONFIG_SEEN.set(config_stamp(path.as_deref()));
+        run_on_main_after(CONFIG_TICK, on_config_tick);
         // As in Ghostty: `kill -USR2` reloads the configuration.
         const SIGUSR2: i32 = 31;
         on_signal_run_on_main(SIGUSR2, on_reload_signal);
@@ -2059,7 +2063,7 @@ impl App {
 
     /// Opens the config file in the default text editor (⌘,), first
     /// creating it, with a few lines on how it works, if there is none.
-    fn open_config(&self) {
+    fn open_config(&mut self) {
         let Some(path) = self.config.file().map(PathBuf::from).or_else(|| Some(config::config_dir()?.join("config"))) else {
             return show_problems("There's no config file", &["HOME is unset".into()]);
         };
@@ -2069,8 +2073,30 @@ impl App {
                 return show_problems("The config file couldn't be created", &[format!("{}: {e}", path.display())]);
             }
         }
-        if let Err(e) = Command::new("/usr/bin/open").arg("-t").arg(&path).spawn() {
-            show_problems("The config file couldn't be opened", &[format!("{}: {e}", path.display())]);
+        // In the user's editor, in the terminal: a tab of the key window, else a window.
+        let command = format!("exec ${{VISUAL:-${{EDITOR:-vi}}}} {}", shell_quote(&path.display().to_string()));
+        self.open_command(command, path.parent().map(Path::to_path_buf), "Config", true);
+    }
+
+    /// The settings, in a window of their own: `mightty config`.
+    fn open_settings(&mut self) {
+        let Ok(exe) = env::current_exe() else { return };
+        let command = format!("exec {} config", shell_quote(&exe.display().to_string()));
+        self.open_command(command, None, "Settings", false);
+    }
+
+    /// Runs `command` (through the login shell) in a new tab of the key
+    /// window if `tab`, else a window, titled `title`.
+    fn open_command(&mut self, command: String, cwd: Option<PathBuf>, title: &str, tab: bool) {
+        let opts = SpawnOptions { command: Some(command), cwd, cols: self.config.cols.max(100), rows: self.config.rows.max(32), ..Default::default() };
+        let pane = match self.mux.spawn(opts) {
+            Ok(pane) => pane,
+            Err(e) => return show_problems("It couldn't be started", &[e.to_string()]),
+        };
+        let tab_of = if tab { self.key_window().map_or(NIL, |k| k.0) } else { NIL };
+        self.open_window_in(pane, false, tab_of, true);
+        if let Some(surface) = self.surfaces.last_mut() {
+            surface.title_override = Some(title.to_owned());
         }
     }
 
@@ -2681,6 +2707,38 @@ extern "C" fn on_window_drag_tick(_: *mut c_void) {
             Some(())
         });
     }
+}
+
+/// `text` as one word for the shell, quoted.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The config file's modification time and size, to see it change.
+fn config_stamp(path: Option<&Path>) -> Option<(std::time::SystemTime, u64)> {
+    let meta = fs::metadata(path?).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+thread_local! {
+    /// The config file as it was last seen (see `on_config_tick`).
+    static CONFIG_SEEN: Cell<Option<(std::time::SystemTime, u64)>> = const { Cell::new(None) };
+}
+
+/// How often the config file is looked at for changes.
+const CONFIG_TICK: Duration = Duration::from_secs(1);
+
+/// The config file changed (saved by an editor, or by `mightty config`):
+/// it's applied, as by Reload Configuration.
+extern "C" fn on_config_tick(_: *mut c_void) {
+    with_app(|app| {
+        let path = app.config.file().map(Path::to_path_buf).or_else(|| Some(config::config_dir()?.join("config")));
+        let now = config_stamp(path.as_deref());
+        if CONFIG_SEEN.replace(now) != now {
+            app.reload_config();
+        }
+    });
+    run_on_main_after(CONFIG_TICK, on_config_tick);
 }
 
 /// The mouse on a pane's scrollbar.
@@ -4334,6 +4392,7 @@ fn perform(view: Id, action: &Action) {
         Action::PreviousTab | Action::NextTab => {}
         Action::JumpToAttention => drop(with_app(App::jump_to_attention)),
         Action::OpenConfig => drop(with_app(|app| app.open_config())),
+        Action::OpenSettings => drop(with_app(App::open_settings)),
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
@@ -4449,7 +4508,8 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
     unsafe {
         let bar = new_object(c"NSMenu");
         let app_menu = submenu(bar, "mightty");
-        add_item(app_menu, "Settings…", c"openConfig:", Action::OpenConfig);
+        add_action(app_menu, "Settings…", Action::OpenSettings);
+        add_item(app_menu, "Open Config File", c"openConfig:", Action::OpenConfig);
         add_item(app_menu, "Reload Configuration", c"reloadConfig:", Action::ReloadConfig);
         separator(app_menu);
         add_action(app_menu, "Secure Keyboard Entry", Action::ToggleSecureInput);

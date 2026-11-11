@@ -13,6 +13,7 @@ usage: mightty [--setting=value...] [-e <program> [args...]]
                               <program> in the current directory and closes
                               when the program exits (see `mightty --help`)
        mightty ctl <command>   control a running mightty (see `mightty ctl`)
+       mightty config          the settings, in the terminal
        mightty mcp [--all-panes]
                               MCP server for AI agents (stdio); an agent
                               uses its own pane and those it opens, or every
@@ -30,6 +31,8 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("ctl") => ctl::main(&args[1..]).map_err(io::Error::other),
+        #[cfg(target_os = "macos")]
+        Some("config") => mightty_macos::settings_main().map(|()| ExitCode::SUCCESS),
         Some("mcp") => {
             let panes = match &args[1..] {
                 [] => mightty_mcp::Panes::Own,

@@ -19,9 +19,11 @@ mod palette;
 mod renderer;
 mod scrollbar;
 mod session;
+mod settings;
 mod snapshot;
 mod split;
 mod tabbar;
 
 pub use app::run;
 pub use config::Config;
+pub use settings::main as settings_main;

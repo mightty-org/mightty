@@ -107,7 +107,10 @@ pub enum Action {
     NextTab,
     LastTab,
     JumpToAttention,
+    /// The config file in `$EDITOR`, in a new tab.
     OpenConfig,
+    /// The settings, in a window of their own (`mightty config`).
+    OpenSettings,
     ReloadConfig,
     /// Secure Keyboard Entry, on or off.
     ToggleSecureInput,
@@ -193,6 +196,7 @@ impl Action {
             ("last_tab", _) => bare(Self::LastTab),
             ("jump_to_attention", _) => bare(Self::JumpToAttention),
             ("open_config", _) => bare(Self::OpenConfig),
+            ("open_settings", _) => bare(Self::OpenSettings),
             ("reload_config", _) => bare(Self::ReloadConfig),
             ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
             ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
@@ -401,7 +405,7 @@ impl Default for Bindings {
             ("cmd+shift+[", PreviousTab),
             ("cmd+shift+]", NextTab),
             ("cmd+9", LastTab),
-            ("cmd+,", OpenConfig),
+            ("cmd+,", OpenSettings),
             ("cmd+shift+,", ReloadConfig),
             ("cmd+shift+p", ToggleCommandPalette),
             ("cmd+z", Undo),

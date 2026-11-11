@@ -51,7 +51,8 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Scroll Page Down", ScrollPageDown),
         ("Quick Terminal", ToggleQuickTerminal),
         ("Secure Keyboard Entry", ToggleSecureInput),
-        ("Open Settings", OpenConfig),
+        ("Settings", OpenSettings),
+        ("Open Config File", OpenConfig),
         ("Reload Configuration", ReloadConfig),
         ("Quit mightty", Quit),
     ]

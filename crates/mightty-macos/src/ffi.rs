@@ -262,6 +262,7 @@ unsafe extern "C" {
 
 #[link(name = "CoreText", kind = "framework")]
 unsafe extern "C" {
+    pub fn CTFontManagerCopyAvailableFontFamilyNames() -> CFTypeRef;
     pub fn CTFontCreateWithName(name: CFStringRef, size: f64, matrix: *const c_void) -> CTFontRef;
     pub fn CTFontCreateCopyWithSymbolicTraits(
         font: CTFontRef,

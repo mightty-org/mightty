@@ -78,6 +78,8 @@ pub struct Config {
     /// `theme` names a light and a dark theme, so the settings are loaded
     /// again when macOS changes between them.
     pub follows_appearance: bool,
+    /// `theme` as it was given, to show and to change.
+    pub theme_name: Option<String>,
     /// Files being read, innermost last, to catch `config-file` loops.
     including: Vec<PathBuf>,
 }
@@ -458,6 +460,7 @@ impl Default for Config {
             fresh_families: true,
             dark_mode: false,
             follows_appearance: false,
+            theme_name: None,
             including: Vec::new(),
             font_size: 14.0,
             cols: 100,
@@ -501,6 +504,93 @@ struct Setting {
     set: fn(&mut Config, &str) -> Result<(), String>,
     /// The current value for help text, or `None` when unset.
     get: fn(&Config) -> Option<String>,
+}
+
+/// A setting as `mightty config` shows it.
+pub struct SettingView {
+    pub name: &'static str,
+    /// What its value is, as help text names it: `BOOL`, `SIZE`, `NAME`, ….
+    pub value: &'static str,
+    pub help: &'static str,
+    pub current: Option<String>,
+    /// Given once a line, any number of times (`keybind = …`), so edited in the file.
+    pub many: bool,
+}
+
+/// Settings given any number of times.
+const MANY: &[&str] = &["keybind", "palette", "font-feature", "font-variation", "font-variation-bold", "font-variation-italic", "font-variation-bold-italic"];
+
+/// The values a setting with a fixed few takes, for completing them;
+/// empty for the rest. `bell-features` takes a comma list of these.
+pub fn choices(name: &str) -> &'static [&'static str] {
+    match name {
+        "copy-on-select" => &["true", "false", "clipboard"],
+        "macos-option-as-alt" => &["true", "false", "left", "right"],
+        "confirm-close-surface" => &["true", "false", "always"],
+        "background-blur" => &["true", "false"],
+        "quick-terminal-position" => &["top", "bottom", "left", "right", "center"],
+        "font-backend" => &["coretext", "mightty"],
+        "grapheme-width" => &["unicode", "legacy"],
+        "window-colorspace" => &["srgb", "display-p3"],
+        "window-save-state" => &["default", "never", "always"],
+        "cursor-style" => &["block", "bar", "underline", "block_hollow"],
+        "clipboard-read" | "clipboard-write" => &["allow", "ask", "deny"],
+        "macos-titlebar-style" => &["native", "transparent", "tabs", "hidden"],
+        "scrollbar" => &["system", "never"],
+        "bell-features" => &[
+            "system", "audio", "attention", "title", "border", "no-system", "no-audio", "no-attention", "no-title", "no-border",
+        ],
+        _ => match SETTINGS.iter().find(|s| s.name == name) {
+            Some(s) if s.value == "BOOL" => &["true", "false"],
+            _ => &[],
+        },
+    }
+}
+
+/// Whether `value` is one `name` takes, saying why not.
+pub fn check(name: &str, value: &str) -> Result<(), String> {
+    Config::default().set(name, value)
+}
+
+/// The file a theme `name` is read from: the user's, else the bundled one.
+pub fn theme_path(name: &str) -> Option<PathBuf> {
+    let own = config_dir()?.join("themes").join(name);
+    if own.is_file() {
+        return Some(own);
+    }
+    bundled_themes().map(|dir| dir.join(name)).filter(|p| p.is_file())
+}
+
+/// Sets `name` to `value` in the config file at `path`, its comments and
+/// order kept: the last line setting it is changed, or one is added at the
+/// end. With `None`, every line setting it goes, back to its default.
+pub fn write_setting(path: &Path, name: &str, value: Option<&str>) -> std::io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let sets = |line: &str| {
+        let line = line.trim_start();
+        !line.starts_with('#') && line.split_once('=').is_some_and(|(key, _)| key.trim() == name)
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    match value {
+        Some(value) => {
+            let line = format!("{name} = {value}");
+            match lines.iter().rposition(|l| sets(l)) {
+                Some(at) => lines[at] = line,
+                None => lines.push(line),
+            }
+        }
+        None => lines.retain(|l| !sets(l)),
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    fs::write(path, out)
 }
 
 /// Names are Ghostty's where the meaning is the same, so Ghostty theme
@@ -1189,6 +1279,7 @@ const SETTINGS: &[Setting] = &[
                follows macOS's appearance",
         color: false,
         set: |c, v| {
+            c.theme_name = (!v.is_empty()).then(|| v.to_owned());
             let pick = |side: &str| v.split(',').find_map(|part| part.trim().strip_prefix(side)).map(str::trim);
             match (pick("light:"), pick("dark:")) {
                 (Some(light), Some(dark)) => {
@@ -1202,7 +1293,7 @@ const SETTINGS: &[Setting] = &[
                 _ => Err("expects NAME, or light:NAME,dark:NAME".into()),
             }
         },
-        get: |_| None,
+        get: |c| c.theme_name.clone(),
     },
     Setting {
         name: "background",
@@ -1402,6 +1493,33 @@ fn hex((r, g, b): Rgb) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+/// Where the bundled themes are: in the app's resources, or the source
+/// tree's for a build run from `target`.
+pub fn bundled_themes() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let in_app = exe.parent()?.parent()?.join("Resources").join("themes");
+    let in_tree = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
+    [in_app, in_tree].into_iter().find(|dir| dir.is_dir())
+}
+
+/// Every theme by name, sorted ignoring case: the user's (`themes/` in the
+/// config directory) and the bundled ones, a user's hiding a bundled one
+/// of the same name.
+pub fn theme_names() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for dir in [config_dir().map(|d| d.join("themes")), bundled_themes()].into_iter().flatten() {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with('.') && entry.path().is_file() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
 fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
@@ -1529,7 +1647,12 @@ impl Config {
         let path = if name.contains('/') {
             expand_home(name)
         } else {
-            config_dir().ok_or("no config directory (HOME is unset)")?.join("themes").join(name)
+            // The user's own first, then those bundled.
+            let own = config_dir().ok_or("no config directory (HOME is unset)")?.join("themes").join(name);
+            match bundled_themes().map(|dir| dir.join(name)) {
+                Some(bundled) if !own.exists() && bundled.exists() => bundled,
+                _ => own,
+            }
         };
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         match self.apply_text(&text, &path, true).as_slice() {
@@ -1594,6 +1717,20 @@ impl Config {
 
     /// Where settings come from, then one line per setting with its
     /// current value.
+    /// Every setting with its current value, for `mightty config`.
+    pub fn settings(&self) -> Vec<SettingView> {
+        SETTINGS
+            .iter()
+            .map(|s| SettingView {
+                name: s.name,
+                value: s.value,
+                help: s.help,
+                current: (s.get)(self),
+                many: MANY.contains(&s.name),
+            })
+            .collect()
+    }
+
     pub fn help(&self) -> String {
         let file = config_dir().map_or("~/.config/mightty".into(), |d| d.display().to_string());
         let mut out = format!(
@@ -1745,6 +1882,20 @@ mod tests {
         let (c, warnings) = Config::load_from(Some(dir.join("missing")), &[]).unwrap();
         assert!(warnings.is_empty() && c.cols == 100);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_are_written_in_place() {
+        let dir = scratch("write");
+        let file = dir.join("config");
+        fs::write(&file, "# mine\nfont-size = 13\n# font-size = 9\nkeybind = cmd+t=new_tab\nfont-size=14\n").unwrap();
+        write_setting(&file, "font-size", Some("15")).unwrap();
+        write_setting(&file, "theme", Some("Nord")).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "# mine\nfont-size = 13\n# font-size = 9\nkeybind = cmd+t=new_tab\nfont-size = 15\ntheme = Nord\n");
+        write_setting(&file, "font-size", None).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "# mine\n# font-size = 9\nkeybind = cmd+t=new_tab\ntheme = Nord\n");
+        assert!(check("font-size", "abc").is_err() && check("font-size", "16").is_ok());
+        let _ = fs::remove_file(&file);
     }
 
     #[test]

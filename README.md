@@ -107,7 +107,7 @@ cursor-color = #ff79c6
 | `password-mask` | `true` | A `*` at the cursor for each character typed at a password prompt (a program reading a line without echoing it, as sudo and ssh do), so typing can be seen to work. mightty draws them; the program and scrollback never see them. Backspace takes one away; Ctrl-U clears them |
 | `mouse-scroll-multiplier` | `1` | Scroll this many times as far as the wheel or trackpad says |
 | `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |
-| `theme` | | Colours from `themes/NAME` in the config directory, or a path. `light:NAME,dark:NAME` follows macOS's appearance and switches when it changes |
+| `theme` | | Colours from `themes/NAME` in the config directory, else the bundled theme of that name (~800, iTerm2-Color-Schemes, MIT: `THEMES-LICENSE` in the app; each theme's own copyright is its author's), or a path. `light:NAME,dark:NAME` follows macOS's appearance and switches when it changes |
 | `config-file` | | Another config file to read after this one, relative to it (`?PATH` if it may be missing), as in Ghostty; in the file, or `--config-file` |
 | `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
 | `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
@@ -122,11 +122,20 @@ as Ghostty's, so Ghostty's ~800 bundled themes work unchanged: copy one from
 `/Applications/Ghostty.app/Contents/Resources/ghostty/themes/` into
 `~/.config/mightty/themes/`. Settings after `theme` override it.
 
-⌘, (mightty → Settings…) opens the config file in your text editor, creating
-it first if there isn't one. ⌘⇧, (Reload Configuration), or `kill -USR2` as in
-Ghostty, applies the files again to what's open: colours, fonts, `window-vsync`
-and scrollback change in place, flags still win, and window size, `command` and
-`working-directory` apply to new windows.
+⌘, (mightty → Settings…) opens the settings in a window of their own:
+`mightty config`, a full-screen list of every setting by section, with its
+value and help. Return edits one (or toggles it), suggesting the values it
+takes as you type (→ or Tab takes the suggestion, ↑↓ another), `d` puts it
+back to its default, `/` searches, `t` picks a theme from the ~800 bundled
+ones (the iTerm2-Color-Schemes collection, as Ghostty bundles them), and
+Return on a font picks one of those installed, monospaced or (Tab) all;
+both pickers preview each choice on the settings window as you move.
+`e` opens the file in your `$EDITOR`. Changes are written
+into the config file, its comments and order kept. Open Config File
+(`open_config`) opens the file in `$EDITOR` in a new tab, creating it from
+a commented template first. mightty applies the file whenever it changes,
+from any editor; Reload Configuration (⌘⇧,), or `kill -USR2`, as in Ghostty,
+does it at once.
 
 ### Key bindings
 
@@ -161,7 +170,7 @@ keybind = global:ctrl+grave_accent=toggle_quick_terminal
 | `toggle_split_zoom`, `equalize_splits` | ⌘⇧↩, ⌘⌃= | |
 | `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
 | `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
-| `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `open_settings`, `open_config`, `reload_config` | ⌘,, —, ⌘⇧, | The settings window (`mightty config`); the config file in `$EDITOR`; applying the file now |
 | `move_tab_to_new_window`, `close_other_tabs` | | The key window's tab out into a window of its own; its other tabs closed (each undoable). Also in the tab's right-click menu and the Window menu |
 | `undo` | ⌘Z | Undo Close (Edit menu): brings back the last tab, pane or window closed, as it was, within `undo-timeout`, as in Ghostty: its shell kept running meanwhile, hidden |
 | `reopen_closed` | ⌘⇧T | Reopen Closed (Shell menu): the last tab, pane or window closed, back in its place; still running within `undo-timeout`, else new shells in the same folders, with the same splits and titles (the last 20 closes) |
@@ -474,6 +483,7 @@ checks the header compiles as C++.
    - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor
    - ✅ Kitty keyboard protocol, all five enhancements (disambiguate, event types, alternate keys, every key as an escape code, associated text), with a flag stack per screen: Neovim, Helix, fish and Kakoune can tell Ctrl-I from Tab, Esc from Alt, and see key releases; ⌘ chords no menu item uses reach them as Super
    - ✅ Colours from programs: the palette (OSC 4), foreground, background and cursor (OSC 10, 11, 12) set and asked about, several at once as xterm takes them, and reset (OSC 104, 110–112), so theme scripts (base16, tinted-shell) and editors can recolour the terminal; a config reload keeps what programs set, RIS forgets it. XTVERSION (`CSI > q`) answers `mightty` and its version
+   - ✅ A pane's font family from its program (OSC 50, as in xterm; empty for the configured one), as the settings window previews fonts
    - ✅ Progress bars (OSC 9 ; 4, as Ghostty and Windows Terminal show them): a thin bar along the pane's top edge, for progress, an error, paused, or busy; gone after 15 seconds without an update. The pointer's shape (OSC 22, CSS and X11 names as kitty takes them), except over a link
    - ✅ Underline styles and colours: single, double, curly, dotted and dashed (`SGR 4:1`–`4:5`, `21`), coloured with `SGR 58` (reset with `59`), as Neovim uses for diagnostics
    - ✅ Kitty graphics protocol: images sent inline, from files, temp files or shared memory, as PNG or raw RGB/RGBA, zlib-compressed or not, in chunks; placed at natural size or scaled to cells, cropped, offset within a cell, under the text or over it by z-index; they scroll with the text into history, each screen has its own, clearing the screen clears them, every delete command works, and a screen keeps up to 320 MB. Unicode placeholders (`U=1`, as `kitten icat --unicode-placeholder` and tmux setups use) show images through text, so they survive programs that only pass text along. Animation: frames sent whole or as changes over an earlier frame, played, looped, paused or stepped by the program, and composed (`a=f`, `a=a`, `a=c`), so `kitten icat` plays GIFs. Relative placements (`P=`, `Q=`, `H=`, `V=`) sit at an offset from another placement, or from a Unicode placeholder image, move with it and go with it. Pixel sizes are reported (`TIOCGWINSZ`, `CSI 14/16/18 t`).
