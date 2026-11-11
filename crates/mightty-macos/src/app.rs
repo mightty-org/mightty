@@ -20,7 +20,7 @@ use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, St
 use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
+use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::hotkey;
@@ -753,21 +753,26 @@ impl App {
                 }
             };
             // On the screen with the mouse, sliding in from its edge.
-            let (frame, start) = quick_frames(self.config.quick_position);
+            let (frame, start) = quick_frames(self.config.quick_position, self.config.quick_size);
             call!(window, c"setFrame:display:", start, NO);
             call!(window, c"makeKeyAndOrderFront:", NIL);
             call!(ns_app, c"activateIgnoringOtherApps:", YES);
-            call!(msg!(window, c"animator"), c"setFrame:display:", frame, YES);
+            // AppKit's own slide, over `animationResizeTime:`.
+            call!(window, c"setFrame:display:animate:", frame, YES, YES);
             self.layout(window, true);
         }
     }
 
-    /// Hides the quick terminal; with `give_back`, the keys go back to the
-    /// app that had them.
+    /// Hides the quick terminal, sliding it out to its edge; with
+    /// `give_back`, the keys go back to the app that had them.
     fn hide_quick(&mut self, give_back: bool) {
         let Some(window) = self.quick else { return };
         // SAFETY: main thread; documented signatures; `quick_return` was retained.
         unsafe {
+            if self.config.quick_position != QuickPosition::Center {
+                let (_, out) = quick_frames(self.config.quick_position, self.config.quick_size);
+                call!(window, c"setFrame:display:animate:", out, YES, YES);
+            }
             call!(window, c"orderOut:", NIL);
             if !self.quick_return.is_null() {
                 if give_back {
@@ -1835,23 +1840,43 @@ fn quick_window_class() -> Id {
     extern "C" fn yes(_: Id, _: Sel) -> Bool {
         YES
     }
+    /// The slide's length, whatever the distance (AppKit's grows with it).
+    extern "C" fn slide_time(_: Id, _: Sel, _frame: CGRect) -> f64 {
+        QUICK_SLIDE
+    }
+    /// Left where it's put: AppKit would pull it below the menu bar, so it
+    /// couldn't start or end its slide off the top of the screen.
+    extern "C" fn unconstrained(_: Id, _: Sel, frame: CGRect, _screen: Id) -> CGRect {
+        frame
+    }
     CLASS.with(|cell| {
         *cell.get_or_init(|| {
             let yes = yes as extern "C" fn(Id, Sel) -> Bool as *const c_void;
+            let slide_time = slide_time as extern "C" fn(Id, Sel, CGRect) -> f64 as *const c_void;
+            let unconstrained = unconstrained as extern "C" fn(Id, Sel, CGRect, Id) -> CGRect as *const c_void;
             // SAFETY: a new subclass, its methods with their signatures.
             unsafe {
                 register_class(c"MighttyQuickWindow", c"NSWindow", &[
                     (c"canBecomeKeyWindow", yes, c"c@:"),
                     (c"canBecomeMainWindow", yes, c"c@:"),
+                    (c"animationResizeTime:", slide_time, c"d@:{CGRect={CGPoint=dd}{CGSize=dd}}"),
+                    (
+                        c"constrainFrameRect:toScreen:",
+                        unconstrained,
+                        c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@",
+                    ),
                 ])
             }
         })
     })
 }
 
-/// The quick terminal's frame for `position` on the screen with the mouse,
-/// and where it slides in from: off that edge.
-fn quick_frames(position: QuickPosition) -> (CGRect, CGRect) {
+/// How long the quick terminal takes to slide in or out.
+const QUICK_SLIDE: f64 = 0.2;
+
+/// The quick terminal's frame for `position` and `size` on the screen with
+/// the mouse, and where it slides in from: off that edge.
+fn quick_frames(position: QuickPosition, (deep, along): (Extent, Option<Extent>)) -> (CGRect, CGRect) {
     // SAFETY: main thread; documented signatures.
     let area = unsafe {
         let mouse: CGPoint = msg!(class(c"NSEvent"), c"mouseLocation");
@@ -1868,15 +1893,30 @@ fn quick_frames(position: QuickPosition) -> (CGRect, CGRect) {
     };
     let (x, y, w, h) = (area.origin.x, area.origin.y, area.size.width, area.size.height);
     let rect = |x, y, w, h| CGRect { origin: CGPoint { x, y }, size: CGSize { width: w, height: h } };
-    // A share of the screen, as in Ghostty's defaults.
-    let (across, deep) = (0.4, 0.4);
+    // Along its edge: all of it unless asked, centred.
+    let (across_x, across_y) = (along.map_or(w, |a| a.of(w)), along.map_or(h, |a| a.of(h)));
+    let (cx, cy) = (x + (w - across_x) / 2.0, y + (h - across_y) / 2.0);
     match position {
-        QuickPosition::Top => (rect(x, y + h * (1.0 - deep), w, h * deep), rect(x, y + h, w, h * deep)),
-        QuickPosition::Bottom => (rect(x, y, w, h * deep), rect(x, y - h * deep, w, h * deep)),
-        QuickPosition::Left => (rect(x, y, w * across, h), rect(x - w * across, y, w * across, h)),
-        QuickPosition::Right => (rect(x + w * (1.0 - across), y, w * across, h), rect(x + w, y, w * across, h)),
+        QuickPosition::Top => {
+            let d = deep.of(h);
+            (rect(cx, y + h - d, across_x, d), rect(cx, y + h, across_x, d))
+        }
+        QuickPosition::Bottom => {
+            let d = deep.of(h);
+            (rect(cx, y, across_x, d), rect(cx, y - d, across_x, d))
+        }
+        QuickPosition::Left => {
+            let d = deep.of(w);
+            (rect(x, cy, d, across_y), rect(x - d, cy, d, across_y))
+        }
+        QuickPosition::Right => {
+            let d = deep.of(w);
+            (rect(x + w - d, cy, d, across_y), rect(x + w, cy, d, across_y))
+        }
+        // Width, then height (the same share when left out).
         QuickPosition::Center => {
-            let frame = rect(x + w * 0.2, y + h * 0.25, w * 0.6, h * 0.5);
+            let (width, height) = (deep.of(w), along.unwrap_or(deep).of(h));
+            let frame = rect(x + (w - width) / 2.0, y + (h - height) / 2.0, width, height);
             (frame, frame)
         }
     }

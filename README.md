@@ -78,6 +78,7 @@ cursor-color = #ff79c6
 | `scrollback-lines` | `10000` | Lines kept above the screen |
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
 | `quick-terminal-position` | `top` | `top`, `bottom`, `left`, `right` or `center`: where the quick terminal appears, on the screen with the mouse, sliding in from that edge |
+| `quick-terminal-size` | `40%` | How far the quick terminal comes in from its edge, then how much of the edge it runs along (all of it when left out), as a share of the screen (`40%`) or points (`500px`), as in Ghostty: `30%,1200px`. Centred: its width, then height |
 | `quick-terminal-autohide` | `true` | Hide the quick terminal when another window or app takes the keys |
 | `macos-auto-secure-input` | `true` | Turn on Secure Keyboard Entry while a program reads a password (a whole line, not echoed, as sudo and ssh ask), so other apps can't read the keys, as in Ghostty; off again once it's read, and while mightty isn't the active app |
 | `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |

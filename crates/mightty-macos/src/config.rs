@@ -49,6 +49,9 @@ pub struct Config {
     pub quick_position: QuickPosition,
     /// `quick-terminal-autohide`: the quick terminal hides when another app or window takes the keys.
     pub quick_autohide: bool,
+    /// `quick-terminal-size`: how deep it comes in from its edge, and how
+    /// wide along it (all of it when unset).
+    pub quick_size: (Extent, Option<Extent>),
     /// `keybind`: the defaults, changed by each setting in order.
     pub keybinds: Bindings,
     /// How panes look beyond colours and fonts.
@@ -302,6 +305,45 @@ pub enum QuickPosition {
     Center,
 }
 
+/// A length on the screen: a share of it, or points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Extent {
+    Percent(f64),
+    Points(f64),
+}
+
+impl Extent {
+    fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        let (number, percent) = match (s.strip_suffix('%'), s.strip_suffix("px")) {
+            (Some(n), _) => (n, true),
+            (None, Some(n)) => (n, false),
+            _ => return Err(format!("`{s}`: expects a percentage (40%) or points (500px)")),
+        };
+        let n: f64 = number.trim().parse().map_err(|_| format!("`{s}`: not a number"))?;
+        match percent {
+            true if n > 0.0 && n <= 100.0 => Ok(Self::Percent(n)),
+            false if n > 0.0 => Ok(Self::Points(n)),
+            _ => Err(format!("`{s}`: out of range")),
+        }
+    }
+
+    /// Points, out of `whole`.
+    pub fn of(self, whole: f64) -> f64 {
+        match self {
+            Self::Percent(p) => whole * p / 100.0,
+            Self::Points(p) => p.min(whole),
+        }
+    }
+
+    fn show(self) -> String {
+        match self {
+            Self::Percent(p) => format!("{p}%"),
+            Self::Points(p) => format!("{p}px"),
+        }
+    }
+}
+
 /// `window-colorspace`: what colours (theme, images) are taken to be in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Colorspace {
@@ -394,6 +436,7 @@ impl Default for Config {
             auto_secure_input: true,
             quick_position: QuickPosition::Top,
             quick_autohide: true,
+            quick_size: (Extent::Percent(40.0), None),
             keybinds: Bindings::default(),
             look: Look::default(),
             background_blur: 0,
@@ -626,6 +669,26 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(format!("{:?}", c.quick_position).to_lowercase()),
+    },
+    Setting {
+        name: "quick-terminal-size",
+        value: "SIZE[,SIZE]",
+        help: "how far the quick terminal comes in from its edge, then how much of the edge it runs along \
+               (all of it when left out): a percentage of the screen (40%) or points (500px), as in Ghostty; \
+               centred, its width then height",
+        color: false,
+        set: |c, v| {
+            let (deep, along) = match v.split_once(',') {
+                Some((deep, along)) => (Extent::parse(deep)?, Some(Extent::parse(along)?)),
+                None => (Extent::parse(v)?, None),
+            };
+            c.quick_size = (deep, along);
+            Ok(())
+        },
+        get: |c| Some(match c.quick_size {
+            (deep, Some(along)) => format!("{},{}", deep.show(), along.show()),
+            (deep, None) => deep.show(),
+        }),
     },
     Setting {
         name: "quick-terminal-autohide",
@@ -1639,9 +1702,12 @@ mod tests {
             "--window-colorspace=display-p3",
             "--quick-terminal-position=bottom",
             "--quick-terminal-autohide=false",
+            "--quick-terminal-size=30%,800px",
         ]))
         .unwrap();
         assert_eq!((c.quick_position, c.quick_autohide), (QuickPosition::Bottom, false));
+        assert_eq!(c.quick_size, (Extent::Percent(30.0), Some(Extent::Points(800.0))));
+        assert_eq!((Extent::Percent(30.0).of(1000.0), Extent::Points(800.0).of(600.0)), (300.0, 600.0));
         assert_eq!(c.colorspace, Colorspace::DisplayP3);
         assert_eq!((c.look.background_opacity, c.background_blur, c.look.padding), (0.85, 20, (12.0, 6.0)));
         assert_eq!((c.look.cursor_style, c.look.cursor_blink), (CursorStyle::Bar, Some(true)));
@@ -1651,7 +1717,7 @@ mod tests {
         assert_eq!(Adjust::Points(-1.0).apply(16, 2.0), 14);
         assert_eq!(Adjust::Points(-50.0).apply(16, 2.0), 1);
         assert_eq!(Config::default().colorspace, Colorspace::Srgb);
-        for bad in ["--background-opacity=1.5", "--window-colorspace=p3", "--quick-terminal-position=middle", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
+        for bad in ["--background-opacity=1.5", "--window-colorspace=p3", "--quick-terminal-position=middle", "--quick-terminal-size=0%", "--quick-terminal-size=40", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }
