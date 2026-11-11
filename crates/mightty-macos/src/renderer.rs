@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
+use mightty_term::{Color, Colors, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
 
 use crate::config::{Adjust, Colorspace, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
@@ -176,6 +176,9 @@ pub struct Snapshot {
     images: Vec<Placement>,
     /// Parts of images shown by placeholder characters.
     placeholders: Vec<PlaceholderRun>,
+    /// The theme's colours, with those programs set (OSC 4, 10–12);
+    /// `None` before the first capture.
+    colors: Option<Colors>,
 }
 
 impl Snapshot {
@@ -251,6 +254,7 @@ impl Snapshot {
         let floating = term.floating_placements(&self.placeholders);
         let shown = |p: &Placement| p.line + p.cells[1] as i64 > top && p.line < bottom;
         self.images.extend(term.image_placements().iter().cloned().chain(floating).filter(shown));
+        self.colors = Some(term.colors());
     }
 }
 
@@ -552,6 +556,10 @@ impl Renderer {
 
     /// Builds a frame from a snapshot; needs no terminal lock.
     pub fn prepare(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Frame {
+        if let Some(colors) = &snapshot.colors {
+            let theme = &mut self.theme;
+            (theme.palette, theme.foreground, theme.background, theme.cursor) = (colors.palette, colors.foreground, colors.background, colors.cursor);
+        }
         let (mut quads, mut text) = self.build_quads(snapshot, highlights);
         // The atlas grew or was cleared mid-frame, dropping glyphs already placed.
         for _ in 0..3 {

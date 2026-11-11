@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use mightty_render::{Rgb, Theme};
 
 use crate::bindings::Bindings;
-use mightty_term::{DEFAULT_SCROLLBACK, TermOptions};
+use mightty_term::{Colors, DEFAULT_SCROLLBACK, TermOptions};
 
 pub struct Config {
     pub fonts: Fonts,
@@ -1299,8 +1299,12 @@ impl Config {
     pub fn term_options(&self) -> TermOptions {
         TermOptions {
             scrollback_lines: self.scrollback_lines,
-            foreground: self.theme.foreground,
-            background: self.theme.background,
+            colors: Colors {
+                palette: self.theme.palette,
+                foreground: self.theme.foreground,
+                background: self.theme.background,
+                cursor: self.theme.cursor,
+            },
             wide_emoji: self.wide_emoji,
         }
     }
@@ -1440,7 +1444,7 @@ mod tests {
         let (c, warnings) = Config::load_from(Some(file.clone()), &args(&["--window-width=120"])).unwrap();
         assert_eq!((c.cols, c.rows, c.fonts.families.join(",")), (120, 30, "Iosevka Term".into()));
         assert_eq!((c.theme.background, c.theme.palette[1]), ((0x10, 0x10, 0x10), (0xff, 0, 0)));
-        assert_eq!(c.term_options().background, (0x10, 0x10, 0x10));
+        assert_eq!(c.term_options().colors.background, (0x10, 0x10, 0x10));
         let at = |line| format!("{}:{line}: ", file.display());
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings[0].starts_with(&at(7)) && warnings[0].contains("window-height"));

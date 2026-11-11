@@ -5,6 +5,7 @@
 
 mod base64;
 mod cell;
+mod colors;
 mod graphemes;
 mod graphics;
 mod links;
@@ -21,6 +22,7 @@ use graphics::Graphics;
 use links::Links;
 
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell, Underline};
+pub use colors::{Colors, Rgb, default_palette};
 pub use graphics::{ImageData, PLACEHOLDER, Placement, PlaceholderRun};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
@@ -49,16 +51,16 @@ pub const DEFAULT_BG: (u8, u8, u8) = (0x1e, 0x1e, 0x1e);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermOptions {
     pub scrollback_lines: usize,
-    /// Reported to programs that ask (OSC 10/11), to match what is drawn.
-    pub foreground: (u8, u8, u8),
-    pub background: (u8, u8, u8),
+    /// The theme's colours: drawn, and reported to programs that ask
+    /// (OSC 4, 10–12), unless they set their own.
+    pub colors: Colors,
     /// Whether [mode 2027](Modes::grapheme_cluster) starts set.
     pub wide_emoji: bool,
 }
 
 impl Default for TermOptions {
     fn default() -> Self {
-        Self { scrollback_lines: DEFAULT_SCROLLBACK, foreground: DEFAULT_FG, background: DEFAULT_BG, wide_emoji: true }
+        Self { scrollback_lines: DEFAULT_SCROLLBACK, colors: Colors::default(), wide_emoji: true }
     }
 }
 
@@ -257,8 +259,9 @@ pub struct Term {
     /// When set, shell-integration marks count only if they carry
     /// `nonce=<this>`, so programs can't fake a finished command.
     mark_nonce: Option<Box<[u8]>>,
-    /// Reported for OSC 10/11.
-    colors: [(u8, u8, u8); 2],
+    /// The theme's colours, and those programs set over them.
+    theme: Colors,
+    set_colors: colors::SetColors,
     /// What RIS sets mode 2027 back to: [`TermOptions::wide_emoji`].
     wide_emoji: bool,
     responses: Vec<u8>,
@@ -300,17 +303,17 @@ impl Term {
 
     pub fn with_options(cols: usize, rows: usize, options: &TermOptions) -> Self {
         let mut term = Self::with_scrollback(cols, rows, options.scrollback_lines);
-        term.colors = [options.foreground, options.background];
+        term.theme = options.colors.clone();
         term.wide_emoji = options.wide_emoji;
         term.modes.grapheme_cluster = options.wide_emoji;
         term
     }
 
-    /// Applies changed options to a running terminal: the colours it
-    /// reports, how much history it keeps (dropping the oldest lines
+    /// Applies changed options to a running terminal: the theme's colours
+    /// (those programs set stay), how much history it keeps (dropping the oldest lines
     /// past a lower limit), and how wide VS16 emoji are from now on.
     pub fn set_options(&mut self, options: &TermOptions) {
-        self.colors = [options.foreground, options.background];
+        self.theme = options.colors.clone();
         if options.wide_emoji != self.wide_emoji {
             self.wide_emoji = options.wide_emoji;
             self.modes.grapheme_cluster = options.wide_emoji;
@@ -350,7 +353,8 @@ impl Term {
             commands: Vec::new(),
             pending_command: None,
             mark_nonce: None,
-            colors: [DEFAULT_FG, DEFAULT_BG],
+            theme: Colors::default(),
+            set_colors: Box::new([None; colors::FOREGROUND + 3]),
             wide_emoji: true,
             responses: Vec::new(),
             bell: false,
@@ -1616,9 +1620,9 @@ impl Term {
         let graphemes = mem::take(&mut self.graphemes);
         let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
-        let (mark_nonce, colors, cell_pixels, wide_emoji) = (self.mark_nonce.take(), self.colors, self.cell_pixels, self.wide_emoji);
+        let (mark_nonce, theme, cell_pixels, wide_emoji) = (self.mark_nonce.take(), mem::take(&mut self.theme), self.cell_pixels, self.wide_emoji);
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
-        (self.mark_nonce, self.colors, self.cell_pixels, self.wide_emoji) = (mark_nonce, colors, cell_pixels, wide_emoji);
+        (self.mark_nonce, self.theme, self.cell_pixels, self.wide_emoji) = (mark_nonce, theme, cell_pixels, wide_emoji);
         self.modes.grapheme_cluster = wide_emoji;
         // Scrollback keeps its style and cluster ids, so it keeps their tables too.
         self.scrollback = scrollback;
@@ -1825,13 +1829,10 @@ impl Term {
                 Some((host, path)) => (self.cwd_host, self.cwd) = (host, Some(path)),
                 None => (self.cwd_host, self.cwd) = (String::new(), None),
             },
-            [code @ (b"10" | b"11"), b"?"] => {
-                let (r, g, b) = self.colors[usize::from(*code == b"11")];
-                let code = String::from_utf8_lossy(code);
-                let reply = format!("\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}");
-                self.respond(reply.as_bytes());
-                self.respond(terminator);
-            }
+            [b"4", pairs @ ..] => self.osc_palette(pairs, terminator),
+            [b"104", indices @ ..] => self.osc_reset_palette(indices),
+            [code @ (b"10" | b"11" | b"12"), specs @ ..] => self.osc_dynamic(usize::from(code[1] - b'0') + 10, specs, terminator),
+            [code @ (b"110" | b"111" | b"112"), ..] => self.osc_reset_dynamic(usize::from(code[2] - b'0') + 110),
             [b"133", kind, rest @ ..] if self.mark_trusted(rest) => {
                 let kind = match kind.first() {
                     Some(b'A') => MarkKind::PromptStart,
@@ -1979,6 +1980,10 @@ impl Perform for Term {
             }
             ([], b'c') if arg(0, 0) == 0 => self.respond(b"\x1b[?62;22c"),
             ([b'>'], b'c') => self.respond(b"\x1b[>1;10;0c"),
+            // XTVERSION: the terminal's name and version.
+            ([b'>'], b'q') if params.arg(0, 0) == 0 => {
+                self.respond(concat!("\x1bP>|mightty ", env!("CARGO_PKG_VERSION"), "\x1b\\").as_bytes())
+            }
             ([], b'd') => {
                 let col = self.cursor.col;
                 self.goto(arg(0, 1) - 1, col);

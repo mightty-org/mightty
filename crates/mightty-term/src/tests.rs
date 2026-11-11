@@ -264,11 +264,50 @@ fn hidden_text_isnt_copied() {
 
 #[test]
 fn options_set_scrollback_and_reported_colors() {
-    let options = TermOptions { scrollback_lines: 2, foreground: (1, 2, 3), background: (0xaa, 0xbb, 0xcc), ..TermOptions::default() };
+    let colors = Colors { foreground: (1, 2, 3), background: (0xaa, 0xbb, 0xcc), ..Colors::default() };
+    let options = TermOptions { scrollback_lines: 2, colors, ..TermOptions::default() };
     let mut t = Term::with_options(5, 1, &options);
     t.feed(b"a\r\nb\r\nc\r\nd\x1bc\x1b]10;?\x07\x1b]11;?\x1b\\");
     assert_eq!(t.scrollback().len(), 2);
     assert_eq!(t.take_responses(), b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\");
+}
+
+#[test]
+fn programs_set_and_reset_colors() {
+    let colors = Colors { foreground: (1, 2, 3), background: (4, 5, 6), ..Colors::default() };
+    let mut t = Term::with_options(5, 1, &TermOptions { colors, ..TermOptions::default() });
+    // The palette: several entries at once, asked about in between.
+    t.feed(b"\x1b]4;1;rgb:ff/00/00;2;?;300;#fff\x1b\\");
+    assert_eq!(t.take_responses(), b"\x1b]4;2;rgb:9898/c3c3/7979\x1b\\");
+    assert_eq!(t.colors().palette[1], (255, 0, 0));
+    // Foreground, then the next ones: background and cursor.
+    t.feed(b"\x1b]10;#102030;#405060;rgb:7/8/9\x07\x1b]12;?\x07");
+    let c = t.colors();
+    assert_eq!((c.foreground, c.background, c.cursor), ((0x10, 0x20, 0x30), (0x40, 0x50, 0x60), Some((0x77, 0x88, 0x99))));
+    assert_eq!(t.take_responses(), b"\x1b]12;rgb:7777/8888/9999\x07");
+    // A reload keeps what programs set.
+    t.set_options(&TermOptions::default());
+    assert_eq!(t.colors().foreground, (0x10, 0x20, 0x30));
+    // Resets: one, then all.
+    t.feed(b"\x1b]4;3;#010101\x07\x1b]104;1\x07\x1b]110\x07\x1b]112\x07");
+    let c = t.colors();
+    assert_eq!((c.palette[1], c.palette[3], c.foreground, c.cursor), (default_palette(1), (1, 1, 1), DEFAULT_FG, None));
+    // The cursor following the text reports the foreground.
+    t.feed(b"\x1b]12;?\x07");
+    assert_eq!(t.take_responses(), b"\x1b]12;rgb:d8d8/d8d8/d8d8\x07");
+    t.feed(b"\x1b]104\x07");
+    assert_eq!(t.colors().palette[3], default_palette(3));
+    // RIS forgets them, and keeps the theme's.
+    t.set_options(&TermOptions { colors: Colors { background: (9, 9, 9), ..Colors::default() }, ..TermOptions::default() });
+    t.feed(b"\x1b]11;#000000\x07\x1bc");
+    assert_eq!(t.colors().background, (9, 9, 9));
+}
+
+#[test]
+fn xtversion() {
+    let mut t = Term::new(5, 1);
+    t.feed(b"\x1b[>q");
+    assert_eq!(t.take_responses(), format!("\x1bP>|mightty {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes());
 }
 
 #[test]
@@ -310,7 +349,8 @@ fn set_options_changes_a_running_terminal() {
     let mut t = Term::with_options(5, 1, &TermOptions { scrollback_lines: 10, ..TermOptions::default() });
     t.feed(b"a\r\nb\r\nc\r\nd");
     assert_eq!(t.scrollback().len(), 3);
-    t.set_options(&TermOptions { scrollback_lines: 1, foreground: (1, 2, 3), background: (4, 5, 6), ..TermOptions::default() });
+    let colors = Colors { foreground: (1, 2, 3), background: (4, 5, 6), ..Colors::default() };
+    t.set_options(&TermOptions { scrollback_lines: 1, colors, ..TermOptions::default() });
     assert_eq!(t.scrollback().len(), 1);
     t.feed(b"\x1b]10;?\x07\x1b]11;?\x07");
     assert_eq!(t.take_responses(), b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:0404/0505/0606\x07");
