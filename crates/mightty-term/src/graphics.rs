@@ -708,15 +708,18 @@ fn read_shm(c: &Command, name: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let name = CString::new(name).ok()?;
-    // SAFETY: `name` is NUL-terminated; O_RDONLY (0) takes no mode.
-    let fd = unsafe { shm_open(name.as_ptr(), 0) };
+    // On Linux, objects are files in /dev/shm, where a pipe could be planted.
+    // SAFETY: `name` is NUL-terminated; without O_CREAT, no mode is taken.
+    let fd = unsafe { shm_open(name.as_ptr(), O_NOFOLLOW | O_NONBLOCK) };
     if fd < 0 {
         return None;
     }
     // SAFETY: `fd` was just opened and nothing else owns it; the file closes it.
     let file = unsafe { fs::File::from_raw_fd(fd) };
     let meta = file.metadata().ok()?;
-    if meta.uid() != current_uid() {
+    // A regular file on Linux; on macOS, an object has no type bits.
+    let regular = matches!(meta.mode() & 0o170000, 0o100000 | 0);
+    if !regular || meta.uid() != current_uid() {
         return None;
     }
     let end = match c.read_size {
@@ -1119,7 +1122,8 @@ impl Term {
                 Err("EINVAL:a file must be sent as a whole, uncompressed PNG")
             }
             b'f' | b't' => read_file(c, &data).and_then(|data| decode(c, data).ok()).ok_or(FILE_ERROR),
-            b's' => read_shm(c, &data).ok_or(SHM_ERROR).and_then(|data| decode(c, data)),
+            // As with files, one reply for any failure tells nothing of what's there.
+            b's' => read_shm(c, &data).and_then(|data| decode(c, data).ok()).ok_or(SHM_ERROR),
             _ => Err("EINVAL:unknown transmission medium"),
         };
         match c.action {
