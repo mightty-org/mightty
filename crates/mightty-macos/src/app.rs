@@ -906,6 +906,110 @@ impl App {
         }
     }
 
+    /// Moves `window`'s tab `from` to `to`, the others making way.
+    fn move_tab(&mut self, window: Id, from: usize, to: usize) {
+        let places = self.tabs_of(window);
+        if from != to && from < places.len() && to < places.len() {
+            // Taken out in order, put back in the same places in the new order.
+            let mut tabs: Vec<Window> = places.iter().rev().map(|&i| self.windows.remove(i)).collect();
+            tabs.reverse();
+            let moved = tabs.remove(from);
+            tabs.insert(to, moved);
+            for (&i, tab) in places.iter().zip(tabs) {
+                self.windows.insert(i, tab);
+            }
+        }
+        // Drawn in place again, also when it went back where it was.
+        for bar in self.bars.iter_mut().filter(|b| b.0 == window) {
+            bar.2 = None;
+        }
+        self.update_tab_bar(window);
+    }
+
+    /// Takes `window`'s tab `index` out of it, its panes going on running:
+    /// its layout and panes, to be put in another window.
+    fn take_tab(&mut self, window: Id, index: usize) -> Option<(session::Tab, Vec<Arc<Pane>>)> {
+        let places = self.tabs_of(window);
+        let ti = *places.get(index)?;
+        let tab = self.capture_tab(ti)?;
+        let leaves = self.windows[ti].tree.leaves();
+        let panes = leaves.iter().filter_map(|v| self.surfaces.iter().find(|s| s.view == *v)).map(|s| s.pane.clone()).collect();
+        // Its views go; its panes don't.
+        let (gone, kept): (Vec<Surface>, Vec<Surface>) = mem::take(&mut self.surfaces).into_iter().partition(|s| leaves.contains(&s.view));
+        self.surfaces = kept;
+        for surface in &gone {
+            // SAFETY: main thread; the window's content view holds the container.
+            unsafe { call!(surface.container, c"removeFromSuperview") };
+        }
+        drop(gone);
+        let was_shown = self.windows[ti].shown;
+        self.windows.remove(ti);
+        if places.len() > 1 {
+            if was_shown {
+                self.select_tab(window, index.min(places.len() - 2));
+            } else {
+                self.update_tab_bar(window);
+            }
+        }
+        Some((tab, panes))
+    }
+
+    /// Puts a tab taken out (see `take_tab`) into `into` at `at`, shown.
+    fn put_tab(&mut self, (tab, panes): (session::Tab, Vec<Arc<Pane>>), into: Id, at: usize) {
+        self.restore_tab_with(&tab, into, &panes);
+        let last = self.tabs_of(into).len() - 1;
+        self.move_tab(into, last, at.min(last));
+        self.select_tab(into, at.min(last));
+        // SAFETY: main thread; a live NSWindow.
+        unsafe { call!(into, c"makeKeyAndOrderFront:", NIL) };
+    }
+
+    /// `window`'s tab `index`, dragged off its bar and let go at `point` on
+    /// the screen: a window of its own there. Its panes go on running; a
+    /// window's only tab stays.
+    fn detach_tab(&mut self, window: Id, index: usize, point: CGPoint) {
+        if self.tabs_of(window).len() < 2 {
+            return self.move_tab(window, index, index);
+        }
+        let Some((tab, panes)) = self.take_tab(window, index) else { return };
+        let Some(new) = self.restore_tab_with(&tab, NIL, &panes) else { return };
+        // Its title bar where the tab was let go.
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let mut frame = send_rect(new, c"frame");
+            frame.origin = CGPoint { x: point.x - 60.0, y: point.y - frame.size.height + 14.0 };
+            call!(new, c"setFrame:display:", frame, YES);
+            call!(new, c"makeKeyAndOrderFront:", NIL);
+        }
+    }
+
+    /// `window`'s tab `index` dragged onto `into`'s tab bar, to go at `at`.
+    fn transfer_tab(&mut self, window: Id, index: usize, into: Id, at: usize) {
+        if window == into || !self.windows.iter().any(|w| w.window == into) {
+            return self.move_tab(window, index, index);
+        }
+        let alone = self.tabs_of(window).len() == 1;
+        let Some(taken) = self.take_tab(window, index) else { return };
+        self.put_tab(taken, into, at);
+        if alone {
+            // Emptied: the window goes, its tab being elsewhere now.
+            // SAFETY: main thread; a live NSWindow.
+            unsafe { call!(window, c"close") };
+        }
+    }
+
+    /// `window` dragged by its title bar and let go over `into`'s tab bar:
+    /// its tabs go there from `at`, and it closes, as AppKit merges windows.
+    fn merge_window(&mut self, window: Id, into: Id, at: usize) {
+        let count = self.tabs_of(window).len();
+        for k in 0..count {
+            let Some(taken) = self.take_tab(window, 0) else { break };
+            self.put_tab(taken, into, at + k);
+        }
+        // SAFETY: main thread; a live NSWindow, empty now.
+        unsafe { call!(window, c"close") };
+    }
+
     /// Tabs are mightty's own, in the window, rather than AppKit's: always,
     /// now, but for the quick terminal, which has none.
     fn own_tabs(&self) -> bool {
@@ -2260,9 +2364,15 @@ fn ask_title(window: Id, view: Id, current: &str) {
         };
         if response == ALERT_FIRST_BUTTON {
             let title = text.trim();
-            with_surface(view, |s| {
-                s.title_override = (!title.is_empty()).then(|| title.to_owned());
-                s.render();
+            with_app(|app| {
+                let window = app.surfaces.iter_mut().find(|s| s.view == view).map(|s| {
+                    s.title_override = (!title.is_empty()).then(|| title.to_owned());
+                    s.render();
+                    s.window
+                })?;
+                // The tab bar shows it at once, not with the next output.
+                app.update_tab_bar(window);
+                Some(())
             });
         }
     }
@@ -2450,6 +2560,59 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
             }
         }
         tabbar::Click::New => drop(with_app(|app| app.new_shell_tab_of(window))),
+        tabbar::Click::Move(from, to) => drop(with_app(|app| app.move_tab(window, from, to))),
+        tabbar::Click::Detach(i, (x, y)) => drop(with_app(|app| app.detach_tab(window, i, CGPoint { x, y }))),
+        tabbar::Click::Transfer(i, bar, at) => drop(with_app(|app| {
+            let into = app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)?;
+            app.transfer_tab(window, i, into, at);
+            Some(())
+        })),
+    }
+}
+
+thread_local! {
+    /// The window being dragged by its title bar, while the button's down.
+    static WINDOW_DRAG: Cell<Option<Id>> = const { Cell::new(None) };
+}
+
+/// How often a window dragged by its title bar is checked for being over a tab bar.
+const WINDOW_DRAG_TICK: Duration = Duration::from_millis(30);
+
+/// A window dragged by its title bar: over another window's tab bar, a gap
+/// opens there; let go there, its tabs join that window. Checked on a timer
+/// while the button's down, as AppKit moves the window itself.
+extern "C" fn on_window_drag_tick(_: *mut c_void) {
+    let Some(window) = WINDOW_DRAG.get() else { return };
+    // SAFETY: main thread; documented class methods.
+    let (buttons, mouse): (usize, CGPoint) = unsafe { (msg!(class(c"NSEvent"), c"pressedMouseButtons"), msg!(class(c"NSEvent"), c"mouseLocation")) };
+    // All its tabs, in order: they'd all go.
+    let titles = with_app(|app| app.tabs_of(window).iter().map(|&t| app.tab_title(t)).collect::<Vec<_>>()).filter(|t| !t.is_empty());
+    let Some(titles) = titles else {
+        WINDOW_DRAG.set(None);
+        tabbar::hover(None, NIL, &[]);
+        // SAFETY: main thread; the window may be closing, and is shown as it was.
+        unsafe { call!(window, c"setAlphaValue:", 1.0f64) };
+        return;
+    };
+    let target = tabbar::hover(Some(mouse), window, &titles);
+    // Over a tab bar the window gives way to the tab it would become, as
+    // AppKit's does, so the gap it would go into shows.
+    // SAFETY: main thread; a live NSWindow.
+    unsafe { call!(window, c"setAlphaValue:", if target.is_some() { 0.0f64 } else { 1.0f64 }) };
+    if buttons & 1 != 0 {
+        run_on_main_after(WINDOW_DRAG_TICK, on_window_drag_tick);
+        return;
+    }
+    WINDOW_DRAG.set(None);
+    tabbar::hover(None, NIL, &[]);
+    // SAFETY: main thread; a live NSWindow.
+    unsafe { call!(window, c"setAlphaValue:", 1.0f64) };
+    if let Some((bar, at)) = target {
+        with_app(|app| {
+            let into = app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)?;
+            app.merge_window(window, into, at);
+            Some(())
+        });
     }
 }
 
@@ -3716,6 +3879,16 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn terminate_after_last_window(_: Id, _: Sel, _: Id) -> Bool {
         YES
     }
+    /// A window starts moving: if by the mouse, it's watched for a tab bar to join.
+    extern "C" fn will_move(_: Id, _: Sel, notification: Id) {
+        let window = window_of(notification);
+        // SAFETY: main thread; documented class method.
+        let buttons: usize = unsafe { msg!(class(c"NSEvent"), c"pressedMouseButtons") };
+        let ours = with_app(|app| app.windows.iter().any(|w| w.window == window) && app.quick != Some(window)).unwrap_or(false);
+        if buttons & 1 != 0 && ours && WINDOW_DRAG.replace(Some(window)).is_none() {
+            run_on_main_after(WINDOW_DRAG_TICK, on_window_drag_tick);
+        }
+    }
     extern "C" fn did_change_active(_: Id, _: Sel, _: Id) {
         with_app(App::update_secure_input);
     }
@@ -3904,6 +4077,7 @@ unsafe fn register_delegate_class() -> Id {
             ),
             (c"applicationWillTerminate:", action(will_terminate), c"v@:@"),
             (c"applicationDidBecomeActive:", action(did_change_active), c"v@:@"),
+            (c"windowWillMove:", action(will_move), c"v@:@"),
             (c"applicationDidResignActive:", action(did_change_active), c"v@:@"),
             (c"windowDidResize:", action(did_resize), c"v@:@"),
             (c"windowDidChangeBackingProperties:", action(did_resize), c"v@:@"),
