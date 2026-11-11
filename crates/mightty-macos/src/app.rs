@@ -771,18 +771,25 @@ impl App {
         let Some(window) = self.quick else { return };
         // SAFETY: main thread; documented signatures; `quick_return` was retained.
         unsafe {
+            // Already gone: giving the keys back makes it resign them, which hides it too.
+            let visible: Bool = msg!(window, c"isVisible");
+            if visible == NO {
+                return;
+            }
+            // The keys go back first: hidden while mightty is still active,
+            // AppKit would bring its next window forward for a moment.
+            let back = mem::replace(&mut self.quick_return, NIL);
+            if !back.is_null() {
+                if give_back {
+                    let _: Bool = msg!(back, c"activateWithOptions:", 0usize);
+                }
+                call!(back, c"release");
+            }
             if self.config.quick_position != QuickPosition::Center {
                 let (_, out) = quick_frames(self.config.quick_position, self.config.quick_size);
                 call!(window, c"setFrame:display:animate:", out, YES, YES);
             }
             call!(window, c"orderOut:", NIL);
-            if !self.quick_return.is_null() {
-                if give_back {
-                    let _: Bool = msg!(self.quick_return, c"activateWithOptions:", 0usize);
-                }
-                call!(self.quick_return, c"release");
-                self.quick_return = NIL;
-            }
         }
     }
 
