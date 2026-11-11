@@ -147,7 +147,12 @@ impl Parser {
                 }
                 0x40..=0x7E => {
                     self.params.finish();
-                    p.csi_dispatch(&self.params, &self.intermediates[..self.n_intermediates], self.ignoring, b);
+                    p.csi_dispatch(
+                        &self.params,
+                        &self.intermediates[..self.n_intermediates],
+                        self.ignoring,
+                        b,
+                    );
                     return Some(j + 1);
                 }
                 _ => return None,
@@ -359,19 +364,33 @@ impl Parser {
     }
 
     fn esc_dispatch<P: Perform>(&mut self, p: &mut P, b: u8) {
-        p.esc_dispatch(&self.intermediates[..self.n_intermediates], self.ignoring, b);
+        p.esc_dispatch(
+            &self.intermediates[..self.n_intermediates],
+            self.ignoring,
+            b,
+        );
         self.state = State::Ground;
     }
 
     fn csi_dispatch<P: Perform>(&mut self, p: &mut P, b: u8) {
         self.params.finish();
-        p.csi_dispatch(&self.params, &self.intermediates[..self.n_intermediates], self.ignoring, b);
+        p.csi_dispatch(
+            &self.params,
+            &self.intermediates[..self.n_intermediates],
+            self.ignoring,
+            b,
+        );
         self.state = State::Ground;
     }
 
     fn hook<P: Perform>(&mut self, p: &mut P, b: u8) {
         self.params.finish();
-        p.hook(&self.params, &self.intermediates[..self.n_intermediates], self.ignoring, b);
+        p.hook(
+            &self.params,
+            &self.intermediates[..self.n_intermediates],
+            self.ignoring,
+            b,
+        );
         self.state = State::DcsPassthrough;
     }
 
@@ -381,7 +400,11 @@ impl Parser {
         let mut rest = &self.string[..];
         loop {
             // The last slot swallows the remainder, `;` included (URIs, base64).
-            let split = if n == MAX_OSC_PARAMS - 1 { None } else { rest.iter().position(|&c| c == b';') };
+            let split = if n == MAX_OSC_PARAMS - 1 {
+                None
+            } else {
+                rest.iter().position(|&c| c == b';')
+            };
             match split {
                 Some(i) => {
                     parts[n] = &rest[..i];
@@ -416,7 +439,10 @@ fn printable_ascii_len(bytes: &[u8]) -> usize {
         }
         i += 8;
     }
-    i + bytes[i..].iter().position(|&b| !(0x20..0x7F).contains(&b)).unwrap_or(bytes.len() - i)
+    i + bytes[i..]
+        .iter()
+        .position(|&b| !(0x20..0x7F).contains(&b))
+        .unwrap_or(bytes.len() - i)
 }
 
 /// Decodes valid UTF-8 from the start of `text` and prints it in batches.
@@ -431,7 +457,9 @@ fn lead_bytes(window: &[u8]) -> u64 {
     const LOW: u64 = 0x7F7F_7F7F_7F7F_7F7F;
     let mut mask = 0;
     for (k, chunk) in window.chunks_exact(8).take(8).enumerate() {
-        let x = u64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]);
+        let x = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
         let t = (x & 0xC0C0_C0C0_C0C0_C0C0) ^ HIGH; // zero bytes are continuations
         let nonzero = (((t & LOW) + LOW) | t) & HIGH;
         // Gather each byte's flag into one bit per byte.
@@ -458,7 +486,10 @@ fn decode4(w: u32) -> Option<(u32, usize)> {
     // leading one) or 0xF8.. gets length 0, which the checks below reject.
     let ones = ((w >> 24) as u8).leading_ones() as usize;
     let len = (ones + (ones == 0) as usize) * (ones != 1 && ones <= 4) as usize;
-    let cp = (((w >> 24) & LEAD_MASK[len]) << 18 | (w >> 16 & 0x3F) << 12 | (w >> 8 & 0x3F) << 6 | (w & 0x3F))
+    let cp = (((w >> 24) & LEAD_MASK[len]) << 18
+        | (w >> 16 & 0x3F) << 12
+        | (w >> 8 & 0x3F) << 6
+        | (w & 0x3F))
         >> (6 * (4 - len as u32));
     let ok = (w & CONT_MASK[len] == CONT_BITS[len])
         & (cp >= MIN[len])
@@ -493,7 +524,12 @@ fn decode_run<P: Perform>(p: &mut P, text: &[u8]) -> usize {
             let mut at = 0;
             while at < 60 {
                 let next = at + 1 + (leads >> (at + 1)).trailing_zeros() as usize;
-                let w = u32::from_be_bytes([window[at], window[at + 1], window[at + 2], window[at + 3]]);
+                let w = u32::from_be_bytes([
+                    window[at],
+                    window[at + 1],
+                    window[at + 2],
+                    window[at + 3],
+                ]);
                 match decode4(w) {
                     Some((cp, len)) if at + len == next => {
                         // SAFETY: decode4 only accepts Unicode scalar values.
@@ -509,7 +545,9 @@ fn decode_run<P: Perform>(p: &mut P, text: &[u8]) -> usize {
             }
         }
         let Some(&b0) = text.get(j) else { break };
-        let fast = text.get(j..j + 4).and_then(|b| decode4(u32::from_be_bytes([b[0], b[1], b[2], b[3]])));
+        let fast = text
+            .get(j..j + 4)
+            .and_then(|b| decode4(u32::from_be_bytes([b[0], b[1], b[2], b[3]])));
         let (cp, len) = if let Some(decoded) = fast {
             decoded
         } else if b0 < 0x80 {
@@ -519,13 +557,17 @@ fn decode_run<P: Perform>(p: &mut P, text: &[u8]) -> usize {
             (u32::from(b0), 1)
         } else if b0 < 0xE0 {
             match text.get(j + 1) {
-                Some(&b1) if b0 >= 0xC2 && cont(b1) => ((u32::from(b0 & 0x1F) << 6) | u32::from(b1 & 0x3F), 2),
+                Some(&b1) if b0 >= 0xC2 && cont(b1) => {
+                    ((u32::from(b0 & 0x1F) << 6) | u32::from(b1 & 0x3F), 2)
+                }
                 _ => break,
             }
         } else if b0 < 0xF0 {
             match text.get(j + 1..j + 3) {
                 Some(&[b1, b2]) if cont(b1) && cont(b2) => {
-                    let cp = (u32::from(b0 & 0x0F) << 12) | (u32::from(b1 & 0x3F) << 6) | u32::from(b2 & 0x3F);
+                    let cp = (u32::from(b0 & 0x0F) << 12)
+                        | (u32::from(b1 & 0x3F) << 6)
+                        | u32::from(b2 & 0x3F);
                     if cp < 0x800 || (0xD800..0xE000).contains(&cp) {
                         break;
                     }
@@ -567,14 +609,21 @@ mod tests {
 
     #[test]
     fn decode4_matches_std() {
-        let interesting = [0x00, 0x1F, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xF4, 0xFF];
+        let interesting = [
+            0x00, 0x1F, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xF4, 0xFF,
+        ];
         for b0 in 0..=255u8 {
             for b1 in interesting {
                 for b2 in interesting {
                     for b3 in interesting {
                         let bytes = [b0, b1, b2, b3];
-                        let expected = bytes.utf8_chunks().next().and_then(|chunk| chunk.valid().chars().next());
-                        let expected = expected.filter(|c| !c.is_ascii_control()).map(|c| (c as u32, c.len_utf8()));
+                        let expected = bytes
+                            .utf8_chunks()
+                            .next()
+                            .and_then(|chunk| chunk.valid().chars().next());
+                        let expected = expected
+                            .filter(|c| !c.is_ascii_control())
+                            .map(|c| (c as u32, c.len_utf8()));
                         assert_eq!(decode4(u32::from_be_bytes(bytes)), expected, "{bytes:02x?}");
                     }
                 }
@@ -583,7 +632,10 @@ mod tests {
         for c in ['é', '中', '😀', '\u{10FFFF}', '\u{FFFD}'] {
             let mut bytes = [b'a'; 4];
             c.encode_utf8(&mut bytes);
-            assert_eq!(decode4(u32::from_be_bytes(bytes)), Some((c as u32, c.len_utf8())));
+            assert_eq!(
+                decode4(u32::from_be_bytes(bytes)),
+                Some((c as u32, c.len_utf8()))
+            );
         }
     }
 
@@ -600,13 +652,24 @@ mod tests {
         fn csi_dispatch(&mut self, params: &Params, inter: &[u8], ignore: bool, action: u8) {
             let groups: Vec<_> = params.iter().map(|g| format!("{g:?}")).collect();
             let inter = String::from_utf8_lossy(inter);
-            self.0.push(format!("csi {inter}{} [{}] {ignore}", action as char, groups.join(",")));
+            self.0.push(format!(
+                "csi {inter}{} [{}] {ignore}",
+                action as char,
+                groups.join(",")
+            ));
         }
         fn esc_dispatch(&mut self, inter: &[u8], _: bool, b: u8) {
-            self.0.push(format!("esc {}{}", String::from_utf8_lossy(inter), b as char));
+            self.0.push(format!(
+                "esc {}{}",
+                String::from_utf8_lossy(inter),
+                b as char
+            ));
         }
         fn osc_dispatch(&mut self, params: &[&[u8]], bell: bool) {
-            let parts: Vec<_> = params.iter().map(|p| String::from_utf8_lossy(p).into_owned()).collect();
+            let parts: Vec<_> = params
+                .iter()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
             self.0.push(format!("osc {} {bell}", parts.join("|")));
         }
         fn hook(&mut self, _: &Params, _: &[u8], _: bool, action: u8) {
@@ -619,7 +682,8 @@ mod tests {
             self.0.push("unhook".into());
         }
         fn apc_dispatch(&mut self, data: &[u8]) {
-            self.0.push(format!("apc {}", String::from_utf8_lossy(data)));
+            self.0
+                .push(format!("apc {}", String::from_utf8_lossy(data)));
         }
     }
 
@@ -631,13 +695,16 @@ mod tests {
 
     #[test]
     fn prints_utf8_and_controls() {
-        assert_eq!(parse("a\u{e9}\r\n\u{1F600}".as_bytes()), [
-            "print a",
-            "print \u{e9}",
-            "exec 0x0d",
-            "exec 0x0a",
-            "print \u{1F600}"
-        ]);
+        assert_eq!(
+            parse("a\u{e9}\r\n\u{1F600}".as_bytes()),
+            [
+                "print a",
+                "print \u{e9}",
+                "exec 0x0d",
+                "exec 0x0a",
+                "print \u{1F600}"
+            ]
+        );
     }
 
     #[test]
@@ -653,17 +720,35 @@ mod tests {
     #[test]
     fn invalid_utf8_inside_text_runs() {
         // Overlong, surrogate and truncated sequences between valid text.
-        assert_eq!(parse(b"a\xc0\xafb"), ["print a", "print \u{FFFD}", "print \u{FFFD}", "print b"]);
+        assert_eq!(
+            parse(b"a\xc0\xafb"),
+            ["print a", "print \u{FFFD}", "print \u{FFFD}", "print b"]
+        );
         assert_eq!(parse(b"\xed\xa0\x80x"), ["print \u{FFFD}", "print x"]);
-        assert_eq!(parse("é中😀".as_bytes()), ["print é", "print 中", "print 😀"]);
+        assert_eq!(
+            parse("é中😀".as_bytes()),
+            ["print é", "print 中", "print 😀"]
+        );
     }
 
     #[test]
     fn bulk_decode_matches_bytewise() {
         // Long runs take the windowed fast path; feeding one byte at a time
         // takes the state machine. Both must see the same characters.
-        let pieces: [&[u8]; 12] =
-            [b"a", "é".as_bytes(), "中".as_bytes(), "😀".as_bytes(), b"\n", b"\x80", b"\xe4\xb8", b"\x1b[1m", b"\xc0\xaf", b"\xf4\x90\x80\x80", b"\x7f", "\u{85}".as_bytes()];
+        let pieces: [&[u8]; 12] = [
+            b"a",
+            "é".as_bytes(),
+            "中".as_bytes(),
+            "😀".as_bytes(),
+            b"\n",
+            b"\x80",
+            b"\xe4\xb8",
+            b"\x1b[1m",
+            b"\xc0\xaf",
+            b"\xf4\x90\x80\x80",
+            b"\x7f",
+            "\u{85}".as_bytes(),
+        ];
         let mut seed = 7u32;
         for _ in 0..300 {
             let mut input = Vec::new();
@@ -671,7 +756,13 @@ mod tests {
                 seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
                 // Mostly valid text, so the fast path gets long stretches.
                 let k = (seed >> 16) as usize % 40;
-                input.extend_from_slice(pieces[if k < 36 { k % 4 } else { 4 + (seed >> 8) as usize % 8 }]);
+                input.extend_from_slice(
+                    pieces[if k < 36 {
+                        k % 4
+                    } else {
+                        4 + (seed >> 8) as usize % 8
+                    }],
+                );
             }
             let mut bytewise = Log::default();
             let mut parser = Parser::new();
@@ -698,7 +789,10 @@ mod tests {
 
     #[test]
     fn invalid_utf8_becomes_replacement() {
-        assert_eq!(parse(b"\xff\xc3a"), ["print \u{FFFD}", "print \u{FFFD}", "print a"]);
+        assert_eq!(
+            parse(b"\xff\xc3a"),
+            ["print \u{FFFD}", "print \u{FFFD}", "print a"]
+        );
     }
 
     #[test]
@@ -706,20 +800,29 @@ mod tests {
         assert_eq!(parse(b"\x1b[1;2H"), ["csi H [[1],[2]] false"]);
         assert_eq!(parse(b"\x1b[m"), ["csi m [] false"]);
         assert_eq!(parse(b"\x1b[;5H"), ["csi H [[0],[5]] false"]);
-        assert_eq!(parse(b"\x1b[38:2::255:0:10m"), ["csi m [[38, 2, 0, 255, 0, 10]] false"]);
+        assert_eq!(
+            parse(b"\x1b[38:2::255:0:10m"),
+            ["csi m [[38, 2, 0, 255, 0, 10]] false"]
+        );
         assert_eq!(parse(b"\x1b[?1049h"), ["csi ?h [[1049]] false"]);
         assert_eq!(parse(b"\x1b[2 q"), ["csi  q [[2]] false"]);
     }
 
     #[test]
     fn c0_inside_csi_executes() {
-        assert_eq!(parse(b"\x1b[1\n;2H"), ["exec 0x0a", "csi H [[1],[2]] false"]);
+        assert_eq!(
+            parse(b"\x1b[1\n;2H"),
+            ["exec 0x0a", "csi H [[1],[2]] false"]
+        );
     }
 
     #[test]
     fn osc_with_bel_and_st() {
         assert_eq!(parse(b"\x1b]0;hi;there\x07"), ["osc 0|hi|there true"]);
-        assert_eq!(parse(b"\x1b]133;D;0\x1b\\"), ["osc 133|D|0 false", "esc \\"]);
+        assert_eq!(
+            parse(b"\x1b]133;D;0\x1b\\"),
+            ["osc 133|D|0 false", "esc \\"]
+        );
     }
 
     #[test]
@@ -729,8 +832,14 @@ mod tests {
 
     #[test]
     fn dcs_and_apc() {
-        assert_eq!(parse(b"\x1bPqab\x1b\\"), ["hook q", "put a", "put b", "unhook", "esc \\"]);
-        assert_eq!(parse(b"\x1b_Gf=24;AAAA\x1b\\"), ["apc Gf=24;AAAA", "esc \\"]);
+        assert_eq!(
+            parse(b"\x1bPqab\x1b\\"),
+            ["hook q", "put a", "put b", "unhook", "esc \\"]
+        );
+        assert_eq!(
+            parse(b"\x1b_Gf=24;AAAA\x1b\\"),
+            ["apc Gf=24;AAAA", "esc \\"]
+        );
     }
 
     #[test]

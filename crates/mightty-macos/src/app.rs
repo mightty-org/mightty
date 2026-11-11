@@ -7,32 +7,37 @@
 //! AI agents can open, drive and read panes; panes they open get windows.
 
 use std::cell::{Cell, RefCell};
+use std::env;
 use std::ffi::{CStr, c_void};
 use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::env;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
-use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Rgb, Term, clipboard_reply};
+use mightty_term::{
+    ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Rgb, Term, clipboard_reply,
+};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, Extent, Titlebar, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
+use crate::config::{
+    self, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE, MIN_FONT_SIZE,
+    OptionAsAlt, Permission, QuickPosition, SaveState, Titlebar,
+};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::hotkey;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
-use crate::open;
-use crate::palette::{self, Palette};
-use crate::scrollbar::{self, Scrollbar};
 use crate::linkhint::{self, LinkHint};
 use crate::notify;
-use crate::session::{self, Layout, Session};
+use crate::open;
+use crate::palette::{self, Palette};
 use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
+use crate::scrollbar::{self, Scrollbar};
+use crate::session::{self, Layout, Session};
 use crate::split::{self, Axis, Direction, Divider, Node, Place, Rect};
 use crate::tabbar::{self, TabBar};
 
@@ -77,10 +82,19 @@ struct Closed {
 
 enum Reopen {
     /// A pane of `window`, at `place` in its splits.
-    Pane { window: Id, place: Place<Id>, cwd: Option<String>, title: Option<String> },
+    Pane {
+        window: Id,
+        place: Place<Id>,
+        cwd: Option<String>,
+        title: Option<String>,
+    },
     /// A tab or window laid out as `tab`: a tab of `tab_of` if that's still
     /// open, else a window at `frame`.
-    Tab { tab: session::Tab, tab_of: Id, frame: CGRect },
+    Tab {
+        tab: session::Tab,
+        tab_of: Id,
+        frame: CGRect,
+    },
 }
 
 /// What a tab bar shows: titles, the selected tab, and whether it's shown at all.
@@ -228,8 +242,13 @@ impl Search {
         }
         let (start, found) = term.search_from(&self.query, if full { 0 } else { self.searched_to });
         // Rows that left scrollback take their matches with them.
-        let first = if term.is_alt_screen() { term.lines_scrolled() } else { term.first_line() };
-        self.matches.retain(|m| !full && m.0.0 < start && m.0.0 >= first);
+        let first = if term.is_alt_screen() {
+            term.lines_scrolled()
+        } else {
+            term.first_line()
+        };
+        self.matches
+            .retain(|m| !full && m.0.0 < start && m.0.0 >= first);
         self.matches.extend(found);
         (self.searched_to, self.alt) = (term.lines_scrolled(), term.is_alt_screen());
         self.current = if full {
@@ -246,14 +265,21 @@ impl Search {
     /// Selects the match `step` away from the current one, wrapping around.
     fn step(&mut self, step: isize) {
         let n = self.matches.len() as isize;
-        let Some(current) = self.current.filter(|_| n > 0) else { return };
+        let Some(current) = self.current.filter(|_| n > 0) else {
+            return;
+        };
         let at = self.matches.partition_point(|m| *m < current) as isize;
         self.current = Some(self.matches[(at + step).rem_euclid(n) as usize]);
     }
 
     /// Shows "3 of 17", counting from the oldest.
     fn update_count(&mut self) {
-        let position = self.current.map(|c| (self.matches.partition_point(|m| *m < c) + 1, self.matches.len()));
+        let position = self.current.map(|c| {
+            (
+                self.matches.partition_point(|m| *m < c) + 1,
+                self.matches.len(),
+            )
+        });
         self.bar.show_count(position, !self.query.is_empty());
     }
 }
@@ -280,7 +306,11 @@ struct Selection {
 /// The selected range, expanded to words or lines, start first.
 fn selection_range(selection: Option<Selection>, term: &Term) -> Option<renderer::Selection> {
     let s = selection.filter(|s| s.dragged || s.granularity != Granularity::Cell)?;
-    let (mut start, mut end) = if s.anchor <= s.head { (s.anchor, s.head) } else { (s.head, s.anchor) };
+    let (mut start, mut end) = if s.anchor <= s.head {
+        (s.anchor, s.head)
+    } else {
+        (s.head, s.anchor)
+    };
     match s.granularity {
         Granularity::Cell => {}
         Granularity::Word => {
@@ -310,7 +340,10 @@ fn us_keyboard_layout() -> bool {
         }
         let id = string_from_ns(TISGetInputSourceProperty(source, kTISPropertyInputSourceID) as Id);
         CFRelease(source);
-        matches!(id.as_str(), "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
+        matches!(
+            id.as_str(),
+            "com.apple.keylayout.US" | "com.apple.keylayout.ABC"
+        )
     }
 }
 
@@ -334,8 +367,17 @@ fn modifiers(flags: usize) -> Mods {
 
 /// The device-dependent bit in `modifierFlags` that is set while each
 /// modifier key (by key code) is down; Caps Lock's is its lock state.
-const MODIFIER_KEYS: [(u16, usize); 9] =
-    [(56, 0x2), (60, 0x4), (59, 0x1), (62, 0x2000), (58, 0x20), (61, 0x40), (55, 0x8), (54, 0x10), (57, CAPS)];
+const MODIFIER_KEYS: [(u16, usize); 9] = [
+    (56, 0x2),
+    (60, 0x4),
+    (59, 0x1),
+    (62, 0x2000),
+    (58, 0x20),
+    (61, 0x40),
+    (55, 0x8),
+    (54, 0x10),
+    (57, CAPS),
+];
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -432,7 +474,11 @@ extern "C" fn on_blink_tick(_: *mut c_void) {
     let (off, typed) = BLINK.get();
     BLINK.set((!off && typed.elapsed() >= BLINK_INTERVAL, typed));
     with_app(|app| {
-        for surface in app.surfaces.iter_mut().filter(|s| s.renderer.cursor_blinks(&s.snapshot)) {
+        for surface in app
+            .surfaces
+            .iter_mut()
+            .filter(|s| s.renderer.cursor_blinks(&s.snapshot))
+        {
             surface.render();
         }
     });
@@ -450,20 +496,30 @@ fn schedule_animation(due: Instant) {
         return;
     }
     ANIMATION_TICK.set(Some(due));
-    run_on_main_after(due.saturating_duration_since(Instant::now()), on_animation_tick);
+    run_on_main_after(
+        due.saturating_duration_since(Instant::now()),
+        on_animation_tick,
+    );
 }
 
 /// Draws the panes whose animated images have a frame due, then waits for the next.
 extern "C" fn on_animation_tick(_: *mut c_void) {
     let now = Instant::now();
     // Superseded by a sooner tick, which scheduled this one's successor.
-    if ANIMATION_TICK.get().is_none_or(|at| at > now + Duration::from_millis(1)) {
+    if ANIMATION_TICK
+        .get()
+        .is_none_or(|at| at > now + Duration::from_millis(1))
+    {
         return;
     }
     ANIMATION_TICK.set(None);
     with_app(|app| {
         let soon = now + Duration::from_millis(1);
-        for surface in app.surfaces.iter_mut().filter(|s| s.animation_due.is_some_and(|due| due <= soon)) {
+        for surface in app
+            .surfaces
+            .iter_mut()
+            .filter(|s| s.animation_due.is_some_and(|due| due <= soon))
+        {
             surface.render();
         }
         if let Some(next) = app.surfaces.iter().filter_map(|s| s.animation_due).min() {
@@ -488,7 +544,10 @@ extern "C" fn on_autoscroll_tick(_: *mut c_void) {
                 (term.is_alt_screen(), term.scrollback().len())
             };
             if !alt {
-                surface.scroll_offset = surface.scroll_offset.saturating_add_signed(surface.autoscroll).min(history);
+                surface.scroll_offset = surface
+                    .scroll_offset
+                    .saturating_add_signed(surface.autoscroll)
+                    .min(history);
             }
             // SAFETY: main thread; documented signature.
             let location = unsafe { msg!(surface.window, c"mouseLocationOutsideOfEventStream") };
@@ -540,7 +599,9 @@ extern "C" fn on_redraw(_: *mut c_void) {
     let mut wait: Option<(Duration, Vec<PaneId>)> = None;
     with_app(|app| {
         for window in app.surfaces.iter_mut().filter(|w| ids.contains(&w.pane.id)) {
-            let due = window.echo_frame.map_or(window.next_frame, |at| at.min(window.next_frame));
+            let due = window
+                .echo_frame
+                .map_or(window.next_frame, |at| at.min(window.next_frame));
             if due <= now {
                 window.render();
             } else {
@@ -589,7 +650,13 @@ extern "C" fn on_pane_exited(context: *mut c_void) {
 
 extern "C" fn on_pane_closed(context: *mut c_void) {
     let id = context as PaneId;
-    let views = with_app(|app| app.surfaces.iter().filter(|w| w.pane.id == id).map(|w| w.view).collect());
+    let views = with_app(|app| {
+        app.surfaces
+            .iter()
+            .filter(|w| w.pane.id == id)
+            .map(|w| w.view)
+            .collect()
+    });
     close_surfaces(views.unwrap_or_default());
 }
 
@@ -628,7 +695,11 @@ pub fn run(config: Config) -> io::Result<()> {
         }
         // The first pane starts before its window: give it the cell size now.
         let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
-        let scale: f64 = if screen.is_null() { 2.0 } else { msg!(screen, c"backingScaleFactor") };
+        let scale: f64 = if screen.is_null() {
+            2.0
+        } else {
+            msg!(screen, c"backingScaleFactor")
+        };
         let (cw, ch) = renderer::cell_size_for(&config, scale);
         mightty_mux::set_cell_pixels(cw, ch);
         let first = SpawnOptions {
@@ -673,7 +744,13 @@ pub fn run(config: Config) -> io::Result<()> {
         }
         run_on_main_after(SAVE_INTERVAL, on_save_tick);
         // What the config file is now; changes to it are applied as they're saved.
-        let path = with_app(|app| app.config.file().map(Path::to_path_buf).or_else(|| Some(config::config_dir()?.join("config")))).flatten();
+        let path = with_app(|app| {
+            app.config
+                .file()
+                .map(Path::to_path_buf)
+                .or_else(|| Some(config::config_dir()?.join("config")))
+        })
+        .flatten();
         CONFIG_SEEN.set(config_stamp(path.as_deref()));
         run_on_main_after(CONFIG_TICK, on_config_tick);
         // As in Ghostty: `kill -USR2` reloads the configuration.
@@ -682,7 +759,14 @@ pub fn run(config: Config) -> io::Result<()> {
         // Light and dark mode changing, for `theme = light:…,dark:…`.
         let center: Id = msg!(class(c"NSDistributedNotificationCenter"), c"defaultCenter");
         let name = nsstring("AppleInterfaceThemeChangedNotification");
-        call!(center, c"addObserver:selector:name:object:", delegate, sel(c"appearanceChanged:"), name, NIL);
+        call!(
+            center,
+            c"addObserver:selector:name:object:",
+            delegate,
+            sel(c"appearanceChanged:"),
+            name,
+            NIL
+        );
         run_on_main_after(BLINK_INTERVAL, on_blink_tick);
         call!(ns_app, c"activateIgnoringOtherApps:", YES);
         call!(ns_app, c"run");
@@ -703,14 +787,25 @@ impl App {
 
     /// `open_window_in`, or with `quick` the quick terminal's window:
     /// borderless, never a tab, left hidden for `show_quick` to place.
-    fn open_window_with(&mut self, pane: Arc<Pane>, hold: bool, tab_of: Id, focus: bool, quick: bool) -> Id {
+    fn open_window_with(
+        &mut self,
+        pane: Arc<Pane>,
+        hold: bool,
+        tab_of: Id,
+        focus: bool,
+        quick: bool,
+    ) -> Id {
         if !quick && !tab_of.is_null() && self.own_tabs() && self.shown(tab_of).is_some() {
             return self.add_tab(tab_of, pane, hold, focus);
         }
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
-            let scale: f64 = if screen.is_null() { 2.0 } else { msg!(screen, c"backingScaleFactor") };
+            let scale: f64 = if screen.is_null() {
+                2.0
+            } else {
+                msg!(screen, c"backingScaleFactor")
+            };
             let renderer = self.new_renderer(scale);
             let (cols, rows) = {
                 let term = pane.term.lock().unwrap();
@@ -727,7 +822,14 @@ impl App {
             };
             // titled | closable | miniaturizable | resizable, or borderless; buffered backing.
             let window: Id = msg!(
-                msg!(if quick { quick_window_class() } else { class(c"NSWindow") }, c"alloc"),
+                msg!(
+                    if quick {
+                        quick_window_class()
+                    } else {
+                        class(c"NSWindow")
+                    },
+                    c"alloc"
+                ),
                 c"initWithContentRect:styleMask:backing:defer:",
                 content,
                 if quick { 0usize } else { 15usize },
@@ -752,7 +854,15 @@ impl App {
             call!(window, c"setContentView:", root);
             call!(root, c"release");
             let view = self.add_surface(window, content, renderer, pane, hold, true);
-            self.windows.push(Window { window, root, shown: true, tree: Node::Leaf(view), active: view, zoomed: false, dragging: None });
+            self.windows.push(Window {
+                window,
+                root,
+                shown: true,
+                tree: Node::Leaf(view),
+                active: view,
+                zoomed: false,
+                dragging: None,
+            });
             call!(window, c"makeFirstResponder:", view);
             if quick {
                 style_window(window, root, &self.config);
@@ -792,20 +902,37 @@ impl App {
                 }
             }
             let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
-            let front: Id = msg!(msg!(class(c"NSWorkspace"), c"sharedWorkspace"), c"frontmostApplication");
+            let front: Id = msg!(
+                msg!(class(c"NSWorkspace"), c"sharedWorkspace"),
+                c"frontmostApplication"
+            );
             let us: Id = msg!(class(c"NSRunningApplication"), c"currentApplication");
             // Where the keys go back to when it hides.
-            let pid = |app: Id| -> i32 { if app.is_null() { 0 } else { msg!(app, c"processIdentifier") } };
+            let pid = |app: Id| -> i32 {
+                if app.is_null() {
+                    0
+                } else {
+                    msg!(app, c"processIdentifier")
+                }
+            };
             if pid(front) != pid(us) {
                 if !self.quick_return.is_null() {
                     call!(self.quick_return, c"release");
                 }
-                self.quick_return = if front.is_null() { NIL } else { msg!(front, c"retain") };
+                self.quick_return = if front.is_null() {
+                    NIL
+                } else {
+                    msg!(front, c"retain")
+                };
             }
             let window = match self.quick {
                 Some(window) => window,
                 None => {
-                    let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, ..Default::default() };
+                    let opts = SpawnOptions {
+                        cols: self.config.cols,
+                        rows: self.config.rows,
+                        ..Default::default()
+                    };
                     let pane = match self.mux.spawn(opts) {
                         Ok(pane) => pane,
                         Err(e) => return eprintln!("mightty: could not start a shell: {e}"),
@@ -859,7 +986,11 @@ impl App {
     fn pane_bounds(&self, window: Id, root: Id) -> Rect {
         // SAFETY: main thread; documented signature.
         let mut bounds = to_rect(unsafe { send_rect(root, c"bounds") });
-        if self.bars.iter().any(|b| b.0 == window && b.2.as_ref().is_some_and(|s| s.2)) {
+        if self
+            .bars
+            .iter()
+            .any(|b| b.0 == window && b.2.as_ref().is_some_and(|s| s.2))
+        {
             bounds.height = (bounds.height - tabbar::HEIGHT).max(0.0);
         }
         bounds
@@ -868,13 +999,29 @@ impl App {
     /// The title of the tab at `index` of `windows`: its active pane's.
     fn tab_title(&self, index: usize) -> String {
         let active = self.windows[index].active;
-        let Some(s) = self.surfaces.iter().find(|s| s.view == active) else { return String::new() };
+        let Some(s) = self.surfaces.iter().find(|s| s.view == active) else {
+            return String::new();
+        };
         let mark = if s.bell { "🔔 " } else { "" };
         if let Some(title) = &s.title_override {
             return format!("{mark}{title}");
         }
-        let title = s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned();
-        format!("{mark}{}", if title.is_empty() { &s.pane.command } else { &title })
+        let title = s
+            .pane
+            .term
+            .lock()
+            .unwrap()
+            .title()
+            .trim_start_matches(['●', ' '])
+            .to_owned();
+        format!(
+            "{mark}{}",
+            if title.is_empty() {
+                &s.pane.command
+            } else {
+                &title
+            }
+        )
     }
 
     /// Brings `window`'s tab bar up to date: there with mightty's own tabs
@@ -894,14 +1041,19 @@ impl App {
         // In the title bar's place it's always there; else, as AppKit's, from two tabs.
         let show = style == Titlebar::Tabs || tabs.len() > 1;
         let titles: Vec<String> = tabs.iter().map(|&i| self.tab_title(i)).collect();
-        let selected = tabs.iter().position(|&i| self.windows[i].shown).unwrap_or(0);
+        let selected = tabs
+            .iter()
+            .position(|&i| self.windows[i].shown)
+            .unwrap_or(0);
         let now = Some((titles.clone(), selected, show));
         if !self.bars.iter().any(|b| b.0 == window) {
             let root = self.windows[tabs[0]].root;
             // SAFETY: main thread; `root` is the window's content view.
             self.bars.push((window, unsafe { TabBar::new(root) }, None));
         }
-        let Some(entry) = self.bars.iter_mut().find(|b| b.0 == window) else { return };
+        let Some(entry) = self.bars.iter_mut().find(|b| b.0 == window) else {
+            return;
+        };
         if entry.2 == now {
             return;
         }
@@ -909,8 +1061,18 @@ impl App {
         // Past the window's buttons, when they're over it.
         let left = if style == Titlebar::Tabs { 78.0 } else { 0.0 };
         // A tab came or went: the others slide to their places.
-        let animate = entry.2.as_ref().is_some_and(|s| s.0.len() != titles.len() && s.2 && show);
-        entry.1.show(&titles, selected, left, self.config.theme.background, self.config.theme.foreground, animate);
+        let animate = entry
+            .2
+            .as_ref()
+            .is_some_and(|s| s.0.len() != titles.len() && s.2 && show);
+        entry.1.show(
+            &titles,
+            selected,
+            left,
+            self.config.theme.background,
+            self.config.theme.foreground,
+            animate,
+        );
         entry.1.set_hidden(!show);
         entry.2 = now;
         if was_shown != show {
@@ -923,7 +1085,11 @@ impl App {
         let places = self.tabs_of(window);
         if from != to && from < places.len() && to < places.len() {
             // Taken out in order, put back in the same places in the new order.
-            let mut tabs: Vec<Window> = places.iter().rev().map(|&i| self.windows.remove(i)).collect();
+            let mut tabs: Vec<Window> = places
+                .iter()
+                .rev()
+                .map(|&i| self.windows.remove(i))
+                .collect();
             tabs.reverse();
             let moved = tabs.remove(from);
             tabs.insert(to, moved);
@@ -945,9 +1111,15 @@ impl App {
         let ti = *places.get(index)?;
         let tab = self.capture_tab(ti)?;
         let leaves = self.windows[ti].tree.leaves();
-        let panes = leaves.iter().filter_map(|v| self.surfaces.iter().find(|s| s.view == *v)).map(|s| s.pane.clone()).collect();
+        let panes = leaves
+            .iter()
+            .filter_map(|v| self.surfaces.iter().find(|s| s.view == *v))
+            .map(|s| s.pane.clone())
+            .collect();
         // Its views go; its panes don't.
-        let (gone, kept): (Vec<Surface>, Vec<Surface>) = mem::take(&mut self.surfaces).into_iter().partition(|s| leaves.contains(&s.view));
+        let (gone, kept): (Vec<Surface>, Vec<Surface>) = mem::take(&mut self.surfaces)
+            .into_iter()
+            .partition(|s| leaves.contains(&s.view));
         self.surfaces = kept;
         for surface in &gone {
             // SAFETY: main thread; the window's content view holds the container.
@@ -983,13 +1155,20 @@ impl App {
         if self.tabs_of(window).len() < 2 {
             return self.move_tab(window, index, index);
         }
-        let Some((tab, panes)) = self.take_tab(window, index) else { return };
-        let Some(new) = self.restore_tab_with(&tab, NIL, &panes) else { return };
+        let Some((tab, panes)) = self.take_tab(window, index) else {
+            return;
+        };
+        let Some(new) = self.restore_tab_with(&tab, NIL, &panes) else {
+            return;
+        };
         // Its title bar where the tab was let go.
         // SAFETY: main thread; documented signatures.
         unsafe {
             let mut frame = send_rect(new, c"frame");
-            frame.origin = CGPoint { x: point.x - 60.0, y: point.y - frame.size.height + 14.0 };
+            frame.origin = CGPoint {
+                x: point.x - 60.0,
+                y: point.y - frame.size.height + 14.0,
+            };
             call!(new, c"setFrame:display:", frame, YES);
             call!(new, c"makeKeyAndOrderFront:", NIL);
         }
@@ -1001,7 +1180,9 @@ impl App {
             return self.move_tab(window, index, index);
         }
         let alone = self.tabs_of(window).len() == 1;
-        let Some(taken) = self.take_tab(window, index) else { return };
+        let Some(taken) = self.take_tab(window, index) else {
+            return;
+        };
         self.put_tab(taken, into, at);
         if alone {
             // Emptied: the window goes, its tab being elsewhere now.
@@ -1015,7 +1196,9 @@ impl App {
     fn merge_window(&mut self, window: Id, into: Id, at: usize) {
         let count = self.tabs_of(window).len();
         for k in 0..count {
-            let Some(taken) = self.take_tab(window, 0) else { break };
+            let Some(taken) = self.take_tab(window, 0) else {
+                break;
+            };
             self.put_tab(taken, into, at + k);
         }
         // SAFETY: main thread; a live NSWindow, empty now.
@@ -1034,28 +1217,49 @@ impl App {
     }
 
     fn shown_mut(&mut self, window: Id) -> Option<&mut Window> {
-        self.windows.iter_mut().find(|w| w.window == window && w.shown)
+        self.windows
+            .iter_mut()
+            .find(|w| w.window == window && w.shown)
     }
 
     /// The tab holding the pane `view`, by its index in `windows`.
     fn tab_index(&self, view: Id) -> Option<usize> {
-        self.windows.iter().position(|w| w.tree.leaves().contains(&view))
+        self.windows
+            .iter()
+            .position(|w| w.tree.leaves().contains(&view))
     }
 
     /// `window`'s tabs, in order, by their index in `windows`.
     fn tabs_of(&self, window: Id) -> Vec<usize> {
-        (0..self.windows.len()).filter(|&i| self.windows[i].window == window).collect()
+        (0..self.windows.len())
+            .filter(|&i| self.windows[i].window == window)
+            .collect()
     }
 
     /// A tab of mightty's own for `pane` in `window`, after its others;
     /// shown with `focus`.
     fn add_tab(&mut self, window: Id, pane: Arc<Pane>, hold: bool, focus: bool) -> Id {
-        let Some(root) = self.shown(window).map(|w| w.root) else { return window };
+        let Some(root) = self.shown(window).map(|w| w.root) else {
+            return window;
+        };
         // SAFETY: main thread; documented signatures.
-        let (frame, scale): (CGRect, f64) = unsafe { (send_rect(root, c"bounds"), msg!(window, c"backingScaleFactor")) };
+        let (frame, scale): (CGRect, f64) = unsafe {
+            (
+                send_rect(root, c"bounds"),
+                msg!(window, c"backingScaleFactor"),
+            )
+        };
         let renderer = self.new_renderer(scale);
         let view = self.add_surface(window, frame, renderer, pane.clone(), hold, false);
-        self.windows.push(Window { window, root, shown: false, tree: Node::Leaf(view), active: view, zoomed: false, dragging: None });
+        self.windows.push(Window {
+            window,
+            root,
+            shown: false,
+            tree: Node::Leaf(view),
+            active: view,
+            zoomed: false,
+            dragging: None,
+        });
         if focus {
             let index = self.tabs_of(window).len() - 1;
             self.select_tab(window, index);
@@ -1070,11 +1274,16 @@ impl App {
     /// Shows `window`'s tab `index` (of mightty's own), giving it the keys.
     fn select_tab(&mut self, window: Id, index: usize) {
         let tabs = self.tabs_of(window);
-        let Some(&target) = tabs.get(index) else { return };
+        let Some(&target) = tabs.get(index) else {
+            return;
+        };
         for &t in &tabs {
             self.windows[t].shown = t == target;
         }
-        let (leaves, active) = (self.windows[target].tree.leaves(), self.windows[target].active);
+        let (leaves, active) = (
+            self.windows[target].tree.leaves(),
+            self.windows[target].active,
+        );
         for s in self.surfaces.iter_mut().filter(|s| s.window == window) {
             let inside = leaves.contains(&s.view);
             s.pane.set_visible(inside);
@@ -1085,7 +1294,11 @@ impl App {
         self.layout(window, true);
         self.focus(active);
         self.sync_key_focus();
-        for s in self.surfaces.iter_mut().filter(|s| leaves.contains(&s.view)) {
+        for s in self
+            .surfaces
+            .iter_mut()
+            .filter(|s| leaves.contains(&s.view))
+        {
             s.render();
         }
     }
@@ -1093,12 +1306,17 @@ impl App {
     /// The key window's tab `index` (the last, for `None`), or `step` from
     /// the one shown, when its tabs are mightty's own. False otherwise.
     fn select_own_tab(&mut self, index: Option<usize>, step: isize) -> bool {
-        let Some((window, _)) = self.key_window() else { return false };
+        let Some((window, _)) = self.key_window() else {
+            return false;
+        };
         let tabs = self.tabs_of(window);
         if !self.own_tabs() || tabs.is_empty() {
             return false;
         }
-        let at = tabs.iter().position(|&t| self.windows[t].shown).unwrap_or(0);
+        let at = tabs
+            .iter()
+            .position(|&t| self.windows[t].shown)
+            .unwrap_or(0);
         let n = tabs.len();
         let to = match index {
             _ if step != 0 => (at as isize + step).rem_euclid(n as isize) as usize,
@@ -1116,14 +1334,33 @@ impl App {
         if let Some(tab) = self.capture_tab(index) {
             // SAFETY: main thread; documented signature.
             let frame = unsafe { send_rect(window, c"frame") };
-            let panes = self.windows[index].tree.leaves().iter().filter_map(|v| self.surfaces.iter().find(|s| s.view == *v)).map(|s| s.pane.clone()).collect();
+            let panes = self.windows[index]
+                .tree
+                .leaves()
+                .iter()
+                .filter_map(|v| self.surfaces.iter().find(|s| s.view == *v))
+                .map(|s| s.pane.clone())
+                .collect();
             let leaves = self.windows[index].tree.leaves();
-            let (closed, kept): (Vec<Surface>, Vec<Surface>) = mem::take(&mut self.surfaces).into_iter().partition(|s| leaves.contains(&s.view));
+            let (closed, kept): (Vec<Surface>, Vec<Surface>) = mem::take(&mut self.surfaces)
+                .into_iter()
+                .partition(|s| leaves.contains(&s.view));
             self.surfaces = kept;
-            let at = self.tabs_of(window).iter().position(|&t| t == index).unwrap_or(0);
+            let at = self
+                .tabs_of(window)
+                .iter()
+                .position(|&t| t == index)
+                .unwrap_or(0);
             let was_shown = self.windows[index].shown;
             self.windows.remove(index);
-            self.keep_closed(panes, Reopen::Tab { tab, tab_of: window, frame });
+            self.keep_closed(
+                panes,
+                Reopen::Tab {
+                    tab,
+                    tab_of: window,
+                    frame,
+                },
+            );
             for surface in closed {
                 // SAFETY: main thread; the window's content view holds the container.
                 unsafe { call!(surface.container, c"removeFromSuperview") };
@@ -1146,11 +1383,22 @@ impl App {
 
     /// Adds a view for `pane` to `window`, at `frame` of its content view
     /// until the next layout; `active` if keys are to go to it. Returns the view.
-    fn add_surface(&mut self, window: Id, frame: CGRect, mut renderer: Renderer, pane: Arc<Pane>, hold: bool, active: bool) -> Id {
+    fn add_surface(
+        &mut self,
+        window: Id,
+        frame: CGRect,
+        mut renderer: Renderer,
+        pane: Arc<Pane>,
+        hold: bool,
+        active: bool,
+    ) -> Id {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let layer = renderer.layer();
-            let bounds = CGRect { origin: CGPoint::default(), size: frame.size };
+            let bounds = CGRect {
+                origin: CGPoint::default(),
+                size: frame.size,
+            };
             let view: Id = msg!(msg!(self.view_class, c"alloc"), c"initWithFrame:", bounds);
             // Layer-hosting view: set the layer before enabling it.
             call!(view, c"setLayer:", layer);
@@ -1159,7 +1407,11 @@ impl App {
             // Its background shows through a dimmed terminal.
             let container: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", frame);
             call!(container, c"setWantsLayer:", YES);
-            call!(msg!(container, c"layer"), c"setBackgroundColor:", pane_background(&self.config));
+            call!(
+                msg!(container, c"layer"),
+                c"setBackgroundColor:",
+                pane_background(&self.config)
+            );
             call!(view, c"setAutoresizingMask:", 18usize); // width and height sizable
             // Mouse moves (for Cmd-hovering links) while the window is key.
             let options = 0x01usize | 0x02 | 0x20 | 0x200; // entered/exited, moved, active in key window, visible rect
@@ -1227,7 +1479,12 @@ impl App {
     /// The key window and its active pane.
     fn key_window(&self) -> Option<(Id, Id)> {
         // SAFETY: main thread; documented signature.
-        let key: Id = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow") };
+        let key: Id = unsafe {
+            msg!(
+                msg!(class(c"NSApplication"), c"sharedApplication"),
+                c"keyWindow"
+            )
+        };
         self.shown(key).map(|w| (w.window, w.active))
     }
 
@@ -1238,17 +1495,28 @@ impl App {
         // machine (not from a shell over ssh) and is one.
         let reported = {
             let term = surface.pane.term.lock().unwrap();
-            term.cwd().filter(|_| open::is_local(term.cwd_host(), &open::hostname())).map(PathBuf::from)
+            term.cwd()
+                .filter(|_| open::is_local(term.cwd_host(), &open::hostname()))
+                .map(PathBuf::from)
         };
-        reported.or_else(|| surface.start_dir.clone()).filter(|dir| dir.is_dir())
+        reported
+            .or_else(|| surface.start_dir.clone())
+            .filter(|dir| dir.is_dir())
     }
 
     /// A shell in a new window, or with `tab` in a new tab of the key window.
     /// A new tab of `window`, its shell where the window's is.
     fn new_shell_tab_of(&mut self, window: Id) {
-        let current = self.shown(window).and_then(|w| self.surfaces.iter().find(|s| s.view == w.active));
+        let current = self
+            .shown(window)
+            .and_then(|w| self.surfaces.iter().find(|s| s.view == w.active));
         let cwd = current.and_then(|s| self.cwd_of(s));
-        let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd: cwd.clone(), ..Default::default() };
+        let opts = SpawnOptions {
+            cols: self.config.cols,
+            rows: self.config.rows,
+            cwd: cwd.clone(),
+            ..Default::default()
+        };
         match self.mux.spawn(opts) {
             Ok(pane) => {
                 self.open_window_in(pane, false, window, true);
@@ -1265,7 +1533,12 @@ impl App {
         let current = key.and_then(|(_, view)| self.surfaces.iter().find(|s| s.view == view));
         let cwd = current.and_then(|s| self.cwd_of(s));
         let tab_of = if tab { key.map_or(NIL, |k| k.0) } else { NIL };
-        let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd: cwd.clone(), ..Default::default() };
+        let opts = SpawnOptions {
+            cols: self.config.cols,
+            rows: self.config.rows,
+            cwd: cwd.clone(),
+            ..Default::default()
+        };
         match self.mux.spawn(opts) {
             Ok(pane) => {
                 self.open_window_in(pane, false, tab_of, true);
@@ -1280,19 +1553,35 @@ impl App {
     /// Splits the key window's active pane, a new shell going right of it
     /// (`Axis::Row`) or below it.
     fn split(&mut self, axis: Axis) {
-        let Some((window, active)) = self.key_window() else { return };
-        let Some(current) = self.surfaces.iter().find(|s| s.view == active) else { return };
+        let Some((window, active)) = self.key_window() else {
+            return;
+        };
+        let Some(current) = self.surfaces.iter().find(|s| s.view == active) else {
+            return;
+        };
         let cwd = self.cwd_of(current);
         // SAFETY: main thread; documented signatures.
-        let (frame, scale): (CGRect, f64) = unsafe { (send_rect(current.container, c"frame"), msg!(window, c"backingScaleFactor")) };
+        let (frame, scale): (CGRect, f64) = unsafe {
+            (
+                send_rect(current.container, c"frame"),
+                msg!(window, c"backingScaleFactor"),
+            )
+        };
         // The new pane gets about half: start the shell at that size.
         let mut size = frame.size;
         match axis {
             Axis::Row => size.width = (size.width - GAP) / 2.0,
             Axis::Column => size.height = (size.height - GAP) / 2.0,
         }
-        let (cols, rows) = current.renderer.grid_size(size.width * scale, size.height * scale);
-        let opts = SpawnOptions { cols: cols as u16, rows: rows as u16, cwd: cwd.clone(), ..Default::default() };
+        let (cols, rows) = current
+            .renderer
+            .grid_size(size.width * scale, size.height * scale);
+        let opts = SpawnOptions {
+            cols: cols as u16,
+            rows: rows as u16,
+            cwd: cwd.clone(),
+            ..Default::default()
+        };
         let pane = match self.mux.spawn(opts) {
             Ok(pane) => pane,
             Err(e) => return eprintln!("mightty: could not start a shell: {e}"),
@@ -1305,11 +1594,23 @@ impl App {
 
     /// Splits `at`'s space with a view for `pane` (right of or below it),
     /// which keys go to with `focus`. Returns the view.
-    fn insert_split(&mut self, at: Id, pane: Arc<Pane>, axis: Axis, hold: bool, focus: bool) -> Option<Id> {
+    fn insert_split(
+        &mut self,
+        at: Id,
+        pane: Arc<Pane>,
+        axis: Axis,
+        hold: bool,
+        focus: bool,
+    ) -> Option<Id> {
         let current = self.surfaces.iter().find(|s| s.view == at)?;
         let window = current.window;
         // SAFETY: main thread; documented signatures.
-        let (frame, scale): (CGRect, f64) = unsafe { (send_rect(current.container, c"frame"), msg!(window, c"backingScaleFactor")) };
+        let (frame, scale): (CGRect, f64) = unsafe {
+            (
+                send_rect(current.container, c"frame"),
+                msg!(window, c"backingScaleFactor"),
+            )
+        };
         let renderer = self.new_renderer(scale);
         let view = self.add_surface(window, frame, renderer, pane, hold, focus);
         let tab = self.tab_index(at)?;
@@ -1327,23 +1628,36 @@ impl App {
     /// stays readable. Splits and tabs leave the keyboard where it is: the
     /// user may be typing to the agent.
     fn show_pane(&mut self, id: PaneId, placement: Placement) -> bool {
-        let Some(pane) = self.mux.pane(id) else { return false };
+        let Some(pane) = self.mux.pane(id) else {
+            return false;
+        };
         // Next to `beside`, else the pane the user is in.
         let near = |app: &Self, beside: Option<PaneId>| {
-            let shown = beside.and_then(|id| app.surfaces.iter().find(|s| s.pane.id == id).map(|s| s.view));
-            shown.or_else(|| app.key_window().map(|k| k.1)).or_else(|| app.windows.first().map(|w| w.active))
+            let shown = beside.and_then(|id| {
+                app.surfaces
+                    .iter()
+                    .find(|s| s.pane.id == id)
+                    .map(|s| s.view)
+            });
+            shown
+                .or_else(|| app.key_window().map(|k| k.1))
+                .or_else(|| app.windows.first().map(|w| w.active))
         };
         let near = match placement {
             Placement::Window => None,
             Placement::Tab { beside } | Placement::Split { beside, .. } => near(self, beside),
         };
-        let window = near.and_then(|view| self.surfaces.iter().find(|s| s.view == view)).map(|s| s.window);
+        let window = near
+            .and_then(|view| self.surfaces.iter().find(|s| s.view == view))
+            .map(|s| s.window);
         match (placement, near, window) {
             (Placement::Split { down, .. }, Some(view), _) => {
                 let axis = if down { Axis::Column } else { Axis::Row };
                 self.insert_split(view, pane, axis, true, false);
             }
-            (Placement::Tab { .. }, _, Some(window)) => self.open_window_in(pane, true, window, false),
+            (Placement::Tab { .. }, _, Some(window)) => {
+                self.open_window_in(pane, true, window, false)
+            }
             _ => self.open_window(pane, true),
         }
         true
@@ -1357,15 +1671,34 @@ impl App {
             let (number, tab, key) = unsafe {
                 let number: isize = msg!(w.window, c"windowNumber");
                 let tabs: Id = msg!(w.window, c"tabbedWindows");
-                let tab: usize = if tabs.is_null() { 0 } else { msg!(tabs, c"indexOfObject:", w.window) };
+                let tab: usize = if tabs.is_null() {
+                    0
+                } else {
+                    msg!(tabs, c"indexOfObject:", w.window)
+                };
                 let key: Bool = msg!(w.window, c"isKeyWindow");
                 // Among the window's own tabs, else its place in AppKit's.
-                let own = self.tabs_of(w.window).iter().position(|&t| t == i).unwrap_or(0);
-                (number, if tab == NS_NOT_FOUND { 0 } else { tab } + own, key != NO)
+                let own = self
+                    .tabs_of(w.window)
+                    .iter()
+                    .position(|&t| t == i)
+                    .unwrap_or(0);
+                (
+                    number,
+                    if tab == NS_NOT_FOUND { 0 } else { tab } + own,
+                    key != NO,
+                )
             };
             let leaves = w.tree.leaves();
             for s in self.surfaces.iter().filter(|s| leaves.contains(&s.view)) {
-                out.push((s.pane.id, Location { window: number as u64, tab, focused: key && s.active }));
+                out.push((
+                    s.pane.id,
+                    Location {
+                        window: number as u64,
+                        tab,
+                        focused: key && s.active,
+                    },
+                ));
             }
         }
         out
@@ -1381,7 +1714,11 @@ impl App {
             // SAFETY: main thread; documented signatures.
             unsafe {
                 let layer: Id = msg!(surface.container, c"layer");
-                call!(layer, c"setBorderWidth:", if attention { ATTENTION_BORDER } else { 0.0 });
+                call!(
+                    layer,
+                    c"setBorderWidth:",
+                    if attention { ATTENTION_BORDER } else { 0.0 }
+                );
                 if attention {
                     let orange: Id = msg!(class(c"NSColor"), c"systemOrangeColor");
                     let orange: Id = msg!(orange, c"CGColor");
@@ -1406,7 +1743,15 @@ impl App {
         let active = unsafe {
             let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
             let tile: Id = msg!(ns_app, c"dockTile");
-            call!(tile, c"setBadgeLabel:", if count == 0 { NIL } else { nsstring(&count.to_string()) });
+            call!(
+                tile,
+                c"setBadgeLabel:",
+                if count == 0 {
+                    NIL
+                } else {
+                    nsstring(&count.to_string())
+                }
+            );
             let active: Bool = msg!(ns_app, c"isActive");
             if count > self.attention_count && active == NO {
                 let _: isize = msg!(ns_app, c"requestUserAttention:", 10usize); // informational: one bounce
@@ -1421,7 +1766,10 @@ impl App {
     /// in another app (in mightty, the marks above are enough), taken back
     /// once it no longer does.
     fn update_banners(&mut self, queue: &[Arc<Pane>], active: bool) {
-        let current: Vec<(PaneId, Instant)> = queue.iter().filter_map(|p| Some((p.id, p.attention()?.since))).collect();
+        let current: Vec<(PaneId, Instant)> = queue
+            .iter()
+            .filter_map(|p| Some((p.id, p.attention()?.since)))
+            .collect();
         self.banners.retain(|banner| {
             let kept = current.contains(banner);
             if !kept {
@@ -1433,14 +1781,20 @@ impl App {
             return;
         }
         for pane in queue {
-            let Some(attention) = pane.attention() else { continue };
+            let Some(attention) = pane.attention() else {
+                continue;
+            };
             if self.banners.contains(&(pane.id, attention.since)) {
                 continue;
             }
             let title = {
                 let term = pane.term.lock().unwrap();
                 let title = term.title().trim();
-                if title.is_empty() { pane.command.clone() } else { title.to_owned() }
+                if title.is_empty() {
+                    pane.command.clone()
+                } else {
+                    title.to_owned()
+                }
             };
             notify::post(pane.id, &title, &attention.reason.message());
             self.banners.push((pane.id, attention.since));
@@ -1449,7 +1803,11 @@ impl App {
 
     /// ⌘⇧A: the pane that has needed the user longest.
     fn jump_to_attention(&mut self) {
-        let shown = self.mux.attention_queue().into_iter().find(|p| self.surfaces.iter().any(|s| s.pane.id == p.id));
+        let shown = self
+            .mux
+            .attention_queue()
+            .into_iter()
+            .find(|p| self.surfaces.iter().any(|s| s.pane.id == p.id));
         match shown {
             Some(pane) => {
                 self.focus_pane(pane.id);
@@ -1461,7 +1819,12 @@ impl App {
 
     /// Brings pane `id`'s window (or tab) to the front, keys going to it.
     fn focus_pane(&mut self, id: PaneId) -> bool {
-        let Some((window, view)) = self.surfaces.iter().find(|s| s.pane.id == id).map(|s| (s.window, s.view)) else {
+        let Some((window, view)) = self
+            .surfaces
+            .iter()
+            .find(|s| s.pane.id == id)
+            .map(|s| (s.window, s.view))
+        else {
             return false;
         };
         // SAFETY: main thread; documented signature.
@@ -1478,12 +1841,23 @@ impl App {
     /// otherwise, as other apps need it off to take keys from the user.
     fn update_secure_input(&mut self) {
         // SAFETY: main thread; documented signature.
-        let active: Bool = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"isActive") };
-        let password = || {
-            let Some((_, view)) = self.key_window() else { return false };
-            self.surfaces.iter().find(|s| s.view == view).is_some_and(|s| s.pane.hides_input())
+        let active: Bool = unsafe {
+            msg!(
+                msg!(class(c"NSApplication"), c"sharedApplication"),
+                c"isActive"
+            )
         };
-        let on = active != NO && (self.secure_input || (self.config.auto_secure_input && password()));
+        let password = || {
+            let Some((_, view)) = self.key_window() else {
+                return false;
+            };
+            self.surfaces
+                .iter()
+                .find(|s| s.view == view)
+                .is_some_and(|s| s.pane.hides_input())
+        };
+        let on =
+            active != NO && (self.secure_input || (self.config.auto_secure_input && password()));
         if on != self.secure_input_on {
             self.secure_input_on = on;
             // SAFETY: Carbon calls taking nothing; each on is matched by an off.
@@ -1514,7 +1888,11 @@ impl App {
             let key: Bool = unsafe { msg!(w.window, c"isKeyWindow") };
             let key = key != NO && w.shown;
             let leaves = w.tree.leaves();
-            for s in self.surfaces.iter_mut().filter(|s| leaves.contains(&s.view)) {
+            for s in self
+                .surfaces
+                .iter_mut()
+                .filter(|s| leaves.contains(&s.view))
+            {
                 let focused = key && s.view == w.active;
                 if s.renderer.focused != focused && s.view == w.active {
                     s.set_focused(focused);
@@ -1551,7 +1929,12 @@ impl App {
         unsafe { call!(surface.container, c"removeFromSuperview") };
         if let Some(place) = place {
             let cwd = self.cwd_of(&surface).map(|d| d.display().to_string());
-            let what = Reopen::Pane { window, place, cwd, title: surface.title_override.clone() };
+            let what = Reopen::Pane {
+                window,
+                place,
+                cwd,
+                title: surface.title_override.clone(),
+            };
             self.keep_closed(vec![surface.pane.clone()], what);
         }
         self.release_pane(&surface);
@@ -1573,7 +1956,11 @@ impl App {
             // "Close windows when quitting an application" is off.
             SaveState::Default => unsafe {
                 let defaults: Id = msg!(class(c"NSUserDefaults"), c"standardUserDefaults");
-                let keep: Bool = msg!(defaults, c"boolForKey:", nsstring("NSQuitAlwaysKeepsWindows"));
+                let keep: Bool = msg!(
+                    defaults,
+                    c"boolForKey:",
+                    nsstring("NSQuitAlwaysKeepsWindows")
+                );
                 keep != NO
             },
         }
@@ -1611,14 +1998,24 @@ impl App {
             // SAFETY: main thread; documented signatures.
             let (tabs, selected, frame, key) = unsafe {
                 let group: Id = msg!(w.window, c"tabbedWindows");
-                let count: usize = if group.is_null() { 0 } else { msg!(group, c"count") };
-                let mut tabs: Vec<Id> = (0..count).map(|i| msg!(group, c"objectAtIndex:", i)).collect();
+                let count: usize = if group.is_null() {
+                    0
+                } else {
+                    msg!(group, c"count")
+                };
+                let mut tabs: Vec<Id> = (0..count)
+                    .map(|i| msg!(group, c"objectAtIndex:", i))
+                    .collect();
                 if tabs.is_empty() {
                     tabs.push(w.window);
                 }
                 tabs.retain(|t| self.windows.iter().any(|w| w.window == *t));
                 let tab_group: Id = msg!(w.window, c"tabGroup");
-                let selected: Id = if tab_group.is_null() { w.window } else { msg!(tab_group, c"selectedWindow") };
+                let selected: Id = if tab_group.is_null() {
+                    w.window
+                } else {
+                    msg!(tab_group, c"selectedWindow")
+                };
                 let frame = send_rect(selected, c"frame");
                 let key = tabs.iter().any(|&t| {
                     let key: Bool = msg!(t, c"isKeyWindow");
@@ -1629,8 +2026,14 @@ impl App {
             seen.extend(&tabs);
             // Each window's tabs: one with AppKit's, any number with mightty's own.
             let entries: Vec<usize> = tabs.iter().flat_map(|&t| self.tabs_of(t)).collect();
-            let index = entries.iter().position(|&i| self.windows[i].window == selected && self.windows[i].shown).unwrap_or(0);
-            let tabs: Vec<session::Tab> = entries.iter().filter_map(|&i| self.capture_tab(i)).collect();
+            let index = entries
+                .iter()
+                .position(|&i| self.windows[i].window == selected && self.windows[i].shown)
+                .unwrap_or(0);
+            let tabs: Vec<session::Tab> = entries
+                .iter()
+                .filter_map(|&i| self.capture_tab(i))
+                .collect();
             if tabs.is_empty() {
                 continue;
             }
@@ -1638,7 +2041,11 @@ impl App {
                 front = Some(groups.len());
             }
             let f = frame;
-            groups.push(session::Group { frame: [f.origin.x, f.origin.y, f.size.width, f.size.height], tabs, selected: index });
+            groups.push(session::Group {
+                frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
+                tabs,
+                selected: index,
+            });
         }
         if let Some(i) = front {
             let group = groups.remove(i);
@@ -1651,8 +2058,17 @@ impl App {
     fn capture_tab(&self, index: usize) -> Option<session::Tab> {
         let w = self.windows.get(index)?;
         let layout = self.capture_layout(&w.tree);
-        let focused = w.tree.leaves().iter().position(|&v| v == w.active).unwrap_or(0);
-        Some(session::Tab { layout, focused, zoomed: w.zoomed })
+        let focused = w
+            .tree
+            .leaves()
+            .iter()
+            .position(|&v| v == w.active)
+            .unwrap_or(0);
+        Some(session::Tab {
+            layout,
+            focused,
+            zoomed: w.zoomed,
+        })
     }
 
     fn capture_layout(&self, node: &Node<Id>) -> Layout {
@@ -1660,9 +2076,17 @@ impl App {
             Node::Leaf(view) => {
                 let surface = self.surfaces.iter().find(|s| s.view == *view);
                 let cwd = surface.and_then(|s| self.cwd_of(s));
-                Layout::Pane { cwd: cwd.map(|d| d.display().to_string()), title: surface.and_then(|s| s.title_override.clone()) }
+                Layout::Pane {
+                    cwd: cwd.map(|d| d.display().to_string()),
+                    title: surface.and_then(|s| s.title_override.clone()),
+                }
             }
-            Node::Split { axis, ratio, first, second } => Layout::Split {
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Layout::Split {
                 axis: *axis,
                 ratio: *ratio,
                 first: Box::new(self.capture_layout(first)),
@@ -1677,7 +2101,9 @@ impl App {
         if !self.save_enabled() {
             return false;
         }
-        let Some(saved) = session::load() else { return false };
+        let Some(saved) = session::load() else {
+            return false;
+        };
         let mut any = false;
         for group in &saved.groups {
             let mut windows: Vec<Id> = Vec::new();
@@ -1710,7 +2136,12 @@ impl App {
 
     /// `restore_tab`, its panes being `live` (in layout order) as far as
     /// they go, new shells for the rest.
-    fn restore_tab_with(&mut self, tab: &session::Tab, tab_of: Id, live: &[Arc<Pane>]) -> Option<Id> {
+    fn restore_tab_with(
+        &mut self,
+        tab: &session::Tab,
+        tab_of: Id,
+        live: &[Arc<Pane>],
+    ) -> Option<Id> {
         let pane = match live.first() {
             Some(pane) => pane.clone(),
             None => self.spawn_shell(tab.layout.first_cwd())?,
@@ -1737,16 +2168,28 @@ impl App {
     /// Splits `view`'s space as `layout` says, a new shell in each new pane
     /// unless `live` has the pane: `layout`'s first is its pane `at`.
     fn restore_split(&mut self, layout: &Layout, view: Id, at: usize, live: &[Arc<Pane>]) {
-        let Layout::Split { axis, first, second, .. } = layout else { return };
+        let Layout::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = layout
+        else {
+            return;
+        };
         let second_at = at + first.titles().len();
         let pane = match live.get(second_at) {
             Some(pane) => pane.clone(),
             None => {
-                let Some(pane) = self.spawn_shell(second.first_cwd()) else { return };
+                let Some(pane) = self.spawn_shell(second.first_cwd()) else {
+                    return;
+                };
                 pane
             }
         };
-        let Some(new) = self.insert_split(view, pane, *axis, false, false) else { return };
+        let Some(new) = self.insert_split(view, pane, *axis, false, false) else {
+            return;
+        };
         self.started_in(new, second.first_cwd());
         self.restore_split(first, view, at, live);
         self.restore_split(second, new, second_at, live);
@@ -1764,12 +2207,21 @@ impl App {
         let live: Vec<Arc<Pane>> = if timeout.is_zero() {
             Vec::new()
         } else {
-            panes.into_iter().filter(|p| p.exit_status().is_none() && !self.surfaces.iter().any(|s| s.pane.id == p.id)).collect()
+            panes
+                .into_iter()
+                .filter(|p| {
+                    p.exit_status().is_none() && !self.surfaces.iter().any(|s| s.pane.id == p.id)
+                })
+                .collect()
         };
         for pane in &live {
             pane.set_visible(false);
         }
-        self.closed.push(Closed { live, until: Instant::now() + timeout, what });
+        self.closed.push(Closed {
+            live,
+            until: Instant::now() + timeout,
+            what,
+        });
         if self.closed.len() > CLOSED_KEPT {
             let oldest = self.closed.remove(0);
             self.end_panes(oldest.live);
@@ -1791,33 +2243,60 @@ impl App {
     /// Brings back the last close: with `live_only` (undo), only while its
     /// panes still run; else (reopen) with new shells for those that don't.
     fn reopen_closed(&mut self, live_only: bool) {
-        let ready = self.closed.last().is_some_and(|c| !live_only || !c.live.is_empty());
+        let ready = self
+            .closed
+            .last()
+            .is_some_and(|c| !live_only || !c.live.is_empty());
         let Some(Closed { live, what, .. }) = ready.then(|| self.closed.pop()).flatten() else {
             // SAFETY: plain AppKit call.
             return unsafe { NSBeep() };
         };
         match what {
-            Reopen::Pane { window, place, cwd, title } => {
+            Reopen::Pane {
+                window,
+                place,
+                cwd,
+                title,
+            } => {
                 let pane = match live.into_iter().next() {
                     Some(pane) => pane,
                     None => {
-                        let Some(pane) = self.spawn_shell(cwd.as_deref()) else { return };
+                        let Some(pane) = self.spawn_shell(cwd.as_deref()) else {
+                            return;
+                        };
                         pane
                     }
                 };
-                let tab = self.windows.iter().position(|w| w.window == window && w.tree.leaves().iter().any(|v| place.sibling.contains(v)));
+                let tab = self.windows.iter().position(|w| {
+                    w.window == window && w.tree.leaves().iter().any(|v| place.sibling.contains(v))
+                });
                 let view = if let Some(tab) = tab {
                     // Its tab shown first, if hidden.
                     if !self.windows[tab].shown {
-                        let index = self.tabs_of(window).iter().position(|&t| t == tab).unwrap_or(0);
+                        let index = self
+                            .tabs_of(window)
+                            .iter()
+                            .position(|&t| t == tab)
+                            .unwrap_or(0);
                         self.select_tab(window, index);
                     }
                     // SAFETY: main thread; documented signatures.
-                    let (frame, scale): (CGRect, f64) =
-                        unsafe { (send_rect(msg!(window, c"contentView"), c"bounds"), msg!(window, c"backingScaleFactor")) };
+                    let (frame, scale): (CGRect, f64) = unsafe {
+                        (
+                            send_rect(msg!(window, c"contentView"), c"bounds"),
+                            msg!(window, c"backingScaleFactor"),
+                        )
+                    };
                     let renderer = self.new_renderer(scale);
                     let view = self.add_surface(window, frame, renderer, pane, false, true);
-                    if let Some(tab) = self.tab_index(place.sibling.iter().copied().find(|&v| self.tab_index(v).is_some()).unwrap_or(NIL)) {
+                    if let Some(tab) = self.tab_index(
+                        place
+                            .sibling
+                            .iter()
+                            .copied()
+                            .find(|&v| self.tab_index(v).is_some())
+                            .unwrap_or(NIL),
+                    ) {
                         self.windows[tab].tree.put_back(view, &place);
                         self.windows[tab].zoomed = false;
                     }
@@ -1831,14 +2310,22 @@ impl App {
                     self.open_window_in(pane, false, NIL, true);
                     self.windows.last().map(|w| w.active)
                 };
-                if let Some(surface) = view.and_then(|v| self.surfaces.iter_mut().find(|s| s.view == v)) {
+                if let Some(surface) =
+                    view.and_then(|v| self.surfaces.iter_mut().find(|s| s.view == v))
+                {
                     surface.title_override = title;
                     surface.start_dir = cwd.map(PathBuf::from);
                 }
             }
             Reopen::Tab { tab, tab_of, frame } => {
-                let tab_of = if self.windows.iter().any(|w| w.window == tab_of) { tab_of } else { NIL };
-                let Some(window) = self.restore_tab_with(&tab, tab_of, &live) else { return };
+                let tab_of = if self.windows.iter().any(|w| w.window == tab_of) {
+                    tab_of
+                } else {
+                    NIL
+                };
+                let Some(window) = self.restore_tab_with(&tab, tab_of, &live) else {
+                    return;
+                };
                 // SAFETY: main thread; documented signatures.
                 unsafe {
                     if tab_of.is_null() {
@@ -1858,7 +2345,12 @@ impl App {
     /// A login shell in `cwd` if it still exists, else home.
     fn spawn_shell(&mut self, cwd: Option<&str>) -> Option<Arc<Pane>> {
         let cwd = cwd.map(PathBuf::from).filter(|d| d.is_dir());
-        let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, cwd, ..Default::default() };
+        let opts = SpawnOptions {
+            cols: self.config.cols,
+            rows: self.config.rows,
+            cwd,
+            ..Default::default()
+        };
         match self.mux.spawn(opts) {
             Ok(pane) => Some(pane),
             Err(e) => {
@@ -1879,7 +2371,12 @@ impl App {
     /// What to tell the user before closing `views`' panes, or `None` to
     /// close without asking (see `confirm-close-surface`).
     fn close_question(&self, views: &[Id]) -> Option<String> {
-        let panes: Vec<&Arc<Pane>> = self.surfaces.iter().filter(|s| views.contains(&s.view)).map(|s| &s.pane).collect();
+        let panes: Vec<&Arc<Pane>> = self
+            .surfaces
+            .iter()
+            .filter(|s| views.contains(&s.view))
+            .map(|s| &s.pane)
+            .collect();
         let running: Vec<String> = panes
             .iter()
             .filter(|p| p.is_alive() && !matches!(p.status(), Status::Idle | Status::Exited))
@@ -1890,15 +2387,24 @@ impl App {
             (ConfirmClose::Always, []) => Some(String::new()),
             (_, [one]) => Some(format!("“{one}” is still running. Closing ends it.")),
             (_, [first, rest @ ..]) => {
-                let others = if rest.len() == 1 { "1 other".to_owned() } else { format!("{} others", rest.len()) };
-                Some(format!("“{first}” and {others} are still running. Closing ends them."))
+                let others = if rest.len() == 1 {
+                    "1 other".to_owned()
+                } else {
+                    format!("{} others", rest.len())
+                };
+                Some(format!(
+                    "“{first}” and {others} are still running. Closing ends them."
+                ))
             }
         }
     }
 
     /// Ends `closed`'s pane unless another surface shows it.
     fn release_pane(&self, closed: &Surface) {
-        let held = self.closed.iter().any(|c| c.live.iter().any(|p| p.id == closed.pane.id));
+        let held = self
+            .closed
+            .iter()
+            .any(|c| c.live.iter().any(|p| p.id == closed.pane.id));
         if !held && !self.surfaces.iter().any(|s| s.pane.id == closed.pane.id) {
             closed.pane.set_visible(false);
             self.mux.close(closed.pane.id);
@@ -1911,22 +2417,40 @@ impl App {
         if self.quick == Some(window) {
             self.quick = None;
         }
-        for index in self.tabs_of(window).into_iter().filter(|_| self.quick != Some(window)) {
-            let Some(tab) = self.capture_tab(index) else { continue };
+        for index in self
+            .tabs_of(window)
+            .into_iter()
+            .filter(|_| self.quick != Some(window))
+        {
+            let Some(tab) = self.capture_tab(index) else {
+                continue;
+            };
             // SAFETY: main thread; documented signatures.
             let (tab_of, frame) = unsafe {
                 let group: Id = msg!(window, c"tabbedWindows");
-                let count: usize = if group.is_null() { 0 } else { msg!(group, c"count") };
-                let others = (0..count).map(|i| -> Id { msg!(group, c"objectAtIndex:", i) }).find(|&w| w != window);
+                let count: usize = if group.is_null() {
+                    0
+                } else {
+                    msg!(group, c"count")
+                };
+                let others = (0..count)
+                    .map(|i| -> Id { msg!(group, c"objectAtIndex:", i) })
+                    .find(|&w| w != window);
                 (others.unwrap_or(NIL), send_rect(window, c"frame"))
             };
             let leaves = self.windows[index].tree.leaves();
-            let panes = leaves.iter().filter_map(|v| self.surfaces.iter().find(|s| s.view == *v)).map(|s| s.pane.clone()).collect();
+            let panes = leaves
+                .iter()
+                .filter_map(|v| self.surfaces.iter().find(|s| s.view == *v))
+                .map(|s| s.pane.clone())
+                .collect();
             reopen.push((panes, Reopen::Tab { tab, tab_of, frame }));
         }
         self.windows.retain(|w| w.window != window);
         self.bars.retain(|b| b.0 != window);
-        let (closed, kept) = mem::take(&mut self.surfaces).into_iter().partition(|s| s.window == window);
+        let (closed, kept) = mem::take(&mut self.surfaces)
+            .into_iter()
+            .partition(|s| s.window == window);
         self.surfaces = kept;
         // Once its panes aren't counted as shown.
         for (panes, what) in reopen {
@@ -1943,7 +2467,14 @@ impl App {
         if self.tab_index(view).is_some_and(|t| !self.windows[t].shown) {
             return; // remembered for when its tab shows
         }
-        let Some(window) = self.surfaces.iter().find(|s| s.view == view).map(|s| s.window) else { return };
+        let Some(window) = self
+            .surfaces
+            .iter()
+            .find(|s| s.view == view)
+            .map(|s| s.window)
+        else {
+            return;
+        };
         // SAFETY: main thread; documented signature. Its becomeFirstResponder
         // finds the app busy and leaves the work done above.
         unsafe { call!(window, c"makeFirstResponder:", view) };
@@ -1951,8 +2482,17 @@ impl App {
 
     /// Marks `view` as its window's active pane, the others as not.
     fn activate(&mut self, view: Id) {
-        let Some(window) = self.surfaces.iter().find(|s| s.view == view).map(|s| s.window) else { return };
-        let Some(tab) = self.tab_index(view) else { return };
+        let Some(window) = self
+            .surfaces
+            .iter()
+            .find(|s| s.view == view)
+            .map(|s| s.window)
+        else {
+            return;
+        };
+        let Some(tab) = self.tab_index(view) else {
+            return;
+        };
         let w = &mut self.windows[tab];
         let zoomed_away = w.zoomed && w.active != view;
         w.active = view;
@@ -1965,7 +2505,11 @@ impl App {
         let leaves = w.tree.leaves();
         // SAFETY: main thread; documented signature.
         let key: Bool = unsafe { msg!(window, c"isKeyWindow") };
-        for surface in self.surfaces.iter_mut().filter(|s| leaves.contains(&s.view)) {
+        for surface in self
+            .surfaces
+            .iter_mut()
+            .filter(|s| leaves.contains(&s.view))
+        {
             let active = surface.view == view;
             if surface.active != active {
                 surface.active = active;
@@ -1983,11 +2527,17 @@ impl App {
     /// Places `window`'s panes, resizing those whose size changed (all of
     /// them with `force`, for a new scale).
     fn layout(&mut self, window: Id, force: bool) {
-        let Some(w) = self.windows.iter().find(|w| w.window == window && w.shown) else { return };
+        let Some(w) = self.windows.iter().find(|w| w.window == window && w.shown) else {
+            return;
+        };
         let bounds = self.pane_bounds(window, w.root);
         // SAFETY: main thread; documented signatures.
         unsafe {
-            let frames = if w.zoomed { vec![(w.active, bounds)] } else { w.tree.frames(bounds, GAP) };
+            let frames = if w.zoomed {
+                vec![(w.active, bounds)]
+            } else {
+                w.tree.frames(bounds, GAP)
+            };
             for surface in self.surfaces.iter_mut().filter(|s| s.window == window) {
                 let Some(&(_, frame)) = frames.iter().find(|f| f.0 == surface.view) else {
                     call!(surface.container, c"setHidden:", YES);
@@ -1997,7 +2547,10 @@ impl App {
                 let old = send_rect(surface.container, c"frame");
                 call!(surface.container, c"setHidden:", NO);
                 call!(surface.container, c"setFrame:", frame);
-                if force || old.size.width != frame.size.width || old.size.height != frame.size.height {
+                if force
+                    || old.size.width != frame.size.width
+                    || old.size.height != frame.size.height
+                {
                     surface.resize();
                 }
             }
@@ -2025,7 +2578,11 @@ impl App {
             style_window(w.window, w.root, &config);
         }
         for surface in &mut self.surfaces {
-            let size = if font_changed { config.font_size } else { surface.renderer.font_size() };
+            let size = if font_changed {
+                config.font_size
+            } else {
+                surface.renderer.font_size()
+            };
             surface.renderer.configure(&config, size);
             surface.sync_backing();
             // The cell size may have changed, so the grid too; hidden panes as well.
@@ -2054,8 +2611,12 @@ impl App {
     /// ⌘+ and ⌘- (`delta` points), ⌘0 (`None`: back to `font-size`): the
     /// font size of the pane `view`.
     fn change_font_size(&mut self, view: Id, delta: Option<f64>) {
-        let Some(surface) = self.surfaces.iter_mut().find(|s| s.view == view) else { return };
-        let size = delta.map_or(self.config.font_size, |d| (surface.renderer.font_size() + d).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE));
+        let Some(surface) = self.surfaces.iter_mut().find(|s| s.view == view) else {
+            return;
+        };
+        let size = delta.map_or(self.config.font_size, |d| {
+            (surface.renderer.font_size() + d).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+        });
         if surface.renderer.configure(&self.config, size) {
             surface.resize();
         }
@@ -2064,18 +2625,37 @@ impl App {
     /// Opens the config file in the default text editor (⌘,), first
     /// creating it, with a few lines on how it works, if there is none.
     fn open_config(&mut self) {
-        let Some(path) = self.config.file().map(PathBuf::from).or_else(|| Some(config::config_dir()?.join("config"))) else {
+        let Some(path) = self
+            .config
+            .file()
+            .map(PathBuf::from)
+            .or_else(|| Some(config::config_dir()?.join("config")))
+        else {
             return show_problems("There's no config file", &["HOME is unset".into()]);
         };
         if !path.exists() {
-            let created = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::write(&path, CONFIG_TEMPLATE));
+            let created = path
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::write(&path, CONFIG_TEMPLATE));
             if let Err(e) = created {
-                return show_problems("The config file couldn't be created", &[format!("{}: {e}", path.display())]);
+                return show_problems(
+                    "The config file couldn't be created",
+                    &[format!("{}: {e}", path.display())],
+                );
             }
         }
         // In the user's editor, in the terminal: a tab of the key window, else a window.
-        let command = format!("exec ${{VISUAL:-${{EDITOR:-vi}}}} {}", shell_quote(&path.display().to_string()));
-        self.open_command(command, path.parent().map(Path::to_path_buf), "Config", true);
+        let command = format!(
+            "exec ${{VISUAL:-${{EDITOR:-vi}}}} {}",
+            shell_quote(&path.display().to_string())
+        );
+        self.open_command(
+            command,
+            path.parent().map(Path::to_path_buf),
+            "Config",
+            true,
+        );
     }
 
     /// The settings, in a window of their own: `mightty config`.
@@ -2088,12 +2668,22 @@ impl App {
     /// Runs `command` (through the login shell) in a new tab of the key
     /// window if `tab`, else a window, titled `title`.
     fn open_command(&mut self, command: String, cwd: Option<PathBuf>, title: &str, tab: bool) {
-        let opts = SpawnOptions { command: Some(command), cwd, cols: self.config.cols.max(100), rows: self.config.rows.max(32), ..Default::default() };
+        let opts = SpawnOptions {
+            command: Some(command),
+            cwd,
+            cols: self.config.cols.max(100),
+            rows: self.config.rows.max(32),
+            ..Default::default()
+        };
         let pane = match self.mux.spawn(opts) {
             Ok(pane) => pane,
             Err(e) => return show_problems("It couldn't be started", &[e.to_string()]),
         };
-        let tab_of = if tab { self.key_window().map_or(NIL, |k| k.0) } else { NIL };
+        let tab_of = if tab {
+            self.key_window().map_or(NIL, |k| k.0)
+        } else {
+            NIL
+        };
         self.open_window_in(pane, false, tab_of, true);
         if let Some(surface) = self.surfaces.last_mut() {
             surface.title_override = Some(title.to_owned());
@@ -2113,7 +2703,11 @@ impl App {
         let Some(w) = self.shown(window) else { return };
         let several = !w.zoomed && matches!(w.tree, Node::Split { .. });
         for surface in self.surfaces.iter().filter(|s| s.window == window) {
-            let opacity = if several && !surface.active { self.config.unfocused_split_opacity as f32 } else { 1.0 };
+            let opacity = if several && !surface.active {
+                self.config.unfocused_split_opacity as f32
+            } else {
+                1.0
+            };
             // SAFETY: main thread; documented signature.
             unsafe { call!(surface.layer, c"setOpacity:", opacity) };
         }
@@ -2122,7 +2716,9 @@ impl App {
     /// Moves to the pane `step` places after the active one, in reading
     /// order, wrapping around.
     fn select_split(&mut self, step: isize) {
-        let Some((window, active)) = self.key_window() else { return };
+        let Some((window, active)) = self.key_window() else {
+            return;
+        };
         let Some(w) = self.shown(window) else { return };
         let order = w.tree.leaves();
         let at = order.iter().position(|&v| v == active).unwrap_or(0) as isize;
@@ -2131,7 +2727,9 @@ impl App {
     }
 
     fn select_split_toward(&mut self, direction: Direction) {
-        let Some((window, active)) = self.key_window() else { return };
+        let Some((window, active)) = self.key_window() else {
+            return;
+        };
         let Some(w) = self.shown(window) else { return };
         let bounds = self.pane_bounds(window, w.root);
         if let Some(next) = split::neighbor(&w.tree.frames(bounds, GAP), active, direction) {
@@ -2142,24 +2740,36 @@ impl App {
     /// ⌘⌃ and an arrow: moves the nearest divider `step` points that way
     /// (as Ghostty's `resize_split`).
     fn move_divider(&mut self, direction: Direction, step: f64) {
-        let Some((window, active)) = self.key_window() else { return };
-        let Some(root) = self.shown(window).map(|w| w.root) else { return };
+        let Some((window, active)) = self.key_window() else {
+            return;
+        };
+        let Some(root) = self.shown(window).map(|w| w.root) else {
+            return;
+        };
         let bounds = self.pane_bounds(window, root);
-        let Some(w) = self.shown_mut(window).filter(|w| !w.zoomed) else { return };
+        let Some(w) = self.shown_mut(window).filter(|w| !w.zoomed) else {
+            return;
+        };
         let (axis, points) = match direction {
             Direction::Left => (Axis::Row, -step),
             Direction::Right => (Axis::Row, step),
             Direction::Up => (Axis::Column, -step),
             Direction::Down => (Axis::Column, step),
         };
-        if w.tree.move_divider(active, axis, points, bounds, GAP, MIN_PANE) {
+        if w.tree
+            .move_divider(active, axis, points, bounds, GAP, MIN_PANE)
+        {
             self.layout(window, false);
         }
     }
 
     fn toggle_zoom(&mut self) {
-        let Some((window, _)) = self.key_window() else { return };
-        let Some(w) = self.shown_mut(window) else { return };
+        let Some((window, _)) = self.key_window() else {
+            return;
+        };
+        let Some(w) = self.shown_mut(window) else {
+            return;
+        };
         if matches!(w.tree, Node::Split { .. }) {
             w.zoomed = !w.zoomed;
             self.layout(window, false);
@@ -2167,22 +2777,35 @@ impl App {
     }
 
     fn equalize(&mut self) {
-        let Some((window, _)) = self.key_window() else { return };
-        let Some(w) = self.shown_mut(window) else { return };
+        let Some((window, _)) = self.key_window() else {
+            return;
+        };
+        let Some(w) = self.shown_mut(window) else {
+            return;
+        };
         w.tree.equalize();
         self.layout(window, false);
     }
 
     /// The divider of `root`'s window under `point` (in `root`'s coordinates).
     fn divider_at(&self, root: Id, point: CGPoint) -> Option<Divider> {
-        let w = self.windows.iter().find(|w| w.root == root && w.shown).filter(|w| !w.zoomed)?;
+        let w = self
+            .windows
+            .iter()
+            .find(|w| w.root == root && w.shown)
+            .filter(|w| !w.zoomed)?;
         let bounds = self.pane_bounds(w.window, root);
-        w.tree.dividers(bounds, GAP).into_iter().find(|d| grab_area(d).contains(point.x, point.y))
+        w.tree
+            .dividers(bounds, GAP)
+            .into_iter()
+            .find(|d| grab_area(d).contains(point.x, point.y))
     }
 
     /// Drags the divider grabbed in `root` (see `divider_at`) to `point`.
     fn drag_divider(&mut self, root: Id, point: CGPoint) {
-        let Some(w) = self.windows.iter_mut().find(|w| w.root == root && w.shown) else { return };
+        let Some(w) = self.windows.iter_mut().find(|w| w.root == root && w.shown) else {
+            return;
+        };
         let Some(divider) = &w.dragging else { return };
         let ratio = split::ratio_at(divider, point.x, point.y, GAP, MIN_PANE);
         w.tree.set_ratio(&divider.path, ratio);
@@ -2194,7 +2817,10 @@ impl App {
 /// Moves `window` to `frame` (x, y, width, height), if that's still
 /// mostly on a screen: displays come and go between launches.
 fn place(window: Id, [x, y, width, height]: [f64; 4]) {
-    let frame = CGRect { origin: CGPoint { x, y }, size: CGSize { width, height } };
+    let frame = CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize { width, height },
+    };
     // SAFETY: main thread; documented signatures.
     unsafe {
         let screens: Id = msg!(class(c"NSScreen"), c"screens");
@@ -2203,8 +2829,10 @@ fn place(window: Id, [x, y, width, height]: [f64; 4]) {
             let screen: Id = msg!(screens, c"objectAtIndex:", i);
             let area = send_rect(screen, c"visibleFrame");
             let overlap_x = (x + width).min(area.origin.x + area.size.width) - x.max(area.origin.x);
-            let overlap_y = (y + height).min(area.origin.y + area.size.height) - y.max(area.origin.y);
-            overlap_x >= width.min(area.size.width) / 2.0 && overlap_y >= height.min(area.size.height) / 2.0
+            let overlap_y =
+                (y + height).min(area.origin.y + area.size.height) - y.max(area.origin.y);
+            overlap_x >= width.min(area.size.width) / 2.0
+                && overlap_y >= height.min(area.size.height) / 2.0
         });
         if visible && width >= 100.0 && height >= 100.0 {
             call!(window, c"setFrame:display:", frame, YES);
@@ -2214,7 +2842,21 @@ fn place(window: Id, [x, y, width, height]: [f64; 4]) {
 
 /// Gives `tree`'s splits `layout`'s ratios: they have the same shape.
 fn copy_ratios(tree: &mut Node<Id>, layout: &Layout) {
-    if let (Node::Split { ratio, first, second, .. }, Layout::Split { ratio: saved, first: f, second: s, .. }) = (tree, layout) {
+    if let (
+        Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        },
+        Layout::Split {
+            ratio: saved,
+            first: f,
+            second: s,
+            ..
+        },
+    ) = (tree, layout)
+    {
         *ratio = *saved;
         copy_ratios(first, f);
         copy_ratios(second, s);
@@ -2223,8 +2865,16 @@ fn copy_ratios(tree: &mut Node<Id>, layout: &Layout) {
 
 /// What runs in `pane`, by name: the program of its command line.
 fn program(pane: &Pane) -> String {
-    let line = pane.term.lock().unwrap().running_command().unwrap_or_else(|| pane.command.clone());
-    let word = line.split_whitespace().find(|w| !w.contains('=')).unwrap_or(&line);
+    let line = pane
+        .term
+        .lock()
+        .unwrap()
+        .running_command()
+        .unwrap_or_else(|| pane.command.clone());
+    let word = line
+        .split_whitespace()
+        .find(|w| !w.contains('='))
+        .unwrap_or(&line);
     word.rsplit('/').next().unwrap_or(word).to_owned()
 }
 
@@ -2261,13 +2911,29 @@ fn show_problems(title: &str, problems: &[String]) {
     unsafe {
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring(title));
-        call!(alert, c"setInformativeText:", nsstring(&problems.join("\n")));
-        let key: Id = msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow");
-        let sheet: Id = if key.is_null() { NIL } else { msg!(key, c"attachedSheet") };
+        call!(
+            alert,
+            c"setInformativeText:",
+            nsstring(&problems.join("\n"))
+        );
+        let key: Id = msg!(
+            msg!(class(c"NSApplication"), c"sharedApplication"),
+            c"keyWindow"
+        );
+        let sheet: Id = if key.is_null() {
+            NIL
+        } else {
+            msg!(key, c"attachedSheet")
+        };
         if key.is_null() || !sheet.is_null() {
             let _: isize = msg!(alert, c"runModal");
         } else {
-            call!(alert, c"beginSheetModalForWindow:completionHandler:", key, NIL);
+            call!(
+                alert,
+                c"beginSheetModalForWindow:completionHandler:",
+                key,
+                NIL
+            );
         }
     }
 }
@@ -2285,7 +2951,15 @@ unsafe fn close_alert(title: &str, detail: &str) -> Id {
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring(title));
         call!(alert, c"setInformativeText:", nsstring(detail));
-        let close: Id = msg!(alert, c"addButtonWithTitle:", nsstring(if title.starts_with("Quit") { "Quit" } else { "Close" }));
+        let close: Id = msg!(
+            alert,
+            c"addButtonWithTitle:",
+            nsstring(if title.starts_with("Quit") {
+                "Quit"
+            } else {
+                "Close"
+            })
+        );
         call!(close, c"setHasDestructiveAction:", YES);
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
         alert
@@ -2296,7 +2970,9 @@ unsafe fn close_alert(title: &str, detail: &str) -> Id {
 fn confirm(window: Id, closing: Closing, title: &str, detail: &str) {
     static ANSWERED: Block = Block::with_response(answered);
     unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some(closing) = CLOSING.with(Cell::take) else { return };
+        let Some(closing) = CLOSING.with(Cell::take) else {
+            return;
+        };
         if response != ALERT_FIRST_BUTTON {
             return;
         }
@@ -2315,7 +2991,12 @@ fn confirm(window: Id, closing: Closing, title: &str, detail: &str) {
         }
         CLOSING.with(|c| c.set(Some(closing)));
         let alert = close_alert(title, detail);
-        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+        call!(
+            alert,
+            c"beginSheetModalForWindow:completionHandler:",
+            window,
+            &ANSWERED
+        );
     }
 }
 
@@ -2325,7 +3006,9 @@ fn confirm(window: Id, closing: Closing, title: &str, detail: &str) {
 fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str, detail: &str) {
     static ANSWERED: Block = Block::with_response(answered);
     unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some((view, request)) = ASKING.with_borrow_mut(Option::take) else { return };
+        let Some((view, request)) = ASKING.with_borrow_mut(Option::take) else {
+            return;
+        };
         with_surface(view, |s| {
             if response == ALERT_SECOND_BUTTON {
                 s.do_clipboard(request);
@@ -2347,7 +3030,12 @@ fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str
         // Deny first, so Return (typed as the sheet appears) refuses.
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Deny"));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Allow"));
-        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+        call!(
+            alert,
+            c"beginSheetModalForWindow:completionHandler:",
+            window,
+            &ANSWERED
+        );
     }
 }
 
@@ -2356,7 +3044,9 @@ fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str
 fn ask_paste(window: Id, view: Id, text: &str, bytes: Vec<u8>) {
     static ANSWERED: Block = Block::with_response(answered);
     unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some((view, bytes)) = PASTING.with_borrow_mut(Option::take) else { return };
+        let Some((view, bytes)) = PASTING.with_borrow_mut(Option::take) else {
+            return;
+        };
         if response == ALERT_SECOND_BUTTON {
             with_surface(view, |s| s.write(&bytes));
         }
@@ -2369,7 +3059,11 @@ fn ask_paste(window: Id, view: Id, text: &str, bytes: Vec<u8>) {
         }
         PASTING.with_borrow_mut(|pasting| *pasting = Some((view, bytes)));
         let lines = text.lines().count();
-        let question = if lines > 1 { format!("Paste {lines} lines?") } else { "Paste text with control characters?".to_owned() };
+        let question = if lines > 1 {
+            format!("Paste {lines} lines?")
+        } else {
+            "Paste text with control characters?".to_owned()
+        };
         let detail = format!(
             "Pasted into a shell, each line may run as a command, and control characters act as keys.\n\n{}",
             keys::visible_controls(text, 300)
@@ -2380,7 +3074,12 @@ fn ask_paste(window: Id, view: Id, text: &str, bytes: Vec<u8>) {
         // Cancel first, so Return doesn't paste.
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Paste"));
-        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+        call!(
+            alert,
+            c"beginSheetModalForWindow:completionHandler:",
+            window,
+            &ANSWERED
+        );
     }
 }
 
@@ -2393,7 +3092,9 @@ fn ask_title(window: Id, view: Id, current: &str) {
     }
     static ANSWERED: Block = Block::with_response(answered);
     unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some((view, field)) = RENAMING.take() else { return };
+        let Some((view, field)) = RENAMING.take() else {
+            return;
+        };
         // SAFETY: main thread; the field was retained when the sheet opened.
         let text = unsafe {
             let text = string_from_ns(msg!(field, c"stringValue"));
@@ -2422,15 +3123,34 @@ fn ask_title(window: Id, view: Id, current: &str) {
         }
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring("Change Title"));
-        call!(alert, c"setInformativeText:", nsstring("Leave blank to use the title the running program sets."));
+        call!(
+            alert,
+            c"setInformativeText:",
+            nsstring("Leave blank to use the title the running program sets.")
+        );
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("OK"));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
-        let frame = CGRect { origin: CGPoint::default(), size: CGSize { width: 300.0, height: 24.0 } };
-        let field: Id = msg!(msg!(class(c"NSTextField"), c"alloc"), c"initWithFrame:", frame);
+        let frame = CGRect {
+            origin: CGPoint::default(),
+            size: CGSize {
+                width: 300.0,
+                height: 24.0,
+            },
+        };
+        let field: Id = msg!(
+            msg!(class(c"NSTextField"), c"alloc"),
+            c"initWithFrame:",
+            frame
+        );
         call!(field, c"setStringValue:", nsstring(current));
         call!(alert, c"setAccessoryView:", field);
         RENAMING.set(Some((view, field)));
-        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+        call!(
+            alert,
+            c"beginSheetModalForWindow:completionHandler:",
+            window,
+            &ANSWERED
+        );
         // Typing goes straight into the field, its text selected.
         let sheet: Id = msg!(alert, c"window");
         call!(sheet, c"makeFirstResponder:", field);
@@ -2442,28 +3162,52 @@ fn ask_title(window: Id, view: Id, current: &str) {
 fn grab_area(divider: &Divider) -> Rect {
     let r = divider.rect;
     match divider.axis {
-        Axis::Row => Rect { x: r.x - GRAB, width: r.width + 2.0 * GRAB, ..r },
-        Axis::Column => Rect { y: r.y - GRAB, height: r.height + 2.0 * GRAB, ..r },
+        Axis::Row => Rect {
+            x: r.x - GRAB,
+            width: r.width + 2.0 * GRAB,
+            ..r
+        },
+        Axis::Column => Rect {
+            y: r.y - GRAB,
+            height: r.height + 2.0 * GRAB,
+            ..r
+        },
     }
 }
 
 fn to_rect(r: CGRect) -> Rect {
-    Rect { x: r.origin.x, y: r.origin.y, width: r.size.width, height: r.size.height }
+    Rect {
+        x: r.origin.x,
+        y: r.origin.y,
+        width: r.size.width,
+        height: r.size.height,
+    }
 }
 
 fn from_rect(r: Rect) -> CGRect {
-    CGRect { origin: CGPoint { x: r.x, y: r.y }, size: CGSize { width: r.width, height: r.height } }
+    CGRect {
+        origin: CGPoint { x: r.x, y: r.y },
+        size: CGSize {
+            width: r.width,
+            height: r.height,
+        },
+    }
 }
 
 /// Registers the `global:` keybinds, saying which couldn't be.
 fn register_global_keys(bindings: &Bindings) {
     fn perform_global(action: &Action) {
-        let view = with_app(|app| app.key_window().map(|k| k.1)).flatten().unwrap_or(NIL);
+        let view = with_app(|app| app.key_window().map(|k| k.1))
+            .flatten()
+            .unwrap_or(NIL);
         perform(view, action);
     }
     let failed = hotkey::register(bindings, perform_global);
     if !failed.is_empty() {
-        let keys: Vec<String> = failed.iter().map(|t| format!("global:{t}: taken by another app, or not a key on a US keyboard")).collect();
+        let keys: Vec<String> = failed
+            .iter()
+            .map(|t| format!("global:{t}: taken by another app, or not a key on a US keyboard"))
+            .collect();
         show_problems("Some global keys couldn't be set", &keys);
     }
 }
@@ -2489,19 +3233,28 @@ fn quick_window_class() -> Id {
         *cell.get_or_init(|| {
             let yes = yes as extern "C" fn(Id, Sel) -> Bool as *const c_void;
             let slide_time = slide_time as extern "C" fn(Id, Sel, CGRect) -> f64 as *const c_void;
-            let unconstrained = unconstrained as extern "C" fn(Id, Sel, CGRect, Id) -> CGRect as *const c_void;
+            let unconstrained =
+                unconstrained as extern "C" fn(Id, Sel, CGRect, Id) -> CGRect as *const c_void;
             // SAFETY: a new subclass, its methods with their signatures.
             unsafe {
-                register_class(c"MighttyQuickWindow", c"NSWindow", &[
-                    (c"canBecomeKeyWindow", yes, c"c@:"),
-                    (c"canBecomeMainWindow", yes, c"c@:"),
-                    (c"animationResizeTime:", slide_time, c"d@:{CGRect={CGPoint=dd}{CGSize=dd}}"),
-                    (
-                        c"constrainFrameRect:toScreen:",
-                        unconstrained,
-                        c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@",
-                    ),
-                ])
+                register_class(
+                    c"MighttyQuickWindow",
+                    c"NSWindow",
+                    &[
+                        (c"canBecomeKeyWindow", yes, c"c@:"),
+                        (c"canBecomeMainWindow", yes, c"c@:"),
+                        (
+                            c"animationResizeTime:",
+                            slide_time,
+                            c"d@:{CGRect={CGPoint=dd}{CGSize=dd}}",
+                        ),
+                        (
+                            c"constrainFrameRect:toScreen:",
+                            unconstrained,
+                            c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}@",
+                        ),
+                    ],
+                )
             }
         })
     })
@@ -2512,7 +3265,10 @@ const QUICK_SLIDE: f64 = 0.2;
 
 /// The quick terminal's frame for `position` and `size` on the screen with
 /// the mouse, and where it slides in from: off that edge.
-fn quick_frames(position: QuickPosition, (deep, along): (Extent, Option<Extent>)) -> (CGRect, CGRect) {
+fn quick_frames(
+    position: QuickPosition,
+    (deep, along): (Extent, Option<Extent>),
+) -> (CGRect, CGRect) {
     // SAFETY: main thread; documented signatures.
     let area = unsafe {
         let mouse: CGPoint = msg!(class(c"NSEvent"), c"mouseLocation");
@@ -2522,20 +3278,35 @@ fn quick_frames(position: QuickPosition, (deep, along): (Extent, Option<Extent>)
             .map(|i| -> Id { msg!(screens, c"objectAtIndex:", i) })
             .find(|&s| {
                 let f = send_rect(s, c"frame");
-                (f.origin.x..f.origin.x + f.size.width).contains(&mouse.x) && (f.origin.y..f.origin.y + f.size.height).contains(&mouse.y)
+                (f.origin.x..f.origin.x + f.size.width).contains(&mouse.x)
+                    && (f.origin.y..f.origin.y + f.size.height).contains(&mouse.y)
             })
             .unwrap_or_else(|| msg!(class(c"NSScreen"), c"mainScreen"));
         send_rect(screen, c"visibleFrame")
     };
-    let (x, y, w, h) = (area.origin.x, area.origin.y, area.size.width, area.size.height);
-    let rect = |x, y, w, h| CGRect { origin: CGPoint { x, y }, size: CGSize { width: w, height: h } };
+    let (x, y, w, h) = (
+        area.origin.x,
+        area.origin.y,
+        area.size.width,
+        area.size.height,
+    );
+    let rect = |x, y, w, h| CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize {
+            width: w,
+            height: h,
+        },
+    };
     // Along its edge: all of it unless asked, centred.
     let (across_x, across_y) = (along.map_or(w, |a| a.of(w)), along.map_or(h, |a| a.of(h)));
     let (cx, cy) = (x + (w - across_x) / 2.0, y + (h - across_y) / 2.0);
     match position {
         QuickPosition::Top => {
             let d = deep.of(h);
-            (rect(cx, y + h - d, across_x, d), rect(cx, y + h, across_x, d))
+            (
+                rect(cx, y + h - d, across_x, d),
+                rect(cx, y + h, across_x, d),
+            )
         }
         QuickPosition::Bottom => {
             let d = deep.of(h);
@@ -2547,7 +3318,10 @@ fn quick_frames(position: QuickPosition, (deep, along): (Extent, Option<Extent>)
         }
         QuickPosition::Right => {
             let d = deep.of(w);
-            (rect(x + w - d, cy, d, across_y), rect(x + w, cy, d, across_y))
+            (
+                rect(x + w - d, cy, d, across_y),
+                rect(x + w, cy, d, across_y),
+            )
         }
         // Width, then height (the same share when left out).
         QuickPosition::Center => {
@@ -2568,14 +3342,23 @@ thread_local! {
 extern "C" fn on_undo_expiry(_: *mut c_void) {
     let now = Instant::now();
     with_app(|app| {
-        let due: Vec<Arc<Pane>> = app.closed.iter_mut().filter(|c| c.until <= now).flat_map(|c| mem::take(&mut c.live)).collect();
+        let due: Vec<Arc<Pane>> = app
+            .closed
+            .iter_mut()
+            .filter(|c| c.until <= now)
+            .flat_map(|c| mem::take(&mut c.live))
+            .collect();
         app.end_panes(due);
     });
 }
 
 /// A click on a window's tab bar.
 fn on_tab_click(bar: Id, click: tabbar::Click) {
-    let Some(window) = with_app(|app| app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)).flatten() else { return };
+    let Some(window) =
+        with_app(|app| app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)).flatten()
+    else {
+        return;
+    };
     let tab = |app: &App, i: usize| app.tabs_of(window).get(i).copied();
     match click {
         tabbar::Click::Select(i) => drop(with_app(|app| app.select_tab(window, i))),
@@ -2594,7 +3377,14 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
             let s = app.surfaces.iter().find(|s| s.view == active)?;
             let text = match &s.title_override {
                 Some(title) => title.clone(),
-                None => s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned(),
+                None => s
+                    .pane
+                    .term
+                    .lock()
+                    .unwrap()
+                    .title()
+                    .trim_start_matches(['●', ' '])
+                    .to_owned(),
             };
             app.bars.iter().find(|b| b.0 == window)?.1.edit(i, &text);
             Some(())
@@ -2618,7 +3408,11 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
         tabbar::Click::CloseOthers(i) => drop(with_app(|app| {
             let kept = app.windows[tab(app, i)?].active;
             // One at a time, the indices moving as tabs go; each undoable.
-            while let Some(&other) = app.tabs_of(window).iter().find(|&&t| !app.windows[t].tree.leaves().contains(&kept)) {
+            while let Some(&other) = app
+                .tabs_of(window)
+                .iter()
+                .find(|&&t| !app.windows[t].tree.leaves().contains(&kept))
+            {
                 app.close_tab(other);
             }
             Some(())
@@ -2627,11 +3421,20 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
             // SAFETY: main thread; a live NSWindow.
             let frame = unsafe { send_rect(window, c"frame") };
             // Cascaded from this one, as a new window would be.
-            app.detach_tab(window, i, CGPoint { x: frame.origin.x + 90.0, y: frame.origin.y + frame.size.height - 44.0 });
+            app.detach_tab(
+                window,
+                i,
+                CGPoint {
+                    x: frame.origin.x + 90.0,
+                    y: frame.origin.y + frame.size.height - 44.0,
+                },
+            );
         })),
         tabbar::Click::New => drop(with_app(|app| app.new_shell_tab_of(window))),
         tabbar::Click::Move(from, to) => drop(with_app(|app| app.move_tab(window, from, to))),
-        tabbar::Click::Detach(i, (x, y)) => drop(with_app(|app| app.detach_tab(window, i, CGPoint { x, y }))),
+        tabbar::Click::Detach(i, (x, y)) => {
+            let _ = with_app(|app| app.detach_tab(window, i, CGPoint { x, y }));
+        }
         tabbar::Click::Transfer(i, bar, at) => drop(with_app(|app| {
             let into = app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)?;
             app.transfer_tab(window, i, into, at);
@@ -2654,9 +3457,17 @@ fn load_bell_sound(path: Option<&Path>) -> Option<String> {
             call!(old, c"release");
         }
         let path = path?;
-        let sound: Id = msg!(msg!(class(c"NSSound"), c"alloc"), c"initWithContentsOfFile:byReference:", nsstring(&path.display().to_string()), YES);
+        let sound: Id = msg!(
+            msg!(class(c"NSSound"), c"alloc"),
+            c"initWithContentsOfFile:byReference:",
+            nsstring(&path.display().to_string()),
+            YES
+        );
         if sound.is_null() {
-            return Some(format!("bell-audio-path: {} isn't a sound macOS can play", path.display()));
+            return Some(format!(
+                "bell-audio-path: {} isn't a sound macOS can play",
+                path.display()
+            ));
         }
         BELL_SOUND.set(sound);
         None
@@ -2675,11 +3486,24 @@ const WINDOW_DRAG_TICK: Duration = Duration::from_millis(30);
 /// opens there; let go there, its tabs join that window. Checked on a timer
 /// while the button's down, as AppKit moves the window itself.
 extern "C" fn on_window_drag_tick(_: *mut c_void) {
-    let Some(window) = WINDOW_DRAG.get() else { return };
+    let Some(window) = WINDOW_DRAG.get() else {
+        return;
+    };
     // SAFETY: main thread; documented class methods.
-    let (buttons, mouse): (usize, CGPoint) = unsafe { (msg!(class(c"NSEvent"), c"pressedMouseButtons"), msg!(class(c"NSEvent"), c"mouseLocation")) };
+    let (buttons, mouse): (usize, CGPoint) = unsafe {
+        (
+            msg!(class(c"NSEvent"), c"pressedMouseButtons"),
+            msg!(class(c"NSEvent"), c"mouseLocation"),
+        )
+    };
     // All its tabs, in order: they'd all go.
-    let titles = with_app(|app| app.tabs_of(window).iter().map(|&t| app.tab_title(t)).collect::<Vec<_>>()).filter(|t| !t.is_empty());
+    let titles = with_app(|app| {
+        app.tabs_of(window)
+            .iter()
+            .map(|&t| app.tab_title(t))
+            .collect::<Vec<_>>()
+    })
+    .filter(|t| !t.is_empty());
     let Some(titles) = titles else {
         WINDOW_DRAG.set(None);
         tabbar::hover(None, NIL, &[]);
@@ -2691,7 +3515,13 @@ extern "C" fn on_window_drag_tick(_: *mut c_void) {
     // Over a tab bar the window gives way to the tab it would become, as
     // AppKit's does, so the gap it would go into shows.
     // SAFETY: main thread; a live NSWindow.
-    unsafe { call!(window, c"setAlphaValue:", if target.is_some() { 0.0f64 } else { 1.0f64 }) };
+    unsafe {
+        call!(
+            window,
+            c"setAlphaValue:",
+            if target.is_some() { 0.0f64 } else { 1.0f64 }
+        )
+    };
     if buttons & 1 != 0 {
         run_on_main_after(WINDOW_DRAG_TICK, on_window_drag_tick);
         return;
@@ -2732,7 +3562,11 @@ const CONFIG_TICK: Duration = Duration::from_secs(1);
 /// it's applied, as by Reload Configuration.
 extern "C" fn on_config_tick(_: *mut c_void) {
     with_app(|app| {
-        let path = app.config.file().map(Path::to_path_buf).or_else(|| Some(config::config_dir()?.join("config")));
+        let path = app
+            .config
+            .file()
+            .map(Path::to_path_buf)
+            .or_else(|| Some(config::config_dir()?.join("config")));
         let now = config_stamp(path.as_deref());
         if CONFIG_SEEN.replace(now) != now {
             app.reload_config();
@@ -2743,7 +3577,12 @@ extern "C" fn on_config_tick(_: *mut c_void) {
 
 /// The mouse on a pane's scrollbar.
 fn on_scrollbar_mouse(bar: Id, drag: scrollbar::Drag) {
-    with_app(|app| app.surfaces.iter_mut().find(|s| s.scrollbar.bar == bar).map(|s| s.scrollbar_mouse(drag)));
+    with_app(|app| {
+        app.surfaces
+            .iter_mut()
+            .find(|s| s.scrollbar.bar == bar)
+            .map(|s| s.scrollbar_mouse(drag))
+    });
 }
 
 /// Hides scrollbars once they've lingered, unless already scheduled to.
@@ -2757,7 +3596,13 @@ fn schedule_scrollbar_fade() {
 extern "C" fn on_scrollbar_fade(_: *mut c_void) {
     FADE_SCHEDULED.set(false);
     let now = Instant::now();
-    let next = with_app(|app| app.surfaces.iter_mut().filter_map(|s| s.scrollbar.fade(now)).min()).flatten();
+    let next = with_app(|app| {
+        app.surfaces
+            .iter_mut()
+            .filter_map(|s| s.scrollbar.fade(now))
+            .min()
+    })
+    .flatten();
     if let Some(next) = next {
         FADE_SCHEDULED.set(true);
         run_on_main_after(next.saturating_duration_since(now), on_scrollbar_fade);
@@ -2779,14 +3624,30 @@ unsafe fn style_titlebar(window: Id, config: &Config, translucent: bool) {
         // Native tabs sit under the title bar: a window that has some keeps
         // one, transparent, rather than the tab bar covering the terminal.
         let group: Id = msg!(window, c"tabbedWindows");
-        let tabs: usize = if group.is_null() { 0 } else { msg!(group, c"count") };
+        let tabs: usize = if group.is_null() {
+            0
+        } else {
+            msg!(group, c"count")
+        };
         let hidden = style == Titlebar::Hidden && tabs <= 1;
         // Tabs in the title bar's place: no title, the buttons over the bar.
         let tabbed = style == Titlebar::Tabs;
-        let mask = if hidden || tabbed { mask | FULL_SIZE_CONTENT } else { mask & !FULL_SIZE_CONTENT };
+        let mask = if hidden || tabbed {
+            mask | FULL_SIZE_CONTENT
+        } else {
+            mask & !FULL_SIZE_CONTENT
+        };
         call!(window, c"setStyleMask:", mask);
-        call!(window, c"setTitlebarAppearsTransparent:", if native { NO } else { YES });
-        call!(window, c"setTitleVisibility:", if hidden || tabbed { 1isize } else { 0isize });
+        call!(
+            window,
+            c"setTitlebarAppearsTransparent:",
+            if native { NO } else { YES }
+        );
+        call!(
+            window,
+            c"setTitleVisibility:",
+            if hidden || tabbed { 1isize } else { 0isize }
+        );
         for button in 0..3usize {
             // Close, minimize, zoom.
             let button: Id = msg!(window, c"standardWindowButton:", button);
@@ -2796,13 +3657,25 @@ unsafe fn style_titlebar(window: Id, config: &Config, translucent: bool) {
         }
         if !native && !translucent {
             // The title bar shows the window's background: the terminal's.
-            call!(window, c"setBackgroundColor:", ns_color(config.theme.background, 1.0, config.colorspace));
+            call!(
+                window,
+                c"setBackgroundColor:",
+                ns_color(config.theme.background, 1.0, config.colorspace)
+            );
         }
         // Its title and buttons drawn to suit that background.
         let (r, g, b) = config.theme.background;
         let dark = (0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64) < 128.0;
-        let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
-        let appearance: Id = if native { NIL } else { msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name)) };
+        let name = if dark {
+            "NSAppearanceNameDarkAqua"
+        } else {
+            "NSAppearanceNameAqua"
+        };
+        let appearance: Id = if native {
+            NIL
+        } else {
+            msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name))
+        };
         call!(window, c"setAppearance:", appearance);
     }
 }
@@ -2851,7 +3724,11 @@ fn color_alpha(rgb: (u8, u8, u8), alpha: f64, space: Colorspace) -> Id {
 /// Behind each pane's terminal: the default background, at
 /// `background-opacity`. It also shows through a dimmed pane.
 fn pane_background(config: &Config) -> Id {
-    color_alpha(config.theme.background, config.look.background_opacity, config.colorspace)
+    color_alpha(
+        config.theme.background,
+        config.look.background_opacity,
+        config.colorspace,
+    )
 }
 
 /// `background-opacity` and `background-blur` for a window, whose split
@@ -2861,14 +3738,30 @@ fn style_window(window: Id, root: Id, config: &Config) {
     // SAFETY: main thread; documented signatures (the blur is private API).
     unsafe {
         call!(window, c"setOpaque:", if translucent { NO } else { YES });
-        let background: Id = if translucent { msg!(class(c"NSColor"), c"clearColor") } else { msg!(class(c"NSColor"), c"windowBackgroundColor") };
+        let background: Id = if translucent {
+            msg!(class(c"NSColor"), c"clearColor")
+        } else {
+            msg!(class(c"NSColor"), c"windowBackgroundColor")
+        };
         call!(window, c"setBackgroundColor:", background);
         style_titlebar(window, config, translucent);
         // Translucent dividers would show the pane backgrounds through twice: clear instead.
         let divider = renderer::mix(config.theme.background, config.theme.foreground, 0.25);
-        call!(msg!(root, c"layer"), c"setBackgroundColor:", color_alpha(divider, if translucent { 0.0 } else { 1.0 }, config.colorspace));
+        call!(
+            msg!(root, c"layer"),
+            c"setBackgroundColor:",
+            color_alpha(
+                divider,
+                if translucent { 0.0 } else { 1.0 },
+                config.colorspace
+            )
+        );
         let number: isize = msg!(window, c"windowNumber");
-        let radius = if translucent { config.background_blur } else { 0 };
+        let radius = if translucent {
+            config.background_blur
+        } else {
+            0
+        };
         CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number as i32, radius);
     }
 }
@@ -2901,7 +3794,11 @@ impl Surface {
                     Some(title) => title.as_str(),
                     None => term.title().trim_start_matches(['●', ' ']),
                 };
-                let mut title = if own.is_empty() { self.pane.command.clone() } else { own.to_owned() };
+                let mut title = if own.is_empty() {
+                    self.pane.command.clone()
+                } else {
+                    own.to_owned()
+                };
                 if let Some(code) = self.pane.exit_status() {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
                 }
@@ -2930,7 +3827,8 @@ impl Surface {
                     } else if self.password > 0 {
                         // Gone once the program reads the line, echoing again.
                         if self.pane.hides_input() {
-                            self.snapshot.overlay(&"*".repeat(self.password), term.cursor());
+                            self.snapshot
+                                .overlay(&"*".repeat(self.password), term.cursor());
                         } else {
                             self.password = 0;
                         }
@@ -2950,7 +3848,13 @@ impl Surface {
             let refit = font.is_some_and(|family| self.renderer.set_family(family));
             let (history, rows, alt) = bar;
             let dark = self.dark();
-            self.scrollbar.update(history, rows, self.scroll_offset, BEHAVIOUR.get().scrollbar && !alt, dark);
+            self.scrollbar.update(
+                history,
+                rows,
+                self.scroll_offset,
+                BEHAVIOUR.get().scrollbar && !alt,
+                dark,
+            );
             if self.scrollbar.fade(Instant::now()).is_some() {
                 schedule_scrollbar_fade();
             }
@@ -2968,8 +3872,19 @@ impl Surface {
                 let link = self.hover.as_ref().map(|h| h.0);
                 let block = self.selection.is_some_and(|s| s.block);
                 let highlights = match &self.search {
-                    Some(search) => Highlights { selection, block, matches: &search.matches, current: search.current, link },
-                    None => Highlights { selection, block, link, ..Highlights::default() },
+                    Some(search) => Highlights {
+                        selection,
+                        block,
+                        matches: &search.matches,
+                        current: search.current,
+                        link,
+                    },
+                    None => Highlights {
+                        selection,
+                        block,
+                        link,
+                        ..Highlights::default()
+                    },
                 };
                 self.renderer.blink_off = BLINK.get().0;
                 let frame = self.renderer.prepare(&self.snapshot, highlights);
@@ -2977,8 +3892,13 @@ impl Surface {
                 let presented = latency::frame(self.window, &self.snapshot);
                 self.renderer.present(frame, presented);
                 let screen: Id = msg!(self.window, c"screen");
-                let fps: isize = if screen.is_null() { 0 } else { msg!(screen, c"maximumFramesPerSecond") };
-                self.next_frame = Instant::now() + Duration::from_secs(1) / fps.clamp(30, 240) as u32;
+                let fps: isize = if screen.is_null() {
+                    0
+                } else {
+                    msg!(screen, c"maximumFramesPerSecond")
+                };
+                self.next_frame =
+                    Instant::now() + Duration::from_secs(1) / fps.clamp(30, 240) as u32;
                 self.echo_frame = None;
             }
             objc_autoreleasePoolPop(pool);
@@ -3001,7 +3921,12 @@ impl Surface {
             call!(self.layer, c"setDrawableSize:", CGSize { width, height });
             let (cols, rows) = self.renderer.grid_size(width, height);
             let (cw, ch) = self.renderer.cell_size();
-            self.pane.resize(cols as u16, rows as u16, (cols as u32 * cw) as u16, (rows as u32 * ch) as u16);
+            self.pane.resize(
+                cols as u16,
+                rows as u16,
+                (cols as u32 * cw) as u16,
+                (rows as u32 * ch) as u16,
+            );
         }
         self.render();
     }
@@ -3033,12 +3958,20 @@ impl Surface {
                     let _: Id = msg!(self.flash, c"retain");
                     call!(container, c"addSublayer:", self.flash);
                 }
-                call!(self.flash, c"setFrame:", send_rect(self.container, c"bounds"));
+                call!(
+                    self.flash,
+                    c"setFrame:",
+                    send_rect(self.container, c"bounds")
+                );
                 let accent: Id = msg!(class(c"NSColor"), c"controlAccentColor");
                 let accent: Id = msg!(accent, c"CGColor");
                 call!(self.flash, c"setBorderColor:", accent);
                 call!(self.flash, c"setBorderWidth:", 0.0f64);
-                let fade: Id = msg!(class(c"CABasicAnimation"), c"animationWithKeyPath:", nsstring("borderWidth"));
+                let fade: Id = msg!(
+                    class(c"CABasicAnimation"),
+                    c"animationWithKeyPath:",
+                    nsstring("borderWidth")
+                );
                 let number = |v: f64| -> Id { msg!(class(c"NSNumber"), c"numberWithDouble:", v) };
                 call!(fade, c"setFromValue:", number(4.0));
                 call!(fade, c"setToValue:", number(0.0));
@@ -3087,7 +4020,10 @@ impl Surface {
                     x: (px + col as f64 * cw as f64) / scale,
                     y: bounds.size.height - (py + (row + 1) as f64 * ch as f64) / scale,
                 },
-                size: CGSize { width: cw as f64 / scale, height: ch as f64 / scale },
+                size: CGSize {
+                    width: cw as f64 / scale,
+                    height: ch as f64 / scale,
+                },
             };
             let in_window = send_rect_with(self.view, c"convertRect:toView:", (cell, NIL));
             send_rect_with(self.window, c"convertRectToScreen:", (in_window,))
@@ -3099,7 +4035,11 @@ impl Surface {
         let _ = self.pane.write(bytes);
         if BEHAVIOUR.get().password_mask {
             let before = self.password;
-            self.password = if self.pane.hides_input() { keys::password_length(self.password, bytes) } else { 0 };
+            self.password = if self.pane.hides_input() {
+                keys::password_length(self.password, bytes)
+            } else {
+                0
+            };
             // Nothing is echoed to draw it otherwise.
             if self.password != before {
                 self.render();
@@ -3118,7 +4058,13 @@ impl Surface {
         let (mode, sgr, cols, rows, lines_scrolled) = {
             let term = self.pane.term.lock().unwrap();
             let m = term.modes();
-            (m.mouse, m.mouse_sgr, term.cols(), term.rows(), term.lines_scrolled())
+            (
+                m.mouse,
+                m.mouse_sgr,
+                term.cols(),
+                term.rows(),
+                term.lines_scrolled(),
+            )
         };
         let (col, row) = (col.min(cols - 1), row.min(rows - 1));
 
@@ -3127,7 +4073,9 @@ impl Surface {
             if action == MouseAction::Motion && mode == MouseMode::Click {
                 return;
             }
-            let _ = self.pane.write(&keys::mouse_report(0, action, col, row, mods, sgr));
+            let _ = self
+                .pane
+                .write(&keys::mouse_report(0, action, col, row, mods, sgr));
             return;
         }
 
@@ -3144,7 +4092,13 @@ impl Surface {
                     _ => Granularity::Line,
                 };
                 let block = mods.alt && granularity == Granularity::Cell;
-                self.selection = Some(Selection { granularity, anchor: point, head: point, dragged: false, block });
+                self.selection = Some(Selection {
+                    granularity,
+                    anchor: point,
+                    head: point,
+                    dragged: false,
+                    block,
+                });
                 self.dragging = true;
             }
             MouseAction::Motion => {}
@@ -3152,7 +4106,9 @@ impl Surface {
                 self.dragging = false;
                 self.autoscroll = 0;
                 // A drag, or a word or line picked by clicking.
-                let picked = self.selection.is_some_and(|s| s.dragged || s.granularity != Granularity::Cell);
+                let picked = self
+                    .selection
+                    .is_some_and(|s| s.dragged || s.granularity != Granularity::Cell);
                 if picked && BEHAVIOUR.get().copy_on_select {
                     self.copy();
                 }
@@ -3175,7 +4131,10 @@ impl Surface {
         let head = {
             let term = self.pane.term.lock().unwrap();
             let (col, row) = (col.min(term.cols() - 1), row.min(term.rows() - 1));
-            (term.lines_scrolled() - self.scroll_offset as u64 + row as u64, col)
+            (
+                term.lines_scrolled() - self.scroll_offset as u64 + row as u64,
+                col,
+            )
         };
         if let Some(selection) = &mut self.selection {
             selection.head = head;
@@ -3193,7 +4152,11 @@ impl Surface {
         } else {
             0.0
         };
-        self.autoscroll = if beyond == 0.0 { 0 } else { (1 + (beyond.abs() / line) as isize).min(10) * beyond.signum() as isize };
+        self.autoscroll = if beyond == 0.0 {
+            0
+        } else {
+            (1 + (beyond.abs() / line) as isize).min(10) * beyond.signum() as isize
+        };
         if self.autoscroll != 0 && !AUTOSCROLLING.get() {
             AUTOSCROLLING.set(true);
             run_on_main_after(AUTOSCROLL_INTERVAL, on_autoscroll_tick);
@@ -3212,7 +4175,14 @@ impl Surface {
             }
             let bar = FindBar::open(self.container, self.view, self.dark());
             call!(self.window, c"makeFirstResponder:", bar.field);
-            self.search = Some(Search { bar, query: String::new(), matches: Vec::new(), current: None, searched_to: 0, alt: false });
+            self.search = Some(Search {
+                bar,
+                query: String::new(),
+                matches: Vec::new(),
+                current: None,
+                searched_to: 0,
+                alt: false,
+            });
         }
     }
 
@@ -3237,7 +4207,13 @@ impl Surface {
             self.backing = Some(backing);
             let (rgb, opacity, space) = backing;
             // SAFETY: main thread; documented signature.
-            unsafe { call!(msg!(self.container, c"layer"), c"setBackgroundColor:", color_alpha(rgb, opacity, space)) };
+            unsafe {
+                call!(
+                    msg!(self.container, c"layer"),
+                    c"setBackgroundColor:",
+                    color_alpha(rgb, opacity, space)
+                )
+            };
         }
     }
 
@@ -3260,7 +4236,9 @@ impl Surface {
     /// Searches for the bar's text: from the newest match when it changed,
     /// else moving `step` matches from the selected one (-1: older).
     fn search(&mut self, step: Option<isize>) {
-        let Some(search) = &mut self.search else { return };
+        let Some(search) = &mut self.search else {
+            return;
+        };
         // SAFETY: main thread; documented signature.
         let query = unsafe { string_from_ns(msg!(search.bar.field, c"stringValue")) };
         let changed = query != search.query;
@@ -3284,7 +4262,11 @@ impl Surface {
         if term.is_alt_screen() {
             return;
         }
-        let (scrolled, rows, history) = (term.lines_scrolled(), term.rows() as u64, term.scrollback().len());
+        let (scrolled, rows, history) = (
+            term.lines_scrolled(),
+            term.rows() as u64,
+            term.scrollback().len(),
+        );
         let top = scrolled - self.scroll_offset as u64;
         if !(top..top + rows).contains(&line) {
             self.scroll_offset = ((scrolled + rows / 2).saturating_sub(line) as usize).min(history);
@@ -3294,7 +4276,9 @@ impl Surface {
     fn copy(&mut self) {
         let text = {
             let term = self.pane.term.lock().unwrap();
-            let Some((start, end)) = selection_range(self.selection, &term) else { return };
+            let Some((start, end)) = selection_range(self.selection, &term) else {
+                return;
+            };
             match self.selection {
                 // The ends as dragged: a block's corners, not its text's start and end.
                 Some(s) if s.block => term.text_block(s.anchor, s.head),
@@ -3305,7 +4289,12 @@ impl Surface {
         unsafe {
             let pasteboard: Id = msg!(class(c"NSPasteboard"), c"generalPasteboard");
             let _: isize = msg!(pasteboard, c"clearContents");
-            let _: Bool = msg!(pasteboard, c"setString:forType:", nsstring(&text), NSPasteboardTypeString);
+            let _: Bool = msg!(
+                pasteboard,
+                c"setString:forType:",
+                nsstring(&text),
+                NSPasteboardTypeString
+            );
         }
     }
 
@@ -3321,7 +4310,13 @@ impl Surface {
         let (alt, mouse, sgr, app_cursor, history) = {
             let term = self.pane.term.lock().unwrap();
             let m = term.modes();
-            (term.is_alt_screen(), m.mouse, m.mouse_sgr, m.app_cursor, term.scrollback().len())
+            (
+                term.is_alt_screen(),
+                m.mouse,
+                m.mouse_sgr,
+                m.app_cursor,
+                term.scrollback().len(),
+            )
         };
 
         if alt {
@@ -3329,7 +4324,14 @@ impl Surface {
             // otherwise arrow keys (alternate scroll), like most terminals.
             let up = lines > 0;
             let seq = if mouse != MouseMode::Off {
-                keys::mouse_report(if up { 64 } else { 65 }, MouseAction::Press, column, row, Mods::default(), sgr)
+                keys::mouse_report(
+                    if up { 64 } else { 65 },
+                    MouseAction::Press,
+                    column,
+                    row,
+                    Mods::default(),
+                    sgr,
+                )
             } else {
                 let letter = if up { b'A' } else { b'B' };
                 vec![0x1b, if app_cursor { b'O' } else { b'[' }, letter]
@@ -3356,10 +4358,16 @@ impl Surface {
             ),
             ClipboardRequest::Write(text) => {
                 let preview = keys::visible_controls(text, 200);
-                (behaviour.clipboard_write, "Let this program copy to the clipboard?", format!("It would copy:\n\n{preview}"))
+                (
+                    behaviour.clipboard_write,
+                    "Let this program copy to the clipboard?",
+                    format!("It would copy:\n\n{preview}"),
+                )
             }
         };
-        let refused = self.clipboard_refused.is_some_and(|at| at.elapsed() < CLIPBOARD_REFUSED_FOR);
+        let refused = self
+            .clipboard_refused
+            .is_some_and(|at| at.elapsed() < CLIPBOARD_REFUSED_FOR);
         match permission {
             Permission::Ask if refused => {}
             Permission::Allow => self.do_clipboard(request),
@@ -3375,10 +4383,16 @@ impl Surface {
             match request {
                 ClipboardRequest::Write(text) => {
                     let _: isize = msg!(pasteboard, c"clearContents");
-                    let _: Bool = msg!(pasteboard, c"setString:forType:", nsstring(&text), NSPasteboardTypeString);
+                    let _: Bool = msg!(
+                        pasteboard,
+                        c"setString:forType:",
+                        nsstring(&text),
+                        NSPasteboardTypeString
+                    );
                 }
                 ClipboardRequest::Read { bell_terminated } => {
-                    let text = string_from_ns(msg!(pasteboard, c"stringForType:", NSPasteboardTypeString));
+                    let text =
+                        string_from_ns(msg!(pasteboard, c"stringForType:", NSPasteboardTypeString));
                     let _ = self.pane.write(&clipboard_reply(&text, bell_terminated));
                 }
             }
@@ -3434,12 +4448,16 @@ impl Surface {
         let hover = (cmd && inside)
             .then(|| {
                 // SAFETY: main thread; documented signature.
-                let (col, row) = self.cell_at(self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") }));
+                let (col, row) = self.cell_at(
+                    self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") }),
+                );
                 let term = self.pane.term.lock().unwrap();
                 let line = term.lines_scrolled() - self.scroll_offset as u64 + row as u64;
                 match term.link_at(line, col) {
                     Some(id) => Some((HoveredLink::Id(id), term.link(id)?.to_owned())),
-                    None => term.url_at(line, col).map(|(range, url)| (HoveredLink::Range(range), url)),
+                    None => term
+                        .url_at(line, col)
+                        .map(|(range, url)| (HoveredLink::Range(range), url)),
                 }
             })
             .flatten();
@@ -3450,7 +4468,11 @@ impl Surface {
             }
             return;
         }
-        set_pointer(if hover.is_some() { PointerShape::Pointer } else { self.pointer });
+        set_pointer(if hover.is_some() {
+            PointerShape::Pointer
+        } else {
+            self.pointer
+        });
         // SAFETY: main thread; documented signatures.
         unsafe {
             if hover.is_some() && self.hint.is_none() {
@@ -3470,7 +4492,12 @@ impl Surface {
         // SAFETY: main thread; `event` is a mouse NSEvent; documented signatures.
         let (y, height) = unsafe {
             let point: CGPoint = msg!(event, c"locationInWindow");
-            (point.y, send_rect(msg!(self.window, c"contentView"), c"bounds").size.height)
+            (
+                point.y,
+                send_rect(msg!(self.window, c"contentView"), c"bounds")
+                    .size
+                    .height,
+            )
         };
         let pad = self.renderer.padding_px().1 / self.renderer.scale();
         y >= height - pad
@@ -3479,9 +4506,11 @@ impl Surface {
     /// Whether the mouse is over the terminal.
     fn mouse_inside(&self) -> bool {
         // SAFETY: main thread; documented signatures.
-        let location = self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") });
+        let location =
+            self.local(unsafe { msg!(self.window, c"mouseLocationOutsideOfEventStream") });
         let bounds = unsafe { send_rect(self.view, c"bounds") };
-        (0.0..bounds.size.width).contains(&location.x) && (0.0..bounds.size.height).contains(&location.y)
+        (0.0..bounds.size.width).contains(&location.x)
+            && (0.0..bounds.size.height).contains(&location.y)
     }
 
     fn set_focused(&mut self, focused: bool) {
@@ -3533,7 +4562,11 @@ unsafe fn register_view_class() -> Id {
         unsafe {
             let kind: usize = msg!(event, c"type");
             let window: Id = msg!(view, c"window");
-            let responder: Id = if window.is_null() { NIL } else { msg!(window, c"firstResponder") };
+            let responder: Id = if window.is_null() {
+                NIL
+            } else {
+                msg!(window, c"firstResponder")
+            };
             if kind != KEY_DOWN || responder != view {
                 return NO;
             }
@@ -3557,7 +4590,8 @@ unsafe fn register_view_class() -> Id {
                 return perform(view, &action);
             }
             let flags: usize = msg!(event, c"modifierFlags");
-            let key_flags = with_surface(view, |w| w.pane.term.lock().unwrap().key_flags()).unwrap_or(0);
+            let key_flags =
+                with_surface(view, |w| w.pane.term.lock().unwrap().key_flags()).unwrap_or(0);
             // Command shortcuts belong to the menu; ones it hasn't go to
             // programs that can tell them apart (kitty's Super).
             if flags & CMD != 0 && key_flags == 0 {
@@ -3581,10 +4615,25 @@ unsafe fn register_view_class() -> Id {
             let code: u16 = msg!(event, c"keyCode");
             let chars = string_from_ns(msg!(event, c"characters"));
             let shifted = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
-            let unshifted = if key_flags == 0 { String::new() } else { string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize)) };
+            let unshifted = if key_flags == 0 {
+                String::new()
+            } else {
+                string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize))
+            };
             let repeat: Bool = msg!(event, c"isARepeat");
-            let action = if repeat != NO { KeyAction::Repeat } else { KeyAction::Press };
-            let key = Key { code, text: &chars, shifted: &shifted, unshifted: &unshifted, mods, action };
+            let action = if repeat != NO {
+                KeyAction::Repeat
+            } else {
+                KeyAction::Press
+            };
+            let key = Key {
+                code,
+                text: &chars,
+                shifted: &shifted,
+                unshifted: &unshifted,
+                mods,
+                action,
+            };
             if composing == Some(true) || !(mods.ctrl || alt || mods.cmd) {
                 // What the input method types for this key alone is still this key.
                 with_surface(view, |w| w.capture = key_flags != 0 && w.preedit.is_empty());
@@ -3601,7 +4650,15 @@ unsafe fn register_view_class() -> Id {
                 if let Some(text) = typed {
                     // Option typed it: it isn't Alt.
                     let mods = Mods { alt: false, ..mods };
-                    send_key(view, &Key { text: &text, mods, ..key }, key_flags);
+                    send_key(
+                        view,
+                        &Key {
+                            text: &text,
+                            mods,
+                            ..key
+                        },
+                        key_flags,
+                    );
                 }
                 if used {
                     return;
@@ -3635,7 +4692,14 @@ unsafe fn register_view_class() -> Id {
             let chars = string_from_ns(msg!(event, c"characters"));
             let shifted = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
             let unshifted = string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize));
-            let key = Key { code, text: &chars, shifted: &shifted, unshifted: &unshifted, mods: modifiers(flags), action: KeyAction::Release };
+            let key = Key {
+                code,
+                text: &chars,
+                shifted: &shifted,
+                unshifted: &unshifted,
+                mods: modifiers(flags),
+                action: KeyAction::Release,
+            };
             with_surface(view, |w| {
                 w.keys_down.retain(|&c| c != code);
                 let (key_flags, app_cursor) = {
@@ -3656,7 +4720,13 @@ unsafe fn register_view_class() -> Id {
     }
 
     fn find_step(view: Id, step: isize) {
-        with_surface(view, |w| if w.search.is_some() { w.search(Some(step)) } else { w.open_search() });
+        with_surface(view, |w| {
+            if w.search.is_some() {
+                w.search(Some(step))
+            } else {
+                w.open_search()
+            }
+        });
     }
     extern "C" fn find_next(view: Id, _: Sel, _sender: Id) {
         find_step(view, -1);
@@ -3681,8 +4751,17 @@ unsafe fn register_view_class() -> Id {
 
     /// Keys in the search bar: Return steps to older matches (with Shift,
     /// newer), Escape closes it.
-    extern "C" fn search_command(view: Id, _: Sel, control: Id, _text_view: Id, command: Sel) -> Bool {
-        let palette = with_surface(view, |w| w.palette.as_ref().is_some_and(|p| p.field == control)).unwrap_or(false);
+    extern "C" fn search_command(
+        view: Id,
+        _: Sel,
+        control: Id,
+        _text_view: Id,
+        command: Sel,
+    ) -> Bool {
+        let palette = with_surface(view, |w| {
+            w.palette.as_ref().is_some_and(|p| p.field == control)
+        })
+        .unwrap_or(false);
         if palette {
             return palette_command(view, command);
         }
@@ -3691,7 +4770,11 @@ unsafe fn register_view_class() -> Id {
             let shift = unsafe {
                 let app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
                 let event: Id = msg!(app, c"currentEvent");
-                let flags: usize = if event.is_null() { 0 } else { msg!(event, c"modifierFlags") };
+                let flags: usize = if event.is_null() {
+                    0
+                } else {
+                    msg!(event, c"modifierFlags")
+                };
                 flags & (1 << 17) != 0
             };
             find_step(view, if shift { 1 } else { -1 });
@@ -3736,7 +4819,11 @@ unsafe fn register_view_class() -> Id {
     unsafe fn text_of(string: Id) -> String {
         unsafe {
             let attributed: Bool = msg!(string, c"isKindOfClass:", class(c"NSAttributedString"));
-            string_from_ns(if attributed != 0 { msg!(string, c"string") } else { string })
+            string_from_ns(if attributed != 0 {
+                msg!(string, c"string")
+            } else {
+                string
+            })
         }
     }
 
@@ -3757,7 +4844,13 @@ unsafe fn register_view_class() -> Id {
         });
     }
 
-    extern "C" fn set_marked_text(view: Id, _: Sel, string: Id, _selected: NSRange, _replace: NSRange) {
+    extern "C" fn set_marked_text(
+        view: Id,
+        _: Sel,
+        string: Id,
+        _selected: NSRange,
+        _replace: NSRange,
+    ) {
         // SAFETY: AppKit passes a string object.
         let text = unsafe { text_of(string) };
         with_surface(view, |w| {
@@ -3776,16 +4869,33 @@ unsafe fn register_view_class() -> Id {
     }
 
     extern "C" fn has_marked_text(view: Id, _: Sel) -> Bool {
-        if with_surface(view, |w| !w.preedit.is_empty()) == Some(true) { YES } else { NO }
+        if with_surface(view, |w| !w.preedit.is_empty()) == Some(true) {
+            YES
+        } else {
+            NO
+        }
     }
 
     extern "C" fn marked_range(view: Id, _: Sel) -> NSRange {
         let length = with_surface(view, |w| w.preedit.encode_utf16().count()).unwrap_or(0);
-        if length == 0 { NSRange { location: NS_NOT_FOUND, length: 0 } } else { NSRange { location: 0, length } }
+        if length == 0 {
+            NSRange {
+                location: NS_NOT_FOUND,
+                length: 0,
+            }
+        } else {
+            NSRange {
+                location: 0,
+                length,
+            }
+        }
     }
 
     extern "C" fn selected_range(_: Id, _: Sel) -> NSRange {
-        NSRange { location: NS_NOT_FOUND, length: 0 }
+        NSRange {
+            location: NS_NOT_FOUND,
+            length: 0,
+        }
     }
 
     extern "C" fn valid_attributes(_: Id, _: Sel) -> Id {
@@ -3793,7 +4903,12 @@ unsafe fn register_view_class() -> Id {
         unsafe { msg!(class(c"NSArray"), c"array") }
     }
 
-    extern "C" fn attributed_substring(_: Id, _: Sel, _range: NSRange, _actual: *mut NSRange) -> Id {
+    extern "C" fn attributed_substring(
+        _: Id,
+        _: Sel,
+        _range: NSRange,
+        _actual: *mut NSRange,
+    ) -> Id {
         NIL
     }
 
@@ -3819,7 +4934,11 @@ unsafe fn register_view_class() -> Id {
             with_surface(view, |w| {
                 // Trackpads report points, wheels report lines.
                 let points_per_line = w.renderer.cell_size().1 as f64 / w.renderer.scale();
-                let lines = if precise != 0 { dy / points_per_line } else { dy } * BEHAVIOUR.get().scroll_multiplier;
+                let lines = if precise != 0 {
+                    dy / points_per_line
+                } else {
+                    dy
+                } * BEHAVIOUR.get().scroll_multiplier;
                 let (col, row) = w.cell_at(w.local(location));
                 w.scroll(lines, col, row);
                 // Scrolling while selecting moves the selection's end too.
@@ -3861,7 +4980,9 @@ unsafe fn register_view_class() -> Id {
     }
     extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
         // Without a title bar, the top padding moves the window.
-        if BEHAVIOUR.get().titlebar == Titlebar::Hidden && with_surface(view, |w| w.in_top_padding(event)) == Some(true) {
+        if BEHAVIOUR.get().titlebar == Titlebar::Hidden
+            && with_surface(view, |w| w.in_top_padding(event)) == Some(true)
+        {
             // SAFETY: main thread; `event` is this mouse-down.
             unsafe { call!(msg!(view, c"window"), c"performWindowDragWithEvent:", event) };
             return;
@@ -3895,17 +5016,29 @@ unsafe fn register_view_class() -> Id {
     /// Cmd pressed or released without the mouse moving.
     extern "C" fn flags_changed(view: Id, _: Sel, event: Id) {
         // SAFETY: `event` is an NSEvent.
-        let (flags, code): (usize, u16) = unsafe { (msg!(event, c"modifierFlags"), msg!(event, c"keyCode")) };
+        let (flags, code): (usize, u16) =
+            unsafe { (msg!(event, c"modifierFlags"), msg!(event, c"keyCode")) };
         with_surface(view, |w| {
             w.update_hover(flags & CMD != 0);
             // Modifier keys themselves, for programs that want every key.
-            let Some(&(_, bit)) = MODIFIER_KEYS.iter().find(|m| m.0 == code) else { return };
+            let Some(&(_, bit)) = MODIFIER_KEYS.iter().find(|m| m.0 == code) else {
+                return;
+            };
             let (key_flags, app_cursor) = {
                 let term = w.pane.term.lock().unwrap();
                 (term.key_flags(), term.modes().app_cursor)
             };
-            let action = if flags & bit != 0 { KeyAction::Press } else { KeyAction::Release };
-            let key = Key { code, mods: modifiers(flags), action, ..Key::default() };
+            let action = if flags & bit != 0 {
+                KeyAction::Press
+            } else {
+                KeyAction::Release
+            };
+            let key = Key {
+                code,
+                mods: modifiers(flags),
+                action,
+                ..Key::default()
+            };
             if let Some(bytes) = keys::kitty(&key, key_flags, app_cursor) {
                 w.write(&bytes);
             }
@@ -3931,58 +5064,95 @@ unsafe fn register_view_class() -> Id {
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
     let predicate = |f: extern "C" fn(Id, Sel) -> Bool| f as *const c_void;
     unsafe {
-        register_class_with(c"MighttyView", c"NSView", &[c"NSTextInputClient"], &[
-            (c"acceptsFirstResponder", predicate(yes), c"c@:"),
-            (c"becomeFirstResponder", predicate(become_first_responder), c"c@:"),
-            (c"isOpaque", predicate(yes), c"c@:"),
-            (c"keyDown:", action(key_down), c"v@:@"),
-            (c"keyUp:", action(key_up), c"v@:@"),
-            (
-                c"performKeyEquivalent:",
-                perform_key_equivalent as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
-                c"c@:@",
-            ),
-            (c"scrollWheel:", action(scroll_wheel), c"v@:@"),
-            (c"paste:", action(paste), c"v@:@"),
-            (c"copy:", action(copy), c"v@:@"),
-            (c"mouseDown:", action(mouse_down), c"v@:@"),
-            (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
-            (c"mouseUp:", action(mouse_up), c"v@:@"),
-            (c"mouseMoved:", action(mouse_moved), c"v@:@"),
-            (c"mouseExited:", action(mouse_exited), c"v@:@"),
-            (c"flagsChanged:", action(flags_changed), c"v@:@"),
-            (c"insertText:replacementRange:", insert_text as *const c_void, c"v@:@{_NSRange=QQ}"),
-            (
-                c"setMarkedText:selectedRange:replacementRange:",
-                set_marked_text as *const c_void,
-                c"v@:@{_NSRange=QQ}{_NSRange=QQ}",
-            ),
-            (c"unmarkText", unmark_text as *const c_void, c"v@:"),
-            (c"hasMarkedText", predicate(has_marked_text), c"c@:"),
-            (c"markedRange", marked_range as *const c_void, c"{_NSRange=QQ}@:"),
-            (c"selectedRange", selected_range as *const c_void, c"{_NSRange=QQ}@:"),
-            (c"validAttributesForMarkedText", valid_attributes as *const c_void, c"@@:"),
-            (
-                c"attributedSubstringForProposedRange:actualRange:",
-                attributed_substring as *const c_void,
-                c"@@:{_NSRange=QQ}^{_NSRange=QQ}",
-            ),
-            (c"characterIndexForPoint:", character_index as *const c_void, c"Q@:{CGPoint=dd}"),
-            (
-                c"firstRectForCharacterRange:actualRange:",
-                first_rect as *const c_void,
-                c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}",
-            ),
-            (c"doCommandBySelector:", do_command as *const c_void, c"v@::"),
-            (c"performFind:", action(find), c"v@:@"),
-            (c"findNext:", action(find_next), c"v@:@"),
-            (c"findPrevious:", action(find_previous), c"v@:@"),
-            (c"searchOlder:", action(find_next), c"v@:@"),
-            (c"searchNewer:", action(find_previous), c"v@:@"),
-            (c"closeSearch:", action(close_search), c"v@:@"),
-            (c"controlTextDidChange:", action(search_changed), c"v@:@"),
-            (c"control:textView:doCommandBySelector:", search_command as *const c_void, c"c@:@@:"),
-        ])
+        register_class_with(
+            c"MighttyView",
+            c"NSView",
+            &[c"NSTextInputClient"],
+            &[
+                (c"acceptsFirstResponder", predicate(yes), c"c@:"),
+                (
+                    c"becomeFirstResponder",
+                    predicate(become_first_responder),
+                    c"c@:",
+                ),
+                (c"isOpaque", predicate(yes), c"c@:"),
+                (c"keyDown:", action(key_down), c"v@:@"),
+                (c"keyUp:", action(key_up), c"v@:@"),
+                (
+                    c"performKeyEquivalent:",
+                    perform_key_equivalent as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
+                    c"c@:@",
+                ),
+                (c"scrollWheel:", action(scroll_wheel), c"v@:@"),
+                (c"paste:", action(paste), c"v@:@"),
+                (c"copy:", action(copy), c"v@:@"),
+                (c"mouseDown:", action(mouse_down), c"v@:@"),
+                (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
+                (c"mouseUp:", action(mouse_up), c"v@:@"),
+                (c"mouseMoved:", action(mouse_moved), c"v@:@"),
+                (c"mouseExited:", action(mouse_exited), c"v@:@"),
+                (c"flagsChanged:", action(flags_changed), c"v@:@"),
+                (
+                    c"insertText:replacementRange:",
+                    insert_text as *const c_void,
+                    c"v@:@{_NSRange=QQ}",
+                ),
+                (
+                    c"setMarkedText:selectedRange:replacementRange:",
+                    set_marked_text as *const c_void,
+                    c"v@:@{_NSRange=QQ}{_NSRange=QQ}",
+                ),
+                (c"unmarkText", unmark_text as *const c_void, c"v@:"),
+                (c"hasMarkedText", predicate(has_marked_text), c"c@:"),
+                (
+                    c"markedRange",
+                    marked_range as *const c_void,
+                    c"{_NSRange=QQ}@:",
+                ),
+                (
+                    c"selectedRange",
+                    selected_range as *const c_void,
+                    c"{_NSRange=QQ}@:",
+                ),
+                (
+                    c"validAttributesForMarkedText",
+                    valid_attributes as *const c_void,
+                    c"@@:",
+                ),
+                (
+                    c"attributedSubstringForProposedRange:actualRange:",
+                    attributed_substring as *const c_void,
+                    c"@@:{_NSRange=QQ}^{_NSRange=QQ}",
+                ),
+                (
+                    c"characterIndexForPoint:",
+                    character_index as *const c_void,
+                    c"Q@:{CGPoint=dd}",
+                ),
+                (
+                    c"firstRectForCharacterRange:actualRange:",
+                    first_rect as *const c_void,
+                    c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}",
+                ),
+                (
+                    c"doCommandBySelector:",
+                    do_command as *const c_void,
+                    c"v@::",
+                ),
+                (c"performFind:", action(find), c"v@:@"),
+                (c"findNext:", action(find_next), c"v@:@"),
+                (c"findPrevious:", action(find_previous), c"v@:@"),
+                (c"searchOlder:", action(find_next), c"v@:@"),
+                (c"searchNewer:", action(find_previous), c"v@:@"),
+                (c"closeSearch:", action(close_search), c"v@:@"),
+                (c"controlTextDidChange:", action(search_changed), c"v@:@"),
+                (
+                    c"control:textView:doCommandBySelector:",
+                    search_command as *const c_void,
+                    c"c@:@@:",
+                ),
+            ],
+        )
     }
 }
 
@@ -4030,34 +5200,60 @@ unsafe fn register_split_class() -> Id {
         with_app(|app| app.drag_divider(view, point));
     }
     extern "C" fn mouse_up(view: Id, _: Sel, _event: Id) {
-        with_app(|app| app.windows.iter_mut().find(|w| w.root == view && w.shown).map(|w| w.dragging = None));
+        with_app(|app| {
+            app.windows
+                .iter_mut()
+                .find(|w| w.root == view && w.shown)
+                .map(|w| w.dragging = None)
+        });
     }
     /// Resize pointers over the dividers.
     extern "C" fn reset_cursor_rects(view: Id, _: Sel) {
         let dividers = with_app(|app| {
-            let w = app.windows.iter().find(|w| w.root == view && w.shown).filter(|w| !w.zoomed)?;
+            let w = app
+                .windows
+                .iter()
+                .find(|w| w.root == view && w.shown)
+                .filter(|w| !w.zoomed)?;
             let bounds = app.pane_bounds(w.window, view);
             Some(w.tree.dividers(bounds, GAP))
         });
         for divider in dividers.flatten().unwrap_or_default() {
-            let cursor = if divider.axis == Axis::Row { c"resizeLeftRightCursor" } else { c"resizeUpDownCursor" };
+            let cursor = if divider.axis == Axis::Row {
+                c"resizeLeftRightCursor"
+            } else {
+                c"resizeUpDownCursor"
+            };
             // SAFETY: main thread; documented signatures.
             unsafe {
                 let cursor: Id = msg!(class(c"NSCursor"), cursor);
-                call!(view, c"addCursorRect:cursor:", from_rect(grab_area(&divider)), cursor);
+                call!(
+                    view,
+                    c"addCursorRect:cursor:",
+                    from_rect(grab_area(&divider)),
+                    cursor
+                );
             }
         }
     }
 
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
     unsafe {
-        register_class(c"MighttySplitView", c"NSView", &[
-            (c"hitTest:", hit_test as *const c_void, c"@@:{CGPoint=dd}"),
-            (c"mouseDown:", action(mouse_down), c"v@:@"),
-            (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
-            (c"mouseUp:", action(mouse_up), c"v@:@"),
-            (c"resetCursorRects", reset_cursor_rects as *const c_void, c"v@:"),
-        ])
+        register_class(
+            c"MighttySplitView",
+            c"NSView",
+            &[
+                (c"hitTest:", hit_test as *const c_void, c"@@:{CGPoint=dd}"),
+                (c"mouseDown:", action(mouse_down), c"v@:@"),
+                (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
+                (c"mouseUp:", action(mouse_up), c"v@:@"),
+                (
+                    c"resetCursorRects",
+                    reset_cursor_rects as *const c_void,
+                    c"v@:",
+                ),
+            ],
+        )
     }
 }
 
@@ -4077,7 +5273,10 @@ unsafe fn register_delegate_class() -> Id {
         let window = window_of(notification);
         // SAFETY: main thread; documented class method.
         let buttons: usize = unsafe { msg!(class(c"NSEvent"), c"pressedMouseButtons") };
-        let ours = with_app(|app| app.windows.iter().any(|w| w.window == window) && app.quick != Some(window)).unwrap_or(false);
+        let ours = with_app(|app| {
+            app.windows.iter().any(|w| w.window == window) && app.quick != Some(window)
+        })
+        .unwrap_or(false);
         if buttons & 1 != 0 && ours && WINDOW_DRAG.replace(Some(window)).is_none() {
             run_on_main_after(WINDOW_DRAG_TICK, on_window_drag_tick);
         }
@@ -4112,7 +5311,10 @@ unsafe fn register_delegate_class() -> Id {
         let window = window_of(notification);
         with_app(|app| {
             let active = app.shown(window)?.active;
-            app.surfaces.iter_mut().find(|s| s.view == active).map(|s| s.set_focused(key))
+            app.surfaces
+                .iter_mut()
+                .find(|s| s.view == active)
+                .map(|s| s.set_focused(key))
         });
     }
     /// A tab coming to the front, a window uncovered: what it last showed may
@@ -4171,7 +5373,9 @@ unsafe fn register_delegate_class() -> Id {
     /// ⌘W: the active pane, and the window with its last; asking first if
     /// something runs in it (`confirm-close-surface`).
     extern "C" fn close_split(_: Id, _: Sel, _sender: Id) {
-        let Some((window, view)) = with_app(|app| app.key_window()).flatten() else { return };
+        let Some((window, view)) = with_app(|app| app.key_window()).flatten() else {
+            return;
+        };
         match with_app(|app| app.close_question(&[view])).flatten() {
             Some(running) => confirm(window, Closing::Pane(view), "Close this pane?", &running),
             None => close_surfaces(vec![view]),
@@ -4180,12 +5384,22 @@ unsafe fn register_delegate_class() -> Id {
     /// The close button, ⌘⇧W and a tab's ×.
     extern "C" fn should_close(_: Id, _: Sel, window: Id) -> Bool {
         let question = with_app(|app| {
-            let views: Vec<Id> = app.surfaces.iter().filter(|s| s.window == window).map(|s| s.view).collect();
+            let views: Vec<Id> = app
+                .surfaces
+                .iter()
+                .filter(|s| s.window == window)
+                .map(|s| s.view)
+                .collect();
             app.close_question(&views)
         });
         match question.flatten() {
             Some(running) => {
-                confirm(window, Closing::Window(window), "Close this window?", &running);
+                confirm(
+                    window,
+                    Closing::Window(window),
+                    "Close this window?",
+                    &running,
+                );
                 NO
             }
             None => YES,
@@ -4199,12 +5413,18 @@ unsafe fn register_delegate_class() -> Id {
             let views: Vec<Id> = app.surfaces.iter().map(|s| s.view).collect();
             app.close_question(&views)
         });
-        let Some(running) = question.flatten() else { return TERMINATE_NOW };
+        let Some(running) = question.flatten() else {
+            return TERMINATE_NOW;
+        };
         // SAFETY: main thread; documented signatures.
         unsafe {
             let alert = close_alert("Quit Mightty?", &running.replace("Closing", "Quitting"));
             let response: isize = msg!(alert, c"runModal");
-            if response == ALERT_FIRST_BUTTON { TERMINATE_NOW } else { TERMINATE_CANCEL }
+            if response == ALERT_FIRST_BUTTON {
+                TERMINATE_NOW
+            } else {
+                TERMINATE_CANCEL
+            }
         }
     }
     /// ⌘[ / ⌘]: the menu item's tag is the step.
@@ -4217,7 +5437,12 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn select_split_toward(_: Id, _: Sel, sender: Id) {
         // SAFETY: `sender` is the menu item.
         let tag: isize = unsafe { msg!(sender, c"tag") };
-        let direction = [Direction::Left, Direction::Right, Direction::Up, Direction::Down][tag as usize % 4];
+        let direction = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ][tag as usize % 4];
         with_app(|app| app.select_split_toward(direction));
     }
     extern "C" fn jump_to_attention(_: Id, _: Sel, _sender: Id) {
@@ -4236,7 +5461,12 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn move_divider(_: Id, _: Sel, sender: Id) {
         // SAFETY: `sender` is the menu item.
         let tag: isize = unsafe { msg!(sender, c"tag") };
-        let direction = [Direction::Left, Direction::Right, Direction::Up, Direction::Down][tag as usize % 4];
+        let direction = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ][tag as usize % 4];
         with_app(|app| app.move_divider(direction, RESIZE_STEP));
     }
     extern "C" fn toggle_zoom(_: Id, _: Sel, _sender: Id) {
@@ -4249,64 +5479,102 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn select_tab_by_digit(_: Id, _: Sel, sender: Id) {
         // SAFETY: `sender` is the menu item.
         let digit: isize = unsafe { msg!(sender, c"tag") };
-        select_tab(if digit == 9 { None } else { Some(digit as usize - 1) });
+        select_tab(if digit == 9 {
+            None
+        } else {
+            Some(digit as usize - 1)
+        });
     }
     /// Menu items for actions without a selector: the tag says which.
     extern "C" fn menu_action(_: Id, _: Sel, sender: Id) {
         // SAFETY: `sender` is the menu item.
         let index: isize = unsafe { msg!(sender, c"tag") };
-        let Some(action) = MENU.with_borrow(|items| items.get(index as usize).map(|i| i.1.clone())) else { return };
-        let view = with_app(|app| app.key_window().map(|k| k.1)).flatten().unwrap_or(NIL);
+        let Some(action) = MENU.with_borrow(|items| items.get(index as usize).map(|i| i.1.clone()))
+        else {
+            return;
+        };
+        let view = with_app(|app| app.key_window().map(|k| k.1))
+            .flatten()
+            .unwrap_or(NIL);
         perform(view, &action);
     }
 
     let action = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
     unsafe {
-        register_class(c"MighttyDelegate", c"NSObject", &[
-            (
-                c"applicationShouldTerminateAfterLastWindowClosed:",
-                terminate_after_last_window as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
-                c"c@:@",
-            ),
-            (c"applicationWillTerminate:", action(will_terminate), c"v@:@"),
-            (c"applicationDidBecomeActive:", action(did_change_active), c"v@:@"),
-            (c"windowWillMove:", action(will_move), c"v@:@"),
-            (c"applicationDidResignActive:", action(did_change_active), c"v@:@"),
-            (c"windowDidResize:", action(did_resize), c"v@:@"),
-            (c"windowDidChangeBackingProperties:", action(did_resize), c"v@:@"),
-            (c"windowDidBecomeKey:", action(did_become_key), c"v@:@"),
-            (c"windowDidChangeOcclusionState:", action(did_change_occlusion), c"v@:@"),
-            (
-                c"userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:",
-                notification_clicked as extern "C" fn(Id, Sel, Id, Id, Id) as *const c_void,
-                c"v@:@@@?",
-            ),
-            (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
-            (c"windowWillClose:", action(will_close), c"v@:@"),
-            (c"windowShouldClose:", should_close as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void, c"c@:@"),
-            (
-                c"applicationShouldTerminate:",
-                should_terminate as extern "C" fn(Id, Sel, Id) -> usize as *const c_void,
-                c"Q@:@",
-            ),
-            (c"newWindow:", action(new_window), c"v@:@"),
-            (c"newTab:", action(new_tab), c"v@:@"),
-            (c"newWindowForTab:", action(new_tab), c"v@:@"),
-            (c"selectTabByDigit:", action(select_tab_by_digit), c"v@:@"),
-            (c"menuAction:", action(menu_action), c"v@:@"),
-            (c"splitRight:", action(split_right), c"v@:@"),
-            (c"splitDown:", action(split_down), c"v@:@"),
-            (c"closeSplit:", action(close_split), c"v@:@"),
-            (c"selectSplit:", action(select_split), c"v@:@"),
-            (c"selectSplitToward:", action(select_split_toward), c"v@:@"),
-            (c"toggleSplitZoom:", action(toggle_zoom), c"v@:@"),
-            (c"moveDivider:", action(move_divider), c"v@:@"),
-            (c"equalizeSplits:", action(equalize), c"v@:@"),
-            (c"jumpToAttention:", action(jump_to_attention), c"v@:@"),
-            (c"openConfig:", action(open_config), c"v@:@"),
-            (c"appearanceChanged:", action(appearance_changed), c"v@:@"),
-            (c"reloadConfig:", action(reload_config), c"v@:@"),
-        ])
+        register_class(
+            c"MighttyDelegate",
+            c"NSObject",
+            &[
+                (
+                    c"applicationShouldTerminateAfterLastWindowClosed:",
+                    terminate_after_last_window as extern "C" fn(Id, Sel, Id) -> Bool
+                        as *const c_void,
+                    c"c@:@",
+                ),
+                (
+                    c"applicationWillTerminate:",
+                    action(will_terminate),
+                    c"v@:@",
+                ),
+                (
+                    c"applicationDidBecomeActive:",
+                    action(did_change_active),
+                    c"v@:@",
+                ),
+                (c"windowWillMove:", action(will_move), c"v@:@"),
+                (
+                    c"applicationDidResignActive:",
+                    action(did_change_active),
+                    c"v@:@",
+                ),
+                (c"windowDidResize:", action(did_resize), c"v@:@"),
+                (
+                    c"windowDidChangeBackingProperties:",
+                    action(did_resize),
+                    c"v@:@",
+                ),
+                (c"windowDidBecomeKey:", action(did_become_key), c"v@:@"),
+                (
+                    c"windowDidChangeOcclusionState:",
+                    action(did_change_occlusion),
+                    c"v@:@",
+                ),
+                (
+                    c"userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:",
+                    notification_clicked as extern "C" fn(Id, Sel, Id, Id, Id) as *const c_void,
+                    c"v@:@@@?",
+                ),
+                (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
+                (c"windowWillClose:", action(will_close), c"v@:@"),
+                (
+                    c"windowShouldClose:",
+                    should_close as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
+                    c"c@:@",
+                ),
+                (
+                    c"applicationShouldTerminate:",
+                    should_terminate as extern "C" fn(Id, Sel, Id) -> usize as *const c_void,
+                    c"Q@:@",
+                ),
+                (c"newWindow:", action(new_window), c"v@:@"),
+                (c"newTab:", action(new_tab), c"v@:@"),
+                (c"newWindowForTab:", action(new_tab), c"v@:@"),
+                (c"selectTabByDigit:", action(select_tab_by_digit), c"v@:@"),
+                (c"menuAction:", action(menu_action), c"v@:@"),
+                (c"splitRight:", action(split_right), c"v@:@"),
+                (c"splitDown:", action(split_down), c"v@:@"),
+                (c"closeSplit:", action(close_split), c"v@:@"),
+                (c"selectSplit:", action(select_split), c"v@:@"),
+                (c"selectSplitToward:", action(select_split_toward), c"v@:@"),
+                (c"toggleSplitZoom:", action(toggle_zoom), c"v@:@"),
+                (c"moveDivider:", action(move_divider), c"v@:@"),
+                (c"equalizeSplits:", action(equalize), c"v@:@"),
+                (c"jumpToAttention:", action(jump_to_attention), c"v@:@"),
+                (c"openConfig:", action(open_config), c"v@:@"),
+                (c"appearanceChanged:", action(appearance_changed), c"v@:@"),
+                (c"reloadConfig:", action(reload_config), c"v@:@"),
+            ],
+        )
     }
 }
 
@@ -4334,17 +5602,27 @@ fn set_menu_keys(bindings: &Bindings) {
 
 /// NSEvent modifier flags for `bindings` modifier bits, and back.
 fn ns_modifiers(mods: u8) -> usize {
-    [(bindings::SHIFT, SHIFT), (bindings::CTRL, CTRL), (bindings::ALT, ALT), (bindings::CMD, CMD)]
-        .iter()
-        .filter(|(bit, _)| mods & bit != 0)
-        .fold(0, |flags, (_, flag)| flags | flag)
+    [
+        (bindings::SHIFT, SHIFT),
+        (bindings::CTRL, CTRL),
+        (bindings::ALT, ALT),
+        (bindings::CMD, CMD),
+    ]
+    .iter()
+    .filter(|(bit, _)| mods & bit != 0)
+    .fold(0, |flags, (_, flag)| flags | flag)
 }
 
 fn binding_modifiers(flags: usize) -> u8 {
-    [(bindings::SHIFT, SHIFT), (bindings::CTRL, CTRL), (bindings::ALT, ALT), (bindings::CMD, CMD)]
-        .iter()
-        .filter(|(_, flag)| flags & flag != 0)
-        .fold(0, |mods, (bit, _)| mods | bit)
+    [
+        (bindings::SHIFT, SHIFT),
+        (bindings::CTRL, CTRL),
+        (bindings::ALT, ALT),
+        (bindings::CMD, CMD),
+    ]
+    .iter()
+    .filter(|(_, flag)| flags & flag != 0)
+    .fold(0, |mods, (bit, _)| mods | bit)
 }
 
 /// The action bound to a key press, if any.
@@ -4365,7 +5643,15 @@ unsafe fn binding_for(event: Id) -> Option<Action> {
 fn perform(view: Id, action: &Action) {
     let send = |selector: &CStr, target: Id| {
         // SAFETY: main thread; documented signature.
-        let _: Bool = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"sendAction:to:from:", sel(selector), target, NIL) };
+        let _: Bool = unsafe {
+            msg!(
+                msg!(class(c"NSApplication"), c"sharedApplication"),
+                c"sendAction:to:from:",
+                sel(selector),
+                target,
+                NIL
+            )
+        };
     };
     match *action {
         Action::NewWindow => send(c"newWindow:", NIL),
@@ -4379,16 +5665,29 @@ fn perform(view: Id, action: &Action) {
         Action::Copy => send(c"copy:", view),
         Action::Paste => send(c"paste:", view),
         Action::StartSearch => send(c"performFind:", view),
-        Action::NavigateSearch(step) => send(if step > 0 { c"findNext:" } else { c"findPrevious:" }, view),
+        Action::NavigateSearch(step) => send(
+            if step > 0 {
+                c"findNext:"
+            } else {
+                c"findPrevious:"
+            },
+            view,
+        ),
         Action::GotoSplitStep(step) => drop(with_app(|app| app.select_split(step))),
         Action::GotoSplit(direction) => drop(with_app(|app| app.select_split_toward(direction))),
         Action::ToggleSplitZoom => drop(with_app(App::toggle_zoom)),
         Action::EqualizeSplits => drop(with_app(App::equalize)),
-        Action::ResizeSplit(direction, points) => drop(with_app(|app| app.move_divider(direction, points))),
+        Action::ResizeSplit(direction, points) => {
+            let _ = with_app(|app| app.move_divider(direction, points));
+        }
         Action::GotoTab(n) => select_tab(Some(n - 1)),
         Action::LastTab => select_tab(None),
-        Action::PreviousTab if with_app(|app| app.select_own_tab(None, -1)) != Some(true) => send(c"selectPreviousTab:", NIL),
-        Action::NextTab if with_app(|app| app.select_own_tab(None, 1)) != Some(true) => send(c"selectNextTab:", NIL),
+        Action::PreviousTab if with_app(|app| app.select_own_tab(None, -1)) != Some(true) => {
+            send(c"selectPreviousTab:", NIL)
+        }
+        Action::NextTab if with_app(|app| app.select_own_tab(None, 1)) != Some(true) => {
+            send(c"selectNextTab:", NIL)
+        }
         Action::PreviousTab | Action::NextTab => {}
         Action::JumpToAttention => drop(with_app(App::jump_to_attention)),
         Action::OpenConfig => drop(with_app(|app| app.open_config())),
@@ -4401,19 +5700,34 @@ fn perform(view: Id, action: &Action) {
             // As from the tab bar's menu, for the key window's tab.
             let found = with_app(|app| {
                 let (window, _) = app.key_window()?;
-                let index = app.tabs_of(window).iter().position(|&t| app.windows[t].shown)?;
+                let index = app
+                    .tabs_of(window)
+                    .iter()
+                    .position(|&t| app.windows[t].shown)?;
                 let bar = app.bars.iter().find(|b| b.0 == window)?.1.bar;
                 Some((bar, index))
             });
             if let Some((bar, index)) = found.flatten() {
-                let click = if *action == Action::MoveTabToNewWindow { tabbar::Click::NewWindow(index) } else { tabbar::Click::CloseOthers(index) };
+                let click = if *action == Action::MoveTabToNewWindow {
+                    tabbar::Click::NewWindow(index)
+                } else {
+                    tabbar::Click::CloseOthers(index)
+                };
                 on_tab_click(bar, click);
             }
         }
         Action::ReopenClosed => drop(with_app(|app| app.reopen_closed(false))),
         Action::PromptSurfaceTitle => {
             let current = |s: &mut Surface| {
-                let program = || s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned();
+                let program = || {
+                    s.pane
+                        .term
+                        .lock()
+                        .unwrap()
+                        .title()
+                        .trim_start_matches(['●', ' '])
+                        .to_owned()
+                };
                 (s.window, s.title_override.clone().unwrap_or_else(program))
             };
             if let Some((window, current)) = with_surface(view, current) {
@@ -4422,15 +5736,22 @@ fn perform(view: Id, action: &Action) {
         }
         Action::ToggleCommandPalette => drop(with_app(|app| {
             let entries = palette::entries(&app.config.keybinds);
-            app.surfaces.iter_mut().find(|s| s.view == view).map(|s| s.toggle_palette(entries))
+            app.surfaces
+                .iter_mut()
+                .find(|s| s.view == view)
+                .map(|s| s.toggle_palette(entries))
         })),
-        Action::ChangeFontSize(points) => drop(with_app(|app| app.change_font_size(view, Some(points)))),
+        Action::ChangeFontSize(points) => {
+            let _ = with_app(|app| app.change_font_size(view, Some(points)));
+        }
         Action::ResetFontSize => drop(with_app(|app| app.change_font_size(view, None))),
         Action::ClearScreen => drop(with_surface(view, Surface::clear_screen)),
         Action::ScrollToTop => drop(with_surface(view, |s| s.scroll_to(|_, history, _| history))),
         Action::ScrollToBottom => drop(with_surface(view, |s| s.scroll_to(|_, _, _| 0))),
         Action::ScrollPageUp => drop(with_surface(view, |s| s.scroll_to(|at, _, rows| at + rows))),
-        Action::ScrollPageDown => drop(with_surface(view, |s| s.scroll_to(|at, _, rows| at.saturating_sub(rows)))),
+        Action::ScrollPageDown => drop(with_surface(view, |s| {
+            s.scroll_to(|at, _, rows| at.saturating_sub(rows))
+        })),
         Action::Text(ref bytes) => drop(with_surface(view, |s| s.type_bytes(bytes))),
         Action::Ignore => {}
     }
@@ -4443,12 +5764,19 @@ fn select_tab(index: Option<usize>) {
     }
     // SAFETY: main thread; documented signatures.
     unsafe {
-        let key: Id = msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"keyWindow");
+        let key: Id = msg!(
+            msg!(class(c"NSApplication"), c"sharedApplication"),
+            c"keyWindow"
+        );
         if key.is_null() {
             return;
         }
         let tabs: Id = msg!(key, c"tabbedWindows");
-        let count: usize = if tabs.is_null() { 1 } else { msg!(tabs, c"count") };
+        let count: usize = if tabs.is_null() {
+            1
+        } else {
+            msg!(tabs, c"count")
+        };
         let index = index.unwrap_or(count - 1);
         if !tabs.is_null() && index < count {
             let window: Id = msg!(tabs, c"objectAtIndex:", index);
@@ -4499,7 +5827,11 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         unsafe {
             let item = new_object(c"NSMenuItem");
             call!(bar, c"addItem:", item);
-            let menu: Id = msg!(msg!(class(c"NSMenu"), c"alloc"), c"initWithTitle:", nsstring(title));
+            let menu: Id = msg!(
+                msg!(class(c"NSMenu"), c"alloc"),
+                c"initWithTitle:",
+                nsstring(title)
+            );
             call!(item, c"setSubmenu:", menu);
             menu
         }
@@ -4509,8 +5841,18 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         let bar = new_object(c"NSMenu");
         let app_menu = submenu(bar, "Mightty");
         add_action(app_menu, "Settings…", Action::OpenSettings);
-        add_item(app_menu, "Open Config File", c"openConfig:", Action::OpenConfig);
-        add_item(app_menu, "Reload Configuration", c"reloadConfig:", Action::ReloadConfig);
+        add_item(
+            app_menu,
+            "Open Config File",
+            c"openConfig:",
+            Action::OpenConfig,
+        );
+        add_item(
+            app_menu,
+            "Reload Configuration",
+            c"reloadConfig:",
+            Action::ReloadConfig,
+        );
         separator(app_menu);
         add_action(app_menu, "Secure Keyboard Entry", Action::ToggleSecureInput);
         separator(app_menu);
@@ -4518,12 +5860,27 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         let shell_menu = submenu(bar, "Shell");
         add_item(shell_menu, "New Window", c"newWindow:", Action::NewWindow);
         add_item(shell_menu, "New Tab", c"newTab:", Action::NewTab);
-        add_item(shell_menu, "Split Right", c"splitRight:", Action::NewSplit(Direction::Right));
-        add_item(shell_menu, "Split Down", c"splitDown:", Action::NewSplit(Direction::Down));
+        add_item(
+            shell_menu,
+            "Split Right",
+            c"splitRight:",
+            Action::NewSplit(Direction::Right),
+        );
+        add_item(
+            shell_menu,
+            "Split Down",
+            c"splitDown:",
+            Action::NewSplit(Direction::Down),
+        );
         separator(shell_menu);
         add_action(shell_menu, "Change Title…", Action::PromptSurfaceTitle);
         add_item(shell_menu, "Close", c"closeSplit:", Action::CloseSurface);
-        add_item(shell_menu, "Close Window", c"performClose:", Action::CloseWindow);
+        add_item(
+            shell_menu,
+            "Close Window",
+            c"performClose:",
+            Action::CloseWindow,
+        );
         add_action(shell_menu, "Reopen Closed", Action::ReopenClosed);
         let edit_menu = submenu(bar, "Edit");
         add_action(edit_menu, "Undo Close", Action::Undo);
@@ -4533,46 +5890,110 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         add_action(edit_menu, "Clear Screen", Action::ClearScreen);
         separator(edit_menu);
         add_item(edit_menu, "Find…", c"performFind:", Action::StartSearch);
-        add_item(edit_menu, "Find Next", c"findNext:", Action::NavigateSearch(1));
-        add_item(edit_menu, "Find Previous", c"findPrevious:", Action::NavigateSearch(-1));
+        add_item(
+            edit_menu,
+            "Find Next",
+            c"findNext:",
+            Action::NavigateSearch(1),
+        );
+        add_item(
+            edit_menu,
+            "Find Previous",
+            c"findPrevious:",
+            Action::NavigateSearch(-1),
+        );
         let view_menu = submenu(bar, "View");
         add_action(view_menu, "Command Palette", Action::ToggleCommandPalette);
         separator(view_menu);
         add_action(view_menu, "Increase Font Size", Action::ChangeFontSize(1.0));
-        add_action(view_menu, "Decrease Font Size", Action::ChangeFontSize(-1.0));
+        add_action(
+            view_menu,
+            "Decrease Font Size",
+            Action::ChangeFontSize(-1.0),
+        );
         add_action(view_menu, "Reset Font Size", Action::ResetFontSize);
         // AppKit adds the tab items (Show Tab Bar, Move Tab to New Window, …) here.
         let window_menu = submenu(bar, "Window");
-        add_item(window_menu, "Minimize", c"performMiniaturize:", Action::MinimizeWindow);
+        add_item(
+            window_menu,
+            "Minimize",
+            c"performMiniaturize:",
+            Action::MinimizeWindow,
+        );
         separator(window_menu);
-        add_item(window_menu, "Jump to Pane Needing You", c"jumpToAttention:", Action::JumpToAttention);
+        add_item(
+            window_menu,
+            "Jump to Pane Needing You",
+            c"jumpToAttention:",
+            Action::JumpToAttention,
+        );
         add_action(window_menu, "Quick Terminal", Action::ToggleQuickTerminal);
         separator(window_menu);
-        add_item(window_menu, "Zoom Split", c"toggleSplitZoom:", Action::ToggleSplitZoom);
-        add_item(window_menu, "Equalize Splits", c"equalizeSplits:", Action::EqualizeSplits);
+        add_item(
+            window_menu,
+            "Zoom Split",
+            c"toggleSplitZoom:",
+            Action::ToggleSplitZoom,
+        );
+        add_item(
+            window_menu,
+            "Equalize Splits",
+            c"equalizeSplits:",
+            Action::EqualizeSplits,
+        );
         for (title, step) in [("Select Previous Split", -1isize), ("Select Next Split", 1)] {
-            let item = add_item(window_menu, title, c"selectSplit:", Action::GotoSplitStep(step));
+            let item = add_item(
+                window_menu,
+                title,
+                c"selectSplit:",
+                Action::GotoSplitStep(step),
+            );
             call!(item, c"setTag:", step);
         }
         // In `Direction` order, which the tags are.
-        let directions = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+        let directions = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ];
         for (tag, title) in ["Left", "Right", "Above", "Below"].into_iter().enumerate() {
-            let item = add_item(window_menu, &format!("Select Split {title}"), c"selectSplitToward:", Action::GotoSplit(directions[tag]));
+            let item = add_item(
+                window_menu,
+                &format!("Select Split {title}"),
+                c"selectSplitToward:",
+                Action::GotoSplit(directions[tag]),
+            );
             call!(item, c"setTag:", tag as isize);
         }
         for (tag, title) in ["Left", "Right", "Up", "Down"].into_iter().enumerate() {
             let action = Action::ResizeSplit(directions[tag], RESIZE_STEP);
-            let item = add_item(window_menu, &format!("Move Divider {title}"), c"moveDivider:", action);
+            let item = add_item(
+                window_menu,
+                &format!("Move Divider {title}"),
+                c"moveDivider:",
+                action,
+            );
             call!(item, c"setTag:", tag as isize);
         }
         separator(window_menu);
         add_action(window_menu, "Show Previous Tab", Action::PreviousTab);
         add_action(window_menu, "Show Next Tab", Action::NextTab);
-        add_action(window_menu, "Move Tab to New Window", Action::MoveTabToNewWindow);
+        add_action(
+            window_menu,
+            "Move Tab to New Window",
+            Action::MoveTabToNewWindow,
+        );
         add_action(window_menu, "Close Other Tabs", Action::CloseOtherTabs);
         for digit in 1..=9isize {
-            let (title, action) =
-                if digit == 9 { ("Select Last Tab".to_owned(), Action::LastTab) } else { (format!("Select Tab {digit}"), Action::GotoTab(digit as usize)) };
+            let (title, action) = if digit == 9 {
+                ("Select Last Tab".to_owned(), Action::LastTab)
+            } else {
+                (
+                    format!("Select Tab {digit}"),
+                    Action::GotoTab(digit as usize),
+                )
+            };
             let item = add_item(window_menu, &title, c"selectTabByDigit:", action);
             call!(item, c"setTag:", digit);
         }

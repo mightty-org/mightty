@@ -51,7 +51,6 @@ impl Backend {
             Err(_) => Backend::Local(Mux::new(Arc::new(Headless))),
         }
     }
-
 }
 
 struct Server {
@@ -70,13 +69,26 @@ struct Server {
 
 /// Serves MCP over newline-delimited JSON-RPC until `input` closes, letting
 /// the agent use `panes`.
-pub fn serve(backend: Backend, panes: Panes, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+pub fn serve(
+    backend: Backend,
+    panes: Panes,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> io::Result<()> {
     let own_pane = match &backend {
-        Backend::Remote(_) => std::env::var("MIGHTTY_PANE_ID").ok().and_then(|id| id.parse().ok()),
+        Backend::Remote(_) => std::env::var("MIGHTTY_PANE_ID")
+            .ok()
+            .and_then(|id| id.parse().ok()),
         Backend::Local(_) => None,
     };
     let allowed = (panes == Panes::Own).then(|| own_pane.into_iter().collect());
-    let mut server = Server { backend, default_pane: None, own_pane, last_split: None, allowed };
+    let mut server = Server {
+        backend,
+        default_pane: None,
+        own_pane,
+        last_split: None,
+        allowed,
+    };
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -101,7 +113,8 @@ impl Server {
         };
         match client.call(method, params.clone()) {
             Err(CallError::Disconnected(_)) => {
-                let fresh = Client::discover().map_err(|_| "mightty was closed; reopen it to use its panes".to_owned())?;
+                let fresh = Client::discover()
+                    .map_err(|_| "mightty was closed; reopen it to use its panes".to_owned())?;
                 *client = fresh;
                 // Pane ids were for the old instance.
                 (self.default_pane, self.own_pane, self.last_split) = (None, None, None);
@@ -109,7 +122,9 @@ impl Server {
                     allowed.clear();
                 }
                 if !params["pane"].is_null() {
-                    return Err("mightty was restarted and pane ids changed; call list_panes".into());
+                    return Err(
+                        "mightty was restarted and pane ids changed; call list_panes".into(),
+                    );
                 }
                 client.call(method, params).map_err(String::from)
             }
@@ -129,27 +144,50 @@ impl Server {
         let result = match method {
             "initialize" => {
                 let requested = params["protocolVersion"].as_str().unwrap_or_default();
-                let version = PROTOCOL_VERSIONS.iter().find(|v| **v == requested).unwrap_or(&PROTOCOL_VERSIONS[0]);
+                let version = PROTOCOL_VERSIONS
+                    .iter()
+                    .find(|v| **v == requested)
+                    .unwrap_or(&PROTOCOL_VERSIONS[0]);
                 Value::object([
                     ("protocolVersion", (*version).into()),
-                    ("capabilities", Value::object([("tools", Value::object([("listChanged", false.into())]))])),
+                    (
+                        "capabilities",
+                        Value::object([("tools", Value::object([("listChanged", false.into())]))]),
+                    ),
                     (
                         "serverInfo",
-                        Value::object([("name", "mightty".into()), ("version", env!("CARGO_PKG_VERSION").into())]),
+                        Value::object([
+                            ("name", "mightty".into()),
+                            ("version", env!("CARGO_PKG_VERSION").into()),
+                        ]),
                     ),
                     ("instructions", INSTRUCTIONS.into()),
                 ])
             }
             "ping" => Value::object::<&str>([]),
             "tools/list" => Value::object([("tools", tools())]),
-            "tools/call" => self.call_tool(params["name"].as_str().unwrap_or_default(), &params["arguments"]),
+            "tools/call" => self.call_tool(
+                params["name"].as_str().unwrap_or_default(),
+                &params["arguments"],
+            ),
             _ => return Some(error(id, -32601, &format!("unknown method `{method}`"))),
         };
-        Some(Value::object([("jsonrpc", "2.0".into()), ("id", id), ("result", result)]))
+        Some(Value::object([
+            ("jsonrpc", "2.0".into()),
+            ("id", id),
+            ("result", result),
+        ]))
     }
 
     fn call_tool(&mut self, name: &str, args: &Value) -> Value {
-        let args = declared(name, if args.is_null() { Value::object::<&str>([]) } else { args.clone() });
+        let args = declared(
+            name,
+            if args.is_null() {
+                Value::object::<&str>([])
+            } else {
+                args.clone()
+            },
+        );
         let outcome = match args["pane"].as_u64() {
             Some(pane) if !self.may_use(pane) => Err(format!(
                 "pane {pane} isn't this agent's: it can use its own pane and those it opens \
@@ -162,11 +200,16 @@ impl Server {
             Err(message) => (message, true),
         };
         let content = Value::object([("type", "text".into()), ("text", text.into())]);
-        Value::object([("content", vec![content].into()), ("isError", is_error.into())])
+        Value::object([
+            ("content", vec![content].into()),
+            ("isError", is_error.into()),
+        ])
     }
 
     fn may_use(&self, pane: u64) -> bool {
-        self.allowed.as_ref().is_none_or(|allowed| allowed.contains(&pane))
+        self.allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&pane))
     }
 
     fn allow(&mut self, pane: Option<u64>) {
@@ -180,7 +223,11 @@ impl Server {
     fn run_tool(&mut self, name: &str, args: Value) -> Result<String, String> {
         match name {
             "list_panes" => self.call("pane.list", args).map(|v| {
-                let panes = v.as_array().unwrap_or_default().iter().filter(|p| p["id"].as_u64().is_some_and(|id| self.may_use(id)));
+                let panes = v
+                    .as_array()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|p| p["id"].as_u64().is_some_and(|id| self.may_use(id)));
                 Value::Array(panes.cloned().collect()).to_string()
             }),
             "open_pane" => self.open_pane(args),
@@ -191,10 +238,19 @@ impl Server {
             "send_keys" => self.call("pane.send_keys", args).map(|_| "sent".into()),
             "read_pane" => self.call("pane.read", args).map(|v| {
                 let text = v["text"].as_str().unwrap_or_default();
-                if v["truncated"].as_bool() == Some(true) { format!("(earlier lines omitted)\n{text}") } else { text.into() }
+                if v["truncated"].as_bool() == Some(true) {
+                    format!("(earlier lines omitted)\n{text}")
+                } else {
+                    text.into()
+                }
             }),
             "list_commands" => self.call("pane.commands", args).map(|v| {
-                v.as_array().unwrap_or_default().iter().map(format_block).collect::<Vec<_>>().join("\n\n")
+                v.as_array()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(format_block)
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
             }),
             "wait_for" => self.call("pane.wait", args).map(|v| v.to_string()),
             "close_pane" => self.call("pane.close", args).map(|_| "closed".into()),
@@ -208,7 +264,11 @@ impl Server {
     fn open_pane(&mut self, mut args: Value) -> Result<String, String> {
         let default = args["placement"].is_null() && args["visible"].as_bool() != Some(false);
         if default {
-            let shown: Vec<u64> = self.call("pane.list", Value::Null)?.as_array().unwrap_or_default().iter()
+            let shown: Vec<u64> = self
+                .call("pane.list", Value::Null)?
+                .as_array()
+                .unwrap_or_default()
+                .iter()
                 .filter(|p| p["window"].as_u64().is_some())
                 .filter_map(|p| p["id"].as_u64())
                 .collect();
@@ -236,19 +296,25 @@ impl Server {
     /// Flags a pane (by default the agent's own) as needing the user.
     fn notify_user(&mut self, mut args: Value) -> Result<String, String> {
         if args["pane"].is_null() {
-            let own = self.own_pane.ok_or("no pane given, and this agent isn't running in mightty")?;
+            let own = self
+                .own_pane
+                .ok_or("no pane given, and this agent isn't running in mightty")?;
             args.insert("pane", own);
         }
-        self.call("pane.notify", args).map(|_| "the user will see it".into())
+        self.call("pane.notify", args)
+            .map(|_| "the user will see it".into())
     }
 
     fn run_command(&mut self, mut args: Value) -> Result<String, String> {
         if args["pane"].is_null()
             && let Some(id) = self.default_pane
         {
-            let alive = self.call("pane.list", Value::Null)?.as_array().unwrap_or_default().iter().any(|p| {
-                p["id"].as_u64() == Some(id) && p["alive"].as_bool() == Some(true)
-            });
+            let alive = self
+                .call("pane.list", Value::Null)?
+                .as_array()
+                .unwrap_or_default()
+                .iter()
+                .any(|p| p["id"].as_u64() == Some(id) && p["alive"].as_bool() == Some(true));
             // A reconnect during the listing clears the default: in a new
             // instance, the same id is another pane.
             if alive && self.default_pane == Some(id) && self.may_use(id) {
@@ -277,11 +343,18 @@ impl Server {
 /// reach the control socket unchecked (`pane.spawn`'s `env` and `shell`).
 fn declared(name: &str, args: Value) -> Value {
     let tools = tools();
-    let tool = tools.as_array().unwrap_or_default().iter().find(|t| t["name"].as_str() == Some(name));
+    let tool = tools
+        .as_array()
+        .unwrap_or_default()
+        .iter()
+        .find(|t| t["name"].as_str() == Some(name));
     match (args, tool.map(|t| &t["inputSchema"]["properties"])) {
-        (Value::Object(fields), Some(Value::Object(known))) => {
-            Value::Object(fields.into_iter().filter(|(key, _)| known.iter().any(|(k, _)| k == key)).collect())
-        }
+        (Value::Object(fields), Some(Value::Object(known))) => Value::Object(
+            fields
+                .into_iter()
+                .filter(|(key, _)| known.iter().any(|(k, _)| k == key))
+                .collect(),
+        ),
         (args, _) => args,
     }
 }
@@ -311,7 +384,12 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 
 /// Tool definitions: name, description, read-only, JSON schema.
 fn tools() -> Value {
-    let pane = || ("pane", prop("integer", "Pane id, from list_panes or open_pane."));
+    let pane = || {
+        (
+            "pane",
+            prop("integer", "Pane id, from list_panes or open_pane."),
+        )
+    };
     let defs: Vec<(&str, &str, bool, Value)> = vec![
         ("list_panes", "List terminal panes with their id, command, title, working directory, whether they are still running, their status (idle, running, or for AI agents working / waiting), whether they need the user and why, and where they are shown: window, tab and whether the user is focused on it.", true, schema(vec![], &[])),
         (
@@ -404,7 +482,10 @@ fn tools() -> Value {
                     ("name", name.into()),
                     ("description", description.into()),
                     ("inputSchema", input_schema),
-                    ("annotations", Value::object([("readOnlyHint", read_only.into())])),
+                    (
+                        "annotations",
+                        Value::object([("readOnlyHint", read_only.into())]),
+                    ),
                 ])
             })
             .collect(),
@@ -419,7 +500,10 @@ fn schema(properties: Vec<(&str, Value)>, required: &[&str]) -> Value {
     Value::object([
         ("type", "object".into()),
         ("properties", Value::object(properties)),
-        ("required", Value::Array(required.iter().map(|r| (*r).into()).collect())),
+        (
+            "required",
+            Value::Array(required.iter().map(|r| (*r).into()).collect()),
+        ),
     ])
 }
 
@@ -430,8 +514,18 @@ mod tests {
     fn session(lines: &[&str]) -> Vec<Value> {
         let input = lines.join("\n");
         let mut output = Vec::new();
-        serve(Backend::Local(Mux::new(Arc::new(Headless))), Panes::All, input.as_bytes(), &mut output).unwrap();
-        String::from_utf8(output).unwrap().lines().map(|l| json::parse(l).unwrap()).collect()
+        serve(
+            Backend::Local(Mux::new(Arc::new(Headless))),
+            Panes::All,
+            input.as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|l| json::parse(l).unwrap())
+            .collect()
     }
 
     #[test]
@@ -443,10 +537,21 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"bogus"}"#,
         ]);
         assert_eq!(replies.len(), 3, "notifications get no reply");
-        assert_eq!(replies[0]["result"]["protocolVersion"].as_str(), Some("2025-06-18"));
+        assert_eq!(
+            replies[0]["result"]["protocolVersion"].as_str(),
+            Some("2025-06-18")
+        );
         let tools = replies[1]["result"]["tools"].as_array().unwrap();
-        assert!(tools.iter().any(|t| t["name"].as_str() == Some("run_command")));
-        assert!(tools.iter().all(|t| t["inputSchema"]["type"].as_str() == Some("object")));
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["name"].as_str() == Some("run_command"))
+        );
+        assert!(
+            tools
+                .iter()
+                .all(|t| t["inputSchema"]["type"].as_str() == Some("object"))
+        );
         assert_eq!(replies[2]["error"]["code"].as_i64(), Some(-32601));
     }
 
@@ -459,7 +564,12 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"close_pane","arguments":{"pane":1}}}"#,
             r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_pane","arguments":{"pane":1}}}"#,
         ]);
-        let text = |i: usize| replies[i]["result"]["content"].as_array().unwrap()[0]["text"].as_str().unwrap().to_owned();
+        let text = |i: usize| {
+            replies[i]["result"]["content"].as_array().unwrap()[0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
         assert!(text(1).contains(r#""matched":"text""#));
         assert_eq!(text(2), "from-mcp");
         assert_eq!(replies[3]["result"]["isError"].as_bool(), Some(false));
@@ -472,7 +582,14 @@ mod tests {
     #[test]
     fn agents_keep_to_their_own_panes() {
         let mux = Mux::new(Arc::new(Headless));
-        let theirs = handle(&mux, "pane.spawn", &Value::object([("command", "sleep 5".into())])).unwrap()["id"].as_u64().unwrap();
+        let theirs = handle(
+            &mux,
+            "pane.spawn",
+            &Value::object([("command", "sleep 5".into())]),
+        )
+        .unwrap()["id"]
+            .as_u64()
+            .unwrap();
         let input = [
             format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"read_pane","arguments":{{"pane":{theirs}}}}}}}"#),
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"open_pane","arguments":{"command":"echo x${SECRET}x; sleep 5","visible":false,"env":{"SECRET":"leaked"}}}}"#.into(),
@@ -480,17 +597,45 @@ mod tests {
         ]
         .join("\n");
         let mut output = Vec::new();
-        serve(Backend::Local(mux.clone()), Panes::Own, input.as_bytes(), &mut output).unwrap();
-        let replies: Vec<Value> = String::from_utf8(output).unwrap().lines().map(|l| json::parse(l).unwrap()).collect();
-        let text = |i: usize| replies[i]["result"]["content"].as_array().unwrap()[0]["text"].as_str().unwrap().to_owned();
+        serve(
+            Backend::Local(mux.clone()),
+            Panes::Own,
+            input.as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|l| json::parse(l).unwrap())
+            .collect();
+        let text = |i: usize| {
+            replies[i]["result"]["content"].as_array().unwrap()[0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
         assert_eq!(replies[0]["result"]["isError"].as_bool(), Some(true));
         assert!(text(0).contains("isn't this agent's"), "{}", text(0));
         let opened = json::parse(&text(1)).unwrap()["id"].as_u64().unwrap();
         let listed = json::parse(&text(2)).unwrap();
-        let ids: Vec<u64> = listed.as_array().unwrap().iter().filter_map(|p| p["id"].as_u64()).collect();
+        let ids: Vec<u64> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["id"].as_u64())
+            .collect();
         assert_eq!(ids, [opened]);
         // `env` isn't an open_pane argument, so it never reached the shell.
-        let found = handle(&mux, "pane.wait", &Value::object([("pane", opened.into()), ("text", "xx".into()), ("timeout_ms", 5000.into())]));
+        let found = handle(
+            &mux,
+            "pane.wait",
+            &Value::object([
+                ("pane", opened.into()),
+                ("text", "xx".into()),
+                ("timeout_ms", 5000.into()),
+            ]),
+        );
         assert_eq!(found.unwrap()["matched"].as_str(), Some("text"));
     }
 }

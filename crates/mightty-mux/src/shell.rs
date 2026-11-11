@@ -5,8 +5,8 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -16,9 +16,15 @@ use crate::socket::private_dir;
 const FILES: &[(&str, &str)] = &[
     ("zsh/.zshenv", include_str!("../shell/zsh/.zshenv")),
     ("mightty.zsh", include_str!("../shell/mightty.zsh")),
-    ("bash/bootstrap.bash", include_str!("../shell/bash/bootstrap.bash")),
+    (
+        "bash/bootstrap.bash",
+        include_str!("../shell/bash/bootstrap.bash"),
+    ),
     ("mightty.bash", include_str!("../shell/mightty.bash")),
-    ("fish/vendor_conf.d/mightty.fish", include_str!("../shell/fish/vendor_conf.d/mightty.fish")),
+    (
+        "fish/vendor_conf.d/mightty.fish",
+        include_str!("../shell/fish/vendor_conf.d/mightty.fish"),
+    ),
 ];
 
 /// Hooks integration into `cmd` if `shell` is one we support (zsh, bash,
@@ -54,23 +60,34 @@ pub fn integrate(cmd: &mut Command, shell: &str, interactive: bool) -> Option<St
         }
         "bash" => {
             // No leading dash: a login shell would skip the rcfile.
-            cmd.arg0("bash").arg("--rcfile").arg(dir.join("bash/bootstrap.bash")).env("MIGHTTY_BASH_LOGIN", "1");
+            cmd.arg0("bash")
+                .arg("--rcfile")
+                .arg(dir.join("bash/bootstrap.bash"))
+                .env("MIGHTTY_BASH_LOGIN", "1");
         }
         _ => {
             // The XDG default when unset.
-            let rest = env::var("XDG_DATA_DIRS").ok().filter(|d| !d.is_empty()).unwrap_or("/usr/local/share:/usr/share".into());
+            let rest = env::var("XDG_DATA_DIRS")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .unwrap_or("/usr/local/share:/usr/share".into());
             // fish looks in `<entry>/fish/vendor_conf.d`.
-            cmd.env("XDG_DATA_DIRS", format!("{}:{rest}", dir.display())).env("MIGHTTY_FISH_XDG_DATA_DIR", dir);
+            cmd.env("XDG_DATA_DIRS", format!("{}:{rest}", dir.display()))
+                .env("MIGHTTY_FISH_XDG_DATA_DIR", dir);
         }
     }
-    cmd.env("MIGHTTY_SHELL_INTEGRATION_DIR", dir).env("MIGHTTY_NONCE", &nonce);
+    cmd.env("MIGHTTY_SHELL_INTEGRATION_DIR", dir)
+        .env("MIGHTTY_NONCE", &nonce);
     Some(nonce)
 }
 
 /// 128 random bits as hex.
 pub(crate) fn nonce() -> Option<String> {
     let mut bytes = [0u8; 16];
-    File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
+    File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 

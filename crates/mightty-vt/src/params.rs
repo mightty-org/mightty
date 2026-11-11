@@ -82,7 +82,11 @@ impl Params {
     }
 
     fn end_group(&mut self) {
-        let start = if self.groups == 0 { 0 } else { self.ends[self.groups - 1] as usize };
+        let start = if self.groups == 0 {
+            0
+        } else {
+            self.ends[self.groups - 1] as usize
+        };
         if self.groups < MAX_PARAMS && self.n_values > start {
             self.ends[self.groups] = self.n_values as u8;
             self.groups += 1;

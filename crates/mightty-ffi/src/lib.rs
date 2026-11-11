@@ -141,7 +141,11 @@ pub extern "C" fn mightty_version() -> *const c_char {
 const MAX_SIDE: u32 = 10_000;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mightty_term_new(cols: u32, rows: u32, scrollback_lines: u32) -> *mut mightty_term {
+pub extern "C" fn mightty_term_new(
+    cols: u32,
+    rows: u32,
+    scrollback_lines: u32,
+) -> *mut mightty_term {
     if cols > MAX_SIDE || rows > MAX_SIDE {
         return ptr::null_mut();
     }
@@ -165,10 +169,16 @@ pub unsafe extern "C" fn mightty_term_free(term: *mut mightty_term) {
 /// # Safety
 /// `term` must be a live handle; `bytes` must be valid for `len` reads.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mightty_term_feed(term: *mut mightty_term, bytes: *const u8, len: usize) -> mightty_result {
+pub unsafe extern "C" fn mightty_term_feed(
+    term: *mut mightty_term,
+    bytes: *const u8,
+    len: usize,
+) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_mut(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_mut(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         if len == 0 {
             return MIGHTTY_OK;
         }
@@ -184,10 +194,16 @@ pub unsafe extern "C" fn mightty_term_feed(term: *mut mightty_term, bytes: *cons
 /// # Safety
 /// `term` must be a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mightty_term_resize(term: *mut mightty_term, cols: u32, rows: u32) -> mightty_result {
+pub unsafe extern "C" fn mightty_term_resize(
+    term: *mut mightty_term,
+    cols: u32,
+    rows: u32,
+) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_mut(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_mut(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         if cols > MAX_SIDE || rows > MAX_SIDE {
             return MIGHTTY_ERR_INVALID;
         }
@@ -207,7 +223,9 @@ pub unsafe extern "C" fn mightty_term_take_responses(
 ) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_mut(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_mut(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         // SAFETY: caller contract.
         let result = unsafe { copy_out(term.pending_responses(), out, cap, len) };
         if result == MIGHTTY_OK {
@@ -220,10 +238,15 @@ pub unsafe extern "C" fn mightty_term_take_responses(
 /// # Safety
 /// `term` must be a live handle; `rang` must be valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mightty_term_take_bell(term: *mut mightty_term, rang: *mut u8) -> mightty_result {
+pub unsafe extern "C" fn mightty_term_take_bell(
+    term: *mut mightty_term,
+    rang: *mut u8,
+) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_mut(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_mut(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         if rang.is_null() {
             return MIGHTTY_ERR_NULL;
         }
@@ -236,10 +259,15 @@ pub unsafe extern "C" fn mightty_term_take_bell(term: *mut mightty_term, rang: *
 /// # Safety
 /// `term` must be a live handle; `out` must point to at least `out->size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mightty_term_get_state(term: *const mightty_term, out: *mut mightty_state) -> mightty_result {
+pub unsafe extern "C" fn mightty_term_get_state(
+    term: *const mightty_term,
+    out: *mut mightty_state,
+) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_ref(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_ref(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         if out.is_null() {
             return MIGHTTY_ERR_NULL;
         }
@@ -279,7 +307,13 @@ pub unsafe extern "C" fn mightty_term_get_state(term: *const mightty_term, out: 
         // Older callers get the prefix they know about.
         let n = size.min(mem::size_of::<mightty_state>());
         // SAFETY: the caller promised `size` writable bytes.
-        unsafe { ptr::copy_nonoverlapping((&state as *const mightty_state).cast::<u8>(), out.cast::<u8>(), n) };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                (&state as *const mightty_state).cast::<u8>(),
+                out.cast::<u8>(),
+                n,
+            )
+        };
         MIGHTTY_OK
     })
 }
@@ -298,8 +332,12 @@ pub unsafe extern "C" fn mightty_term_read_line(
 ) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_ref(term) }) else { return MIGHTTY_ERR_NULL };
-        let Some(row) = term.line(line) else { return MIGHTTY_ERR_INVALID };
+        let Some(term) = (unsafe { term_ref(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
+        let Some(row) = term.line(line) else {
+            return MIGHTTY_ERR_INVALID;
+        };
         // Rows are stored lazily short; report at least the screen width.
         let width = row.cells.len().max(term.cols());
         let cells: Vec<mightty_cell> = (0..width)
@@ -307,7 +345,14 @@ pub unsafe extern "C" fn mightty_term_read_line(
             .map(|cell| {
                 let (fg_kind, fg) = color(cell.fg);
                 let (bg_kind, bg) = color(cell.bg);
-                mightty_cell { codepoint: cell.c.into(), fg, bg, flags: cell.flags.bits(), fg_kind, bg_kind }
+                mightty_cell {
+                    codepoint: cell.c.into(),
+                    fg,
+                    bg,
+                    flags: cell.flags.bits(),
+                    fg_kind,
+                    bg_kind,
+                }
             })
             .collect();
         if !wrapped.is_null() {
@@ -335,8 +380,13 @@ pub unsafe extern "C" fn mightty_term_text_range(
 ) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_ref(term) }) else { return MIGHTTY_ERR_NULL };
-        let text = term.text_range((start_line, start_col as usize), (end_line, end_col as usize));
+        let Some(term) = (unsafe { term_ref(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
+        let text = term.text_range(
+            (start_line, start_col as usize),
+            (end_line, end_col as usize),
+        );
         // SAFETY: caller contract.
         unsafe { copy_out(text.as_bytes(), out.cast(), cap, len) }
     })
@@ -355,7 +405,9 @@ unsafe fn string_getter(
 ) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_ref(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_ref(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         let text = get(term);
         // SAFETY: caller contract.
         unsafe { copy_out(text.as_bytes(), out.cast(), cap, len) }
@@ -398,7 +450,15 @@ pub unsafe extern "C" fn mightty_term_cwd(
     len: *mut usize,
 ) -> mightty_result {
     // SAFETY: forwarded caller contract.
-    unsafe { string_getter(term, |t| t.cwd().unwrap_or_default().to_owned(), out, cap, len) }
+    unsafe {
+        string_getter(
+            term,
+            |t| t.cwd().unwrap_or_default().to_owned(),
+            out,
+            cap,
+            len,
+        )
+    }
 }
 
 /// # Safety
@@ -412,7 +472,9 @@ pub unsafe extern "C" fn mightty_term_marks(
 ) -> mightty_result {
     guard(|| {
         // SAFETY: caller contract.
-        let Some(term) = (unsafe { term_ref(term) }) else { return MIGHTTY_ERR_NULL };
+        let Some(term) = (unsafe { term_ref(term) }) else {
+            return MIGHTTY_ERR_NULL;
+        };
         let marks: Vec<mightty_mark> = term
             .marks()
             .iter()

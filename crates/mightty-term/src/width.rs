@@ -5,7 +5,13 @@ use std::cmp::Ordering;
 /// Both tables are complete for Unicode 17.
 pub fn char_width(c: char) -> usize {
     match width_class(c) {
-        JOINS => if (0x1F1E6..=0x1F1FF).contains(&(c as u32)) { 1 } else { 2 },
+        JOINS => {
+            if (0x1F1E6..=0x1F1FF).contains(&(c as u32)) {
+                1
+            } else {
+                2
+            }
+        }
         width => width,
     }
 }
@@ -85,6 +91,7 @@ fn in_table(cp: u32, table: &[(u32, u32)]) -> bool {
 /// Every nonspacing and enclosing mark (general categories Mn and Me in
 /// Unicode 17's UnicodeData.txt), invisible format characters, Hangul
 /// medial and final jamo, variation selectors and tags.
+#[rustfmt::skip]
 const ZERO_WIDTH: &[(u32, u32)] = &[
     (0x0300, 0x036F), (0x0483, 0x0489), (0x0591, 0x05BD), (0x05BF, 0x05BF),
     (0x05C1, 0x05C2), (0x05C4, 0x05C5), (0x05C7, 0x05C7), (0x0610, 0x061A),
@@ -183,6 +190,7 @@ const ZERO_WIDTH: &[(u32, u32)] = &[
 /// East Asian Width W and F in Unicode 17's EastAsianWidth.txt, plus the
 /// unassigned code points it says default to W (CJK ideograph blocks,
 /// planes 2 and 3). Ambiguous (A) characters are narrow.
+#[rustfmt::skip]
 const WIDE: &[(u32, u32)] = &[
     (0x1100, 0x115F), (0x231A, 0x231B), (0x2329, 0x232A), (0x23E9, 0x23EC),
     (0x23F0, 0x23F0), (0x23F3, 0x23F3), (0x25FD, 0x25FE), (0x2614, 0x2615),
@@ -220,6 +228,7 @@ const WIDE: &[(u32, u32)] = &[
 /// Narrow characters with an emoji style: followed by VS16 (U+FE0F),
 /// they become two cells wide. From Unicode 17's
 /// emoji-variation-sequences.txt, less those [`WIDE`] already covers.
+#[rustfmt::skip]
 const EMOJI_STYLE: &[(u32, u32)] = &[
     (0x0023, 0x0023), (0x002A, 0x002A), (0x0030, 0x0039), (0x00A9, 0x00A9),
     (0x00AE, 0x00AE), (0x203C, 0x203C), (0x2049, 0x2049), (0x2122, 0x2122),
@@ -266,7 +275,9 @@ mod tests {
     #[test]
     fn table_matches_ranges() {
         for cp in 0..TABLE_END {
-            let Some(c) = char::from_u32(cp) else { continue };
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
             let expected = if in_table(cp, ZERO_WIDTH) {
                 0
             } else if in_table(cp, WIDE) {
@@ -291,7 +302,13 @@ mod tests {
         }
         // Wide ones once missed: Tai Xuan Jing, Yijing, Khitan, Unicode 17's
         // landslide emoji; ambiguous and unassigned ones stay narrow.
-        for c in ['\u{1D300}', '\u{4DC0}', '\u{18D00}', '\u{1F6D8}', '\u{3000}'] {
+        for c in [
+            '\u{1D300}',
+            '\u{4DC0}',
+            '\u{18D00}',
+            '\u{1F6D8}',
+            '\u{3000}',
+        ] {
             assert_eq!(char_width(c), 2, "U+{:04X}", c as u32);
         }
         for c in ['\u{3248}', '\u{1FAFF}', '\u{2026}'] {

@@ -27,8 +27,15 @@ const OPEN_SCHEMES: &[&str] = &["http", "https", "mailto", "ftp", "sftp"];
 /// `file://host/path` links (`ls --hyperlink` writes those); `resolve` gives
 /// a path's real location (`None` if it doesn't exist), and `safe` whether
 /// opening that is known not to run anything.
-pub fn decide(uri: &str, host: &str, resolve: impl Fn(&Path) -> Option<PathBuf>, safe: impl Fn(&Path) -> bool) -> Action {
-    let Some((scheme, rest)) = uri.split_once(':') else { return Action::Refuse };
+pub fn decide(
+    uri: &str,
+    host: &str,
+    resolve: impl Fn(&Path) -> Option<PathBuf>,
+    safe: impl Fn(&Path) -> bool,
+) -> Action {
+    let Some((scheme, rest)) = uri.split_once(':') else {
+        return Action::Refuse;
+    };
     let scheme = scheme.to_ascii_lowercase();
     if OPEN_SCHEMES.contains(&scheme.as_str()) {
         return Action::Open(uri.to_owned());
@@ -37,53 +44,113 @@ pub fn decide(uri: &str, host: &str, resolve: impl Fn(&Path) -> Option<PathBuf>,
         return Action::Refuse;
     }
     // A query or fragment would make the path checked differ from the one opened.
-    let Some(rest) = rest.strip_prefix("//").filter(|r| !r.contains(['?', '#'])) else { return Action::Refuse };
+    let Some(rest) = rest.strip_prefix("//").filter(|r| !r.contains(['?', '#'])) else {
+        return Action::Refuse;
+    };
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let local = is_local(authority, host);
-    let Some(path) = percent_decode(path).filter(|p| local && p.starts_with('/')) else { return Action::Refuse };
-    let Some(real) = resolve(Path::new(&path)) else { return Action::Refuse };
-    if safe(&real) { Action::OpenFile(real) } else { Action::Reveal(real) }
+    let Some(path) = percent_decode(path).filter(|p| local && p.starts_with('/')) else {
+        return Action::Refuse;
+    };
+    let Some(real) = resolve(Path::new(&path)) else {
+        return Action::Refuse;
+    };
+    if safe(&real) {
+        Action::OpenFile(real)
+    } else {
+        Action::Reveal(real)
+    }
 }
 
 /// Whether a `file://` URL's host, `authority`, is this machine, named `host`.
 pub fn is_local(authority: &str, host: &str) -> bool {
-    authority.is_empty() || authority.eq_ignore_ascii_case("localhost") || authority.eq_ignore_ascii_case(host)
+    authority.is_empty()
+        || authority.eq_ignore_ascii_case("localhost")
+        || authority.eq_ignore_ascii_case(host)
 }
 
 /// Kinds of file whose default app runs, installs or launches something,
 /// or follows a link inside it; never opened, whatever their type says.
 const RUNS: &[&str] = &[
-    "app", "command", "tool", "terminal", "workflow", "action", "pkg", "mpkg", "prefpane", "saver", "jar", "webloc",
-    "inetloc", "fileloc", "url", "shortcut", "scpt", "applescript", "osax", "kext", "dmg",
+    "app",
+    "command",
+    "tool",
+    "terminal",
+    "workflow",
+    "action",
+    "pkg",
+    "mpkg",
+    "prefpane",
+    "saver",
+    "jar",
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "url",
+    "shortcut",
+    "scpt",
+    "applescript",
+    "osax",
+    "kext",
+    "dmg",
 ];
 
 /// Uniform type identifiers a file may conform to, to be opened.
-const SAFE_TYPES: &[&str] = &["public.plain-text", "public.json", "public.image", "public.audiovisual-content", "com.adobe.pdf"];
+const SAFE_TYPES: &[&str] = &[
+    "public.plain-text",
+    "public.json",
+    "public.image",
+    "public.audiovisual-content",
+    "com.adobe.pdf",
+];
 /// ...and may not (scripts are text; property lists, like `.terminal`
 /// settings, can carry commands).
-const UNSAFE_TYPES: &[&str] = &["public.script", "public.executable", "com.apple.property-list", "com.apple.package"];
+const UNSAFE_TYPES: &[&str] = &[
+    "public.script",
+    "public.executable",
+    "com.apple.property-list",
+    "com.apple.package",
+];
 
 /// Whether opening `path` (a real path, from `resolve`) is known not to
 /// run anything: a plain folder, or a non-executable file of a type in
 /// `SAFE_TYPES` and none in `UNSAFE_TYPES`. `conforms` asks macOS whether
 /// the file's type conforms to an identifier. Anything unknown is unsafe.
 pub fn safe_with(path: &Path, conforms: impl Fn(&str) -> bool) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    if path.extension().is_some_and(|e| RUNS.iter().any(|x| e.eq_ignore_ascii_case(x))) || UNSAFE_TYPES.iter().any(|t| conforms(t)) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if path
+        .extension()
+        .is_some_and(|e| RUNS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+        || UNSAFE_TYPES.iter().any(|t| conforms(t))
+    {
         return false;
     }
     if meta.is_dir() {
         return conforms("public.folder");
     }
-    meta.is_file() && meta.permissions().mode() & 0o111 == 0 && SAFE_TYPES.iter().any(|t| conforms(t))
+    meta.is_file()
+        && meta.permissions().mode() & 0o111 == 0
+        && SAFE_TYPES.iter().any(|t| conforms(t))
 }
 
 /// Apps that run what they open: never the one a file opens with, even
 /// if the user made one the default for a safe type.
 const RUNNERS: &[&str] = &[
-    "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "net.kovidgoyal.kitty", "com.github.wez.wezterm",
-    "org.alacritty", "dev.warp.Warp-Stable", "com.apple.ScriptEditor2", "com.apple.Automator", "com.apple.shortcuts",
-    "org.python.PythonLauncher", "com.apple.installer", "com.apple.archiveutility",
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "com.mitchellh.ghostty",
+    "net.kovidgoyal.kitty",
+    "com.github.wez.wezterm",
+    "org.alacritty",
+    "dev.warp.Warp-Stable",
+    "com.apple.ScriptEditor2",
+    "com.apple.Automator",
+    "com.apple.shortcuts",
+    "org.python.PythonLauncher",
+    "com.apple.installer",
+    "com.apple.archiveutility",
 ];
 
 /// Whether files may be opened with the app whose bundle id is `id`.
@@ -130,19 +197,34 @@ pub fn open(uri: &str) {
                     NIL => NIL,
                     kind => msg!(workspace, c"URLForApplicationToOpenContentType:", kind),
                 };
-                let id = if app.is_null() { String::new() } else { bundle_id(app) };
+                let id = if app.is_null() {
+                    String::new()
+                } else {
+                    bundle_id(app)
+                };
                 if !viewer(&id) {
                     return reveal(workspace, url);
                 }
                 let urls: Id = msg!(class(c"NSArray"), c"arrayWithObject:", url);
                 let config: Id = msg!(class(c"NSWorkspaceOpenConfiguration"), c"configuration");
-                call!(workspace, c"openURLs:withApplicationAtURL:configuration:completionHandler:", urls, app, config, NIL);
+                call!(
+                    workspace,
+                    c"openURLs:withApplicationAtURL:configuration:completionHandler:",
+                    urls,
+                    app,
+                    config,
+                    NIL
+                );
                 return;
             }
             Action::Reveal(path) => return reveal(workspace, file_url(&path)),
             Action::Refuse => NIL,
         };
-        let opened: Bool = if url.is_null() { NO } else { msg!(workspace, c"openURL:", url) };
+        let opened: Bool = if url.is_null() {
+            NO
+        } else {
+            msg!(workspace, c"openURL:", url)
+        };
         if opened == NO {
             NSBeep();
         }
@@ -158,14 +240,26 @@ unsafe fn reveal(workspace: Id, url: Id) {
 }
 
 unsafe fn file_url(path: &Path) -> Id {
-    unsafe { msg!(class(c"NSURL"), c"fileURLWithPath:", nsstring(&path.to_string_lossy())) }
+    unsafe {
+        msg!(
+            class(c"NSURL"),
+            c"fileURLWithPath:",
+            nsstring(&path.to_string_lossy())
+        )
+    }
 }
 
 /// The file's type (a `UTType`), or nil.
 unsafe fn content_type(url: Id) -> Id {
     unsafe {
         let mut kind: Id = NIL;
-        let found: Bool = msg!(url, c"getResourceValue:forKey:error:", &mut kind as *mut Id, NSURLContentTypeKey, NIL);
+        let found: Bool = msg!(
+            url,
+            c"getResourceValue:forKey:error:",
+            &mut kind as *mut Id,
+            NSURLContentTypeKey,
+            NIL
+        );
         if found == NO { NIL } else { kind }
     }
 }
@@ -174,7 +268,11 @@ unsafe fn content_type(url: Id) -> Id {
 unsafe fn bundle_id(app: Id) -> String {
     unsafe {
         let bundle: Id = msg!(class(c"NSBundle"), c"bundleWithURL:", app);
-        if bundle.is_null() { String::new() } else { string_from_ns(msg!(bundle, c"bundleIdentifier")) }
+        if bundle.is_null() {
+            String::new()
+        } else {
+            string_from_ns(msg!(bundle, c"bundleIdentifier"))
+        }
     }
 }
 
@@ -183,7 +281,11 @@ fn conforms(path: &Path, identifier: &str) -> bool {
     // SAFETY: Foundation and UniformTypeIdentifiers calls with documented signatures.
     unsafe {
         let kind = content_type(file_url(path));
-        let wanted: Id = msg!(class(c"UTType"), c"typeWithIdentifier:", nsstring(identifier));
+        let wanted: Id = msg!(
+            class(c"UTType"),
+            c"typeWithIdentifier:",
+            nsstring(identifier)
+        );
         if kind.is_null() || wanted.is_null() {
             return false;
         }
@@ -205,7 +307,11 @@ pub fn hostname() -> String {
     // SAFETY: `buf` is writable for its length.
     let ok = unsafe { gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
     let len = buf.iter().position(|&b| b == 0).unwrap_or(0);
-    if ok { String::from_utf8_lossy(&buf[..len]).into_owned() } else { String::new() }
+    if ok {
+        String::from_utf8_lossy(&buf[..len]).into_owned()
+    } else {
+        String::new()
+    }
 }
 
 unsafe extern "C" {
@@ -221,24 +327,36 @@ mod tests {
         let exists = |p: &Path| Some(p.to_path_buf());
         let always = |_: &Path| true;
         let d = |uri| decide(uri, "mac", exists, always);
-        assert_eq!(d("https://example.com/a"), Action::Open("https://example.com/a".into()));
+        assert_eq!(
+            d("https://example.com/a"),
+            Action::Open("https://example.com/a".into())
+        );
         assert_eq!(d("MAILTO:me@x.org"), Action::Open("MAILTO:me@x.org".into()));
         // Schemes apps register can do things: not followed.
         assert_eq!(d("x-apple.systempreferences:com.apple"), Action::Refuse);
         assert_eq!(d("javascript:alert(1)"), Action::Refuse);
         assert_eq!(d("no scheme"), Action::Refuse);
         // Local files open by their decoded path, from this host only.
-        assert_eq!(d("file:///tmp/a%20b.txt"), Action::OpenFile("/tmp/a b.txt".into()));
+        assert_eq!(
+            d("file:///tmp/a%20b.txt"),
+            Action::OpenFile("/tmp/a b.txt".into())
+        );
         assert_eq!(d("file://mac/tmp/x"), Action::OpenFile("/tmp/x".into()));
         assert_eq!(d("file://other/tmp/x"), Action::Refuse);
         // A query or fragment could make what's checked differ from what opens.
         assert_eq!(d("file:///Applications/Calculator.app?x"), Action::Refuse);
         assert_eq!(d("file:///Applications/Calculator.app#x"), Action::Refuse);
         // Missing files are refused rather than opened unchecked.
-        assert_eq!(decide("file:///nope", "mac", |_| None, always), Action::Refuse);
+        assert_eq!(
+            decide("file:///nope", "mac", |_| None, always),
+            Action::Refuse
+        );
         // Anything not known safe is shown instead, by its real path.
         let real = |_: &Path| Some(PathBuf::from("/Applications/Calculator.app"));
-        assert_eq!(decide("file:///tmp/innocent", "mac", real, |_| false), Action::Reveal("/Applications/Calculator.app".into()));
+        assert_eq!(
+            decide("file:///tmp/innocent", "mac", real, |_| false),
+            Action::Reveal("/Applications/Calculator.app".into())
+        );
     }
 
     /// With the real type checks: only known-safe kinds open.
@@ -292,7 +410,10 @@ mod tests {
         std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
         let uri = format!("file://{}", link.display());
         let action = decide(&uri, "mac", resolve, |p| safe_with(p, |id| conforms(p, id)));
-        assert_eq!(action, Action::Reveal(resolve(Path::new("/bin/sh")).unwrap()));
+        assert_eq!(
+            action,
+            Action::Reveal(resolve(Path::new("/bin/sh")).unwrap())
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

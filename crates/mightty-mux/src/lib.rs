@@ -31,8 +31,8 @@ pub use events::{EVENTS, Events};
 pub use keys::key_bytes;
 pub use rpc::{RpcError, handle};
 pub use socket::{CallError, Client, listen, runtime_dir};
-pub use status::{AGENTS, Attention, Reason, Status, is_agent};
 use status::Activity;
+pub use status::{AGENTS, Attention, Reason, Status, is_agent};
 
 pub type PaneId = u64;
 
@@ -80,7 +80,10 @@ impl Placement {
         Some(match name {
             "window" => Placement::Window,
             "tab" => Placement::Tab { beside },
-            "right" => Placement::Split { beside, down: false },
+            "right" => Placement::Split {
+                beside,
+                down: false,
+            },
             "down" => Placement::Split { beside, down: true },
             _ => return None,
         })
@@ -163,16 +166,22 @@ pub struct Pane {
 const MAX_QUEUED: usize = 16 << 20;
 
 /// Writes `input` to the process until it closes or a write fails.
-fn spawn_writer(mut writer: File, input: mpsc::Receiver<Vec<u8>>, queued: Arc<AtomicUsize>) -> io::Result<()> {
-    thread::Builder::new().name("pane-writer".into()).spawn(move || {
-        for bytes in input {
-            let written = writer.write_all(&bytes);
-            queued.fetch_sub(bytes.len(), Ordering::Relaxed);
-            if written.is_err() {
-                return;
+fn spawn_writer(
+    mut writer: File,
+    input: mpsc::Receiver<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("pane-writer".into())
+        .spawn(move || {
+            for bytes in input {
+                let written = writer.write_all(&bytes);
+                queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                if written.is_err() {
+                    return;
+                }
             }
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -180,7 +189,10 @@ static CELL_PIXELS: AtomicU64 = AtomicU64::new(0);
 
 /// Sets the cell size new panes start with, until a pane is resized.
 pub fn set_cell_pixels(width: u32, height: u32) {
-    CELL_PIXELS.store(u64::from(width) << 32 | u64::from(height), Ordering::Relaxed);
+    CELL_PIXELS.store(
+        u64::from(width) << 32 | u64::from(height),
+        Ordering::Relaxed,
+    );
 }
 
 fn cell_pixels() -> (u32, u32) {
@@ -199,7 +211,10 @@ impl Pane {
         }
         if self.queued.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len() > MAX_QUEUED {
             self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "the pane isn't reading its input"));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the pane isn't reading its input",
+            ));
         }
         self.input.send(bytes.to_vec()).map_err(|_| {
             self.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
@@ -212,7 +227,10 @@ impl Pane {
     /// cells for a cell's size, to size images.
     pub fn resize(&self, cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) {
         let mut term = self.term.lock().unwrap();
-        let cell = (u32::from(pixel_width) / u32::from(cols.max(1)), u32::from(pixel_height) / u32::from(rows.max(1)));
+        let cell = (
+            u32::from(pixel_width) / u32::from(cols.max(1)),
+            u32::from(pixel_height) / u32::from(rows.max(1)),
+        );
         let cell_changed = term.set_cell_pixels(cell.0, cell.1);
         set_cell_pixels(cell.0, cell.1);
         if (term.cols(), term.rows()) == (cols.into(), rows.into()) && !cell_changed {
@@ -220,7 +238,12 @@ impl Pane {
         }
         term.resize(cols.into(), rows.into());
         drop(term);
-        let _ = self.pty.lock().unwrap().resize(WindowSize { cols, rows, pixel_width, pixel_height });
+        let _ = self.pty.lock().unwrap().resize(WindowSize {
+            cols,
+            rows,
+            pixel_width,
+            pixel_height,
+        });
     }
 
     /// Whether the program is reading a password: a whole line, not echoed.
@@ -258,7 +281,8 @@ impl Pane {
     /// returns whether that changed.
     pub fn set_focused(&self, focused: bool) -> bool {
         if !self.focused.swap(focused, Ordering::Relaxed) && focused {
-            self.events.emit("pane.focused", || Value::object([("pane", self.id.into())]));
+            self.events
+                .emit("pane.focused", || Value::object([("pane", self.id.into())]));
         }
         let changed = focused && self.activity.lock().unwrap().clear();
         if changed {
@@ -269,7 +293,8 @@ impl Pane {
 
     /// Asks for the user, unless they're looking at it. Returns whether it changed anything.
     pub fn request_attention(&self, reason: Reason) -> bool {
-        let changed = !self.focused.load(Ordering::Relaxed) && self.activity.lock().unwrap().raise(reason, Instant::now());
+        let changed = !self.focused.load(Ordering::Relaxed)
+            && self.activity.lock().unwrap().raise(reason, Instant::now());
         if changed {
             self.status_changed();
         }
@@ -295,13 +320,26 @@ impl Pane {
             (term.running_command(), !term.marks().is_empty())
         };
         // Without shell integration, whatever is in the foreground other than the shell.
-        let foreground = if running.is_some() || !integrated { self.pty.lock().unwrap().foreground() } else { None };
-        let busy = running.is_some() || (!integrated && foreground.as_ref().is_some_and(|f| f.name != self.command));
+        let foreground = if running.is_some() || !integrated {
+            self.pty.lock().unwrap().foreground()
+        } else {
+            None
+        };
+        let busy = running.is_some()
+            || (!integrated && foreground.as_ref().is_some_and(|f| f.name != self.command));
         // A pane started with a command line is running that, at first.
-        let command = running.as_deref().or((!integrated).then_some(self.command.as_str()));
+        let command = running
+            .as_deref()
+            .or((!integrated).then_some(self.command.as_str()));
         let agent = is_agent(command, foreground.as_ref());
         let focused = self.focused.load(Ordering::Relaxed);
-        let changed = self.activity.lock().unwrap().update(Instant::now(), !self.is_alive(), busy, agent, focused);
+        let changed = self.activity.lock().unwrap().update(
+            Instant::now(),
+            !self.is_alive(),
+            busy,
+            agent,
+            focused,
+        );
         if changed {
             self.status_changed();
         }
@@ -317,7 +355,9 @@ impl Pane {
     pub fn wait_output(&self, seen: u64, timeout: Duration) -> u64 {
         let (lock, cv) = &self.changed;
         let guard = lock.lock().unwrap();
-        let (guard, _) = cv.wait_timeout_while(guard, timeout, |g| *g == seen).unwrap();
+        let (guard, _) = cv
+            .wait_timeout_while(guard, timeout, |g| *g == seen)
+            .unwrap();
         *guard
     }
 
@@ -345,7 +385,10 @@ impl Mux {
 
     pub fn with_options(host: Arc<dyn Host>, options: TermOptions) -> Arc<Self> {
         let mux = Arc::new(Self {
-            panes: Mutex::default(), next_id: AtomicU64::new(1), host, socket: OnceLock::new(),
+            panes: Mutex::default(),
+            next_id: AtomicU64::new(1),
+            host,
+            socket: OnceLock::new(),
             options: Mutex::new(options),
             events: Arc::default(),
         });
@@ -364,7 +407,11 @@ impl Mux {
 
     /// Panes needing the user, the longest waiting first.
     pub fn attention_queue(&self) -> Vec<Arc<Pane>> {
-        let mut waiting: Vec<_> = self.panes().into_iter().filter_map(|p| Some((p.attention()?.since, p))).collect();
+        let mut waiting: Vec<_> = self
+            .panes()
+            .into_iter()
+            .filter_map(|p| Some((p.attention()?.since, p)))
+            .collect();
         waiting.sort_by_key(|w| w.0);
         waiting.into_iter().map(|w| w.1).collect()
     }
@@ -377,7 +424,9 @@ impl Mux {
     pub fn spawn(&self, opts: SpawnOptions) -> io::Result<Arc<Pane>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let shell = opts.shell.clone().unwrap_or_else(default_shell);
-        let name = Path::new(&shell).file_name().map_or("sh".into(), |n| n.to_string_lossy().into_owned());
+        let name = Path::new(&shell)
+            .file_name()
+            .map_or("sh".into(), |n| n.to_string_lossy().into_owned());
         let mut cmd = Command::new(&shell);
         let label = match &opts.command {
             Some(line) => {
@@ -400,14 +449,24 @@ impl Mux {
         }
         // Every pane gets a nonce, integrated or not: without one, output
         // could fake marks and the directory (an `ssh` pane, another shell).
-        let nonce = shell::integrate(&mut cmd, &shell, opts.command.is_none()).or_else(shell::nonce);
+        let nonce =
+            shell::integrate(&mut cmd, &shell, opts.command.is_none()).or_else(shell::nonce);
 
         let (cw, ch) = cell_pixels();
         let pixels = |cells: u16, size: u32| (u32::from(cells) * size).min(u16::MAX.into()) as u16;
-        let size = WindowSize { cols: opts.cols, rows: opts.rows, pixel_width: pixels(opts.cols, cw), pixel_height: pixels(opts.rows, ch) };
+        let size = WindowSize {
+            cols: opts.cols,
+            rows: opts.rows,
+            pixel_width: pixels(opts.cols, cw),
+            pixel_height: pixels(opts.rows, ch),
+        };
         let pty = Pty::spawn(cmd, size)?;
         let reader = pty.reader()?;
-        let mut term = Term::with_options(opts.cols.into(), opts.rows.into(), &self.options.lock().unwrap());
+        let mut term = Term::with_options(
+            opts.cols.into(),
+            opts.rows.into(),
+            &self.options.lock().unwrap(),
+        );
         if cw > 0 && ch > 0 {
             term.set_cell_pixels(cw, ch);
         }
@@ -432,7 +491,12 @@ impl Mux {
             events: self.events.clone(),
         });
         self.panes.lock().unwrap().insert(id, pane.clone());
-        self.events.emit("pane.opened", || Value::object([("pane", id.into()), ("command", pane.command.as_str().into())]));
+        self.events.emit("pane.opened", || {
+            Value::object([
+                ("pane", id.into()),
+                ("command", pane.command.as_str().into()),
+            ])
+        });
         spawn_reader(pane.clone(), reader, self.host.clone());
         if opts.visible {
             pane.set_visible(self.host.show_pane(id, opts.placement));
@@ -460,18 +524,23 @@ impl Mux {
     /// Hangs up the pane's process and forgets the pane. False if unknown.
     /// A process still running [`HANGUP_GRACE`] later is killed.
     pub fn close(&self, id: PaneId) -> bool {
-        let Some(pane) = self.panes.lock().unwrap().remove(&id) else { return false };
+        let Some(pane) = self.panes.lock().unwrap().remove(&id) else {
+            return false;
+        };
         if pane.is_alive() {
             let _ = pane.pty.lock().unwrap().hangup();
             let pane = pane.clone();
-            let _ = thread::Builder::new().name("pane-hangup".into()).spawn(move || {
-                thread::sleep(HANGUP_GRACE);
-                if pane.is_alive() {
-                    let _ = pane.pty.lock().unwrap().kill();
-                }
-            });
+            let _ = thread::Builder::new()
+                .name("pane-hangup".into())
+                .spawn(move || {
+                    thread::sleep(HANGUP_GRACE);
+                    if pane.is_alive() {
+                        let _ = pane.pty.lock().unwrap().kill();
+                    }
+                });
         }
-        self.events.emit("pane.closed", || Value::object([("pane", id.into())]));
+        self.events
+            .emit("pane.closed", || Value::object([("pane", id.into())]));
         self.host.pane_closed(id);
         true
     }
@@ -504,7 +573,11 @@ fn spawn_monitor(mux: Weak<Mux>) {
 /// `$SHELL`, else the account's shell (apps opened from Finder may not
 /// get `$SHELL`), else sh.
 fn default_shell() -> String {
-    env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(account_shell).unwrap_or_else(|| "/bin/sh".into())
+    env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(account_shell)
+        .unwrap_or_else(|| "/bin/sh".into())
 }
 
 fn account_shell() -> Option<String> {
@@ -533,7 +606,12 @@ fn account_shell() -> Option<String> {
         if entry.is_null() || (*entry).shell.is_null() {
             return None;
         }
-        Some(CStr::from_ptr((*entry).shell).to_string_lossy().into_owned()).filter(|s| !s.is_empty())
+        Some(
+            CStr::from_ptr((*entry).shell)
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .filter(|s| !s.is_empty())
     }
 }
 
@@ -559,7 +637,11 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                     let mut term = pane.term.lock().unwrap();
                     term.feed(&buf[..n]);
                     watch.check(&pane, &mut term);
-                    (term.take_responses(), term.bells(), term.take_notifications())
+                    (
+                        term.take_responses(),
+                        term.bells(),
+                        term.take_notifications(),
+                    )
                 };
                 if !replies.is_empty() {
                     let _ = pane.write(&replies);
@@ -567,18 +649,31 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                 pane.notify();
                 host.pane_output(pane.id);
                 let focused = pane.focused.load(Ordering::Relaxed);
-                if pane.activity.lock().unwrap().output(Instant::now(), bells, notifications, focused) {
+                if pane.activity.lock().unwrap().output(
+                    Instant::now(),
+                    bells,
+                    notifications,
+                    focused,
+                ) {
                     pane.status_changed();
                     host.pane_status(pane.id);
                 }
             }
-            let code = pane.pty.lock().unwrap().wait().ok().and_then(|status| status.code());
+            let code = pane
+                .pty
+                .lock()
+                .unwrap()
+                .wait()
+                .ok()
+                .and_then(|status| status.code());
             *pane.exit.lock().unwrap() = Some(code);
             pane.notify();
             if pane.update_status() {
                 host.pane_status(pane.id);
             }
-            pane.events.emit("pane.exited", || Value::object([("pane", pane.id.into()), ("exit_code", code.into())]));
+            pane.events.emit("pane.exited", || {
+                Value::object([("pane", pane.id.into()), ("exit_code", code.into())])
+            });
             host.pane_exited(pane.id);
         })
         .expect("failed to spawn pane reader thread");
@@ -599,22 +694,36 @@ impl Watch {
         let id = || ("pane", pane.id.into());
         if term.title() != self.title {
             self.title = term.title().to_owned();
-            events.emit("pane.title", || Value::object([id(), ("title", self.title.as_str().into())]));
+            events.emit("pane.title", || {
+                Value::object([id(), ("title", self.title.as_str().into())])
+            });
         }
         if term.cwd() != self.cwd.as_deref() {
             self.cwd = term.cwd().map(str::to_owned);
-            events.emit("pane.cwd", || Value::object([id(), ("cwd", self.cwd.clone().into())]));
+            events.emit("pane.cwd", || {
+                Value::object([id(), ("cwd", self.cwd.clone().into())])
+            });
         }
         for event in commands {
             match event {
                 CommandEvent::Started { command } => {
                     self.command_started = Some(Instant::now());
-                    events.emit("command.started", || Value::object([id(), ("command", command.into())]));
+                    events.emit("command.started", || {
+                        Value::object([id(), ("command", command.into())])
+                    });
                 }
                 CommandEvent::Finished { command, exit_code } => {
-                    let duration = self.command_started.take().map(|t| t.elapsed().as_millis() as u64);
+                    let duration = self
+                        .command_started
+                        .take()
+                        .map(|t| t.elapsed().as_millis() as u64);
                     events.emit("command.finished", || {
-                        Value::object([id(), ("command", command.into()), ("exit_code", exit_code.into()), ("duration_ms", duration.into())])
+                        Value::object([
+                            id(),
+                            ("command", command.into()),
+                            ("exit_code", exit_code.into()),
+                            ("duration_ms", duration.into()),
+                        ])
                     });
                 }
             }
@@ -636,9 +745,24 @@ mod tests {
     #[test]
     fn placements_by_name() {
         assert_eq!(Placement::parse("window", Some(3)), Some(Placement::Window));
-        assert_eq!(Placement::parse("tab", Some(3)), Some(Placement::Tab { beside: Some(3) }));
-        assert_eq!(Placement::parse("right", None), Some(Placement::Split { beside: None, down: false }));
-        assert_eq!(Placement::parse("down", Some(1)), Some(Placement::Split { beside: Some(1), down: true }));
+        assert_eq!(
+            Placement::parse("tab", Some(3)),
+            Some(Placement::Tab { beside: Some(3) })
+        );
+        assert_eq!(
+            Placement::parse("right", None),
+            Some(Placement::Split {
+                beside: None,
+                down: false
+            })
+        );
+        assert_eq!(
+            Placement::parse("down", Some(1)),
+            Some(Placement::Split {
+                beside: Some(1),
+                down: true
+            })
+        );
         assert_eq!(Placement::parse("left", None), None);
     }
 
@@ -646,13 +770,26 @@ mod tests {
     #[test]
     fn headless_spawns_stay_hidden() {
         let mux = Mux::new(Arc::new(Headless));
-        let params = mightty_json::parse(r#"{"command":"sleep 5","placement":"right","beside":1}"#).unwrap();
+        let params =
+            mightty_json::parse(r#"{"command":"sleep 5","placement":"right","beside":1}"#).unwrap();
         let pane = handle(&mux, "pane.spawn", &params).unwrap();
         assert_eq!(pane["visible"].as_bool(), Some(false));
         assert!(pane["window"].is_null());
         let bad = mightty_json::parse(r#"{"command":"true","placement":"sideways"}"#).unwrap();
-        assert!(handle(&mux, "pane.spawn", &bad).unwrap_err().message.contains("unknown placement"));
-        assert!(handle(&mux, "pane.focus", &pane_param(pane["id"].as_u64().unwrap())).is_err());
+        assert!(
+            handle(&mux, "pane.spawn", &bad)
+                .unwrap_err()
+                .message
+                .contains("unknown placement")
+        );
+        assert!(
+            handle(
+                &mux,
+                "pane.focus",
+                &pane_param(pane["id"].as_u64().unwrap())
+            )
+            .is_err()
+        );
         mux.close(pane["id"].as_u64().unwrap());
     }
 
@@ -661,11 +798,20 @@ mod tests {
     #[test]
     fn writes_to_a_pane_that_isnt_reading_dont_block() {
         let mux = Mux::new(Arc::new(Headless));
-        let pane = mux.spawn(SpawnOptions { command: Some("sleep 30".into()), ..Default::default() }).unwrap();
+        let pane = mux
+            .spawn(SpawnOptions {
+                command: Some("sleep 30".into()),
+                ..Default::default()
+            })
+            .unwrap();
         let start = Instant::now();
         let chunk = vec![b'x'; 1 << 20];
         let refused = (0..=MAX_QUEUED >> 20).any(|_| pane.write(&chunk).is_err());
-        assert!(refused && start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(
+            refused && start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
         mux.close(pane.id);
     }
 
@@ -679,7 +825,11 @@ mod tests {
             if !Path::new(shell).exists() {
                 continue;
             }
-            let opts = SpawnOptions { shell: Some(shell.into()), cwd: Some(dir.clone()), ..Default::default() };
+            let opts = SpawnOptions {
+                shell: Some(shell.into()),
+                cwd: Some(dir.clone()),
+                ..Default::default()
+            };
             let pane = mux.spawn(opts).unwrap();
             let cwd = || pane.term.lock().unwrap().cwd().map(str::to_owned);
             let deadline = Instant::now() + Duration::from_secs(10);

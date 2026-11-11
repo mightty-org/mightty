@@ -38,7 +38,11 @@ impl Decoder {
         if self.need > 0 {
             return None;
         }
-        let c = if self.cp < self.min { None } else { char::from_u32(self.cp) };
+        let c = if self.cp < self.min {
+            None
+        } else {
+            char::from_u32(self.cp)
+        };
         Some(c.unwrap_or(REPLACEMENT))
     }
 }

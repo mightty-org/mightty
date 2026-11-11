@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 
-use crate::bindings::{Action, Bindings, CMD, CTRL, ALT, Key, Named, SHIFT, Trigger};
+use crate::bindings::{ALT, Action, Bindings, CMD, CTRL, Key, Named, SHIFT, Trigger};
 
 #[repr(C)]
 struct EventTypeSpec {
@@ -33,7 +33,14 @@ unsafe extern "C" {
         data: *mut c_void,
         out: *mut *mut c_void,
     ) -> i32;
-    fn RegisterEventHotKey(code: u32, mods: u32, id: EventHotKeyId, target: *mut c_void, options: u32, out: *mut *mut c_void) -> i32;
+    fn RegisterEventHotKey(
+        code: u32,
+        mods: u32,
+        id: EventHotKeyId,
+        target: *mut c_void,
+        options: u32,
+        out: *mut *mut c_void,
+    ) -> i32;
     fn UnregisterEventHotKey(hot_key: *mut c_void) -> i32;
     fn GetEventParameter(
         event: *mut c_void,
@@ -79,14 +86,29 @@ pub fn register(bindings: &Bindings, perform: fn(&Action)) -> Vec<Trigger> {
             }
             let target = GetApplicationEventTarget();
             if !r.handler {
-                let pressed = EventTypeSpec { class: four(b"keyb"), kind: 5 }; // kEventHotKeyPressed
-                r.handler = InstallEventHandler(target, on_hot_key, 1, &pressed, std::ptr::null_mut(), std::ptr::null_mut()) == 0;
+                let pressed = EventTypeSpec {
+                    class: four(b"keyb"),
+                    kind: 5,
+                }; // kEventHotKeyPressed
+                r.handler = InstallEventHandler(
+                    target,
+                    on_hot_key,
+                    1,
+                    &pressed,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) == 0;
             }
             for (trigger, action) in bindings.global() {
                 let mut key = std::ptr::null_mut();
-                let id = EventHotKeyId { signature: four(b"mtty"), id: r.actions.len() as u32 };
-                let registered = key_code(trigger.key)
-                    .is_some_and(|code| RegisterEventHotKey(code, carbon_mods(trigger.mods), id, target, 0, &mut key) == 0);
+                let id = EventHotKeyId {
+                    signature: four(b"mtty"),
+                    id: r.actions.len() as u32,
+                };
+                let registered = key_code(trigger.key).is_some_and(|code| {
+                    RegisterEventHotKey(code, carbon_mods(trigger.mods), id, target, 0, &mut key)
+                        == 0
+                });
                 if registered {
                     r.keys.push(key);
                     r.actions.push(action.clone());
@@ -108,7 +130,15 @@ extern "C" fn on_hot_key(_: *mut c_void, event: *mut c_void, _: *mut c_void) -> 
     // SAFETY: a hot key event, whose direct object is an EventHotKeyID.
     let status = unsafe {
         let (name, kind) = (four(b"----"), four(b"hkid")); // kEventParamDirectObject, typeEventHotKeyID
-        GetEventParameter(event, name, kind, std::ptr::null_mut(), size_of::<EventHotKeyId>(), std::ptr::null_mut(), (&raw mut id).cast())
+        GetEventParameter(
+            event,
+            name,
+            kind,
+            std::ptr::null_mut(),
+            size_of::<EventHotKeyId>(),
+            std::ptr::null_mut(),
+            (&raw mut id).cast(),
+        )
     };
     if status != 0 || id.signature != four(b"mtty") {
         return -9874; // eventNotHandledErr
@@ -153,7 +183,10 @@ fn key_code(key: Key) -> Option<u32> {
         Key::Named(n) => Some(named(n)),
         Key::Char(c) => {
             const LAYOUT: &str = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.\0\0`";
-            LAYOUT.chars().position(|k| k == c && k != '\0').map(|i| i as u32)
+            LAYOUT
+                .chars()
+                .position(|k| k == c && k != '\0')
+                .map(|i| i as u32)
         }
     }
 }

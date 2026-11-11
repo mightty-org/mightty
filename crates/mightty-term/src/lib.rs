@@ -24,14 +24,14 @@ use links::Links;
 
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell, Underline};
 pub use colors::{Colors, Rgb, default_palette};
-pub use graphics::{ImageData, PLACEHOLDER, Placement, PlaceholderRun};
+pub use graphics::{ImageData, PLACEHOLDER, PlaceholderRun, Placement};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
 pub type TextRange = ((u64, usize), (u64, usize));
 
 pub use width::char_width;
-pub use window::{PointerShape, Progress};
 use width::{emoji_style, width_class};
+pub use window::{PointerShape, Progress};
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 const MAX_MARKS: usize = 10_000;
@@ -62,7 +62,11 @@ pub struct TermOptions {
 
 impl Default for TermOptions {
     fn default() -> Self {
-        Self { scrollback_lines: DEFAULT_SCROLLBACK, colors: Colors::default(), wide_emoji: true }
+        Self {
+            scrollback_lines: DEFAULT_SCROLLBACK,
+            colors: Colors::default(),
+            wide_emoji: true,
+        }
     }
 }
 
@@ -171,8 +175,13 @@ const MAX_KEY_FLAGS: usize = 8;
 /// A command starting or finishing, from shell-integration marks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandEvent {
-    Started { command: Option<String> },
-    Finished { command: Option<String>, exit_code: Option<i32> },
+    Started {
+        command: Option<String>,
+    },
+    Finished {
+        command: Option<String>,
+        exit_code: Option<i32>,
+    },
 }
 
 /// Notifications and command events kept until taken; older ones are dropped.
@@ -459,7 +468,11 @@ impl Term {
     /// The command line of the command running now, from shell integration.
     pub fn running_command(&self) -> Option<String> {
         // Cheap check first: this is polled.
-        if self.marks.last().is_none_or(|m| m.kind != MarkKind::OutputStart) {
+        if self
+            .marks
+            .last()
+            .is_none_or(|m| m.kind != MarkKind::OutputStart)
+        {
             return None;
         }
         self.command_blocks().pop()?.command
@@ -478,11 +491,20 @@ impl Term {
     }
 
     fn notify(&mut self, title: &[u8], body: &[u8]) {
-        let text = |b: &[u8]| String::from_utf8_lossy(b).chars().filter(|c| !c.is_control()).take(MAX_NOTIFICATION_TEXT).collect();
+        let text = |b: &[u8]| {
+            String::from_utf8_lossy(b)
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_NOTIFICATION_TEXT)
+                .collect()
+        };
         if self.notifications.len() == MAX_NOTIFICATIONS {
             self.notifications.remove(0);
         }
-        self.notifications.push(Notification { title: text(title), body: text(body) });
+        self.notifications.push(Notification {
+            title: text(title),
+            body: text(body),
+        });
     }
 
     pub fn cols(&self) -> usize {
@@ -524,7 +546,9 @@ impl Term {
     }
 
     fn mark_trusted(&self, params: &[&[u8]]) -> bool {
-        self.mark_nonce.as_deref().is_none_or(|nonce| params.contains(&nonce))
+        self.mark_nonce
+            .as_deref()
+            .is_none_or(|nonce| params.contains(&nonce))
     }
 
     pub fn marks(&self) -> &[Mark] {
@@ -539,7 +563,10 @@ impl Term {
             match mark.kind {
                 MarkKind::PromptStart => {
                     blocks.extend(current.take());
-                    current = Some(CommandBlock { prompt_line: Some(mark.line), ..Default::default() });
+                    current = Some(CommandBlock {
+                        prompt_line: Some(mark.line),
+                        ..Default::default()
+                    });
                 }
                 MarkKind::CommandStart => {}
                 MarkKind::OutputStart => {
@@ -548,7 +575,11 @@ impl Term {
                     }
                     let block = current.get_or_insert_default();
                     block.output_line = Some(mark.line);
-                    block.command = self.commands.iter().find(|(line, _)| *line == mark.line).map(|(_, c)| c.clone());
+                    block.command = self
+                        .commands
+                        .iter()
+                        .find(|(line, _)| *line == mark.line)
+                        .map(|(_, c)| c.clone());
                 }
                 MarkKind::CommandEnd { exit_code } => {
                     let mut block = current.take().unwrap_or_default();
@@ -565,13 +596,17 @@ impl Term {
 
     /// Output of a command block; up to the cursor while it is still running.
     pub fn block_output(&self, block: &CommandBlock) -> String {
-        let Some(start) = block.output_line else { return String::new() };
+        let Some(start) = block.output_line else {
+            return String::new();
+        };
         let end = match block.end_line {
             Some(end) if end > start => end - 1,
             Some(_) => return String::new(),
             None => self.lines_scrolled + self.cursor.row as u64,
         };
-        self.text_range((start, 0), (end, usize::MAX)).trim_end().to_owned()
+        self.text_range((start, 0), (end, usize::MAX))
+            .trim_end()
+            .to_owned()
     }
 
     /// Every style cells currently refer to.
@@ -590,7 +625,11 @@ impl Term {
     #[inline]
     pub fn resolve(&self, cell: Cell) -> StyledCell {
         let style = self.style(cell);
-        let c = if cell.flags().contains(Flags::GRAPHEME) { self.graphemes.base(cell) } else { cell.c };
+        let c = if cell.flags().contains(Flags::GRAPHEME) {
+            self.graphemes.base(cell)
+        } else {
+            cell.c
+        };
         StyledCell {
             c,
             fg: style.fg,
@@ -610,7 +649,11 @@ impl Term {
     /// The OSC 8 hyperlink at `(line, col)`, if any.
     pub fn link_at(&self, line: u64, col: usize) -> Option<u16> {
         let cells = &self.line(line)?.cells;
-        let col = if col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) { col - 1 } else { col };
+        let col = if col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) {
+            col - 1
+        } else {
+            col
+        };
         let link = self.style(*cells.get(col)?).link;
         (link != 0).then_some(link)
     }
@@ -631,10 +674,16 @@ impl Term {
         let mut l = first;
         while let Some(row) = self.line(l) {
             for (c, &cell) in row.cells.iter().enumerate() {
-                if cell.flags().contains(Flags::WIDE_SPACER) || cell.flags().contains(Flags::WRAP_SPACER) {
+                if cell.flags().contains(Flags::WIDE_SPACER)
+                    || cell.flags().contains(Flags::WRAP_SPACER)
+                {
                     continue;
                 }
-                let last = if cell.flags().contains(Flags::WIDE) { c + 1 } else { c };
+                let last = if cell.flags().contains(Flags::WIDE) {
+                    c + 1
+                } else {
+                    c
+                };
                 if l == line && (c..=last).contains(&col) {
                     here = Some(text.len());
                 }
@@ -675,7 +724,11 @@ impl Term {
         let mut url: Vec<char> = text[scheme..end].to_vec();
         // Trailing punctuation, and closing brackets without an opening one.
         while let Some(&last) = url.last() {
-            let unbalanced = |open, close| last == close && url.iter().filter(|&&c| c == open).count() < url.iter().filter(|&&c| c == close).count();
+            let unbalanced = |open, close| {
+                last == close
+                    && url.iter().filter(|&&c| c == open).count()
+                        < url.iter().filter(|&&c| c == close).count()
+            };
             if ".,:;!?'\"".contains(last) || unbalanced('(', ')') || unbalanced('[', ']') {
                 url.pop();
             } else {
@@ -683,7 +736,10 @@ impl Term {
             }
         }
         let text: String = url.iter().collect();
-        let body = URL_SCHEMES.iter().find(|s| text.starts_with(**s)).map_or(0, |s| s.len());
+        let body = URL_SCHEMES
+            .iter()
+            .find(|s| text.starts_with(**s))
+            .map_or(0, |s| s.len());
         if text.len() <= body || scheme + url.len() <= here {
             return None;
         }
@@ -700,7 +756,9 @@ impl Term {
         let mut out = String::new();
         for row in rows {
             let start = out.len();
-            let skip = |c: &&Cell| c.flags().contains(Flags::WIDE_SPACER) || c.flags().contains(Flags::WRAP_SPACER);
+            let skip = |c: &&Cell| {
+                c.flags().contains(Flags::WIDE_SPACER) || c.flags().contains(Flags::WRAP_SPACER)
+            };
             for &cell in row.cells.iter().filter(|c| !skip(c)) {
                 self.push_cell(&mut out, cell);
             }
@@ -735,7 +793,9 @@ impl Term {
     /// Kitty keyboard protocol enhancements the program asked for (see
     /// `KEY_*`); 0 means legacy encoding.
     pub fn key_flags(&self) -> u8 {
-        *self.key_flags[usize::from(self.alt_active)].last().unwrap_or(&0)
+        *self.key_flags[usize::from(self.alt_active)]
+            .last()
+            .unwrap_or(&0)
     }
 
     fn key_flags_mut(&mut self) -> &mut Vec<u8> {
@@ -744,7 +804,11 @@ impl Term {
 
     /// Rows of the active screen.
     pub fn lines(&self) -> &VecDeque<Row> {
-        if self.alt_active { &self.alternate } else { &self.primary }
+        if self.alt_active {
+            &self.alternate
+        } else {
+            &self.primary
+        }
     }
 
     pub fn scrollback(&self) -> &VecDeque<Row> {
@@ -804,10 +868,16 @@ impl Term {
         for line in start.0..=end.0 {
             let Some(row) = self.line(line) else { continue };
             let from = if line == start.0 { start.1 } else { 0 };
-            let to = if line == end.0 { end.1.saturating_add(1).min(row.cells.len()) } else { row.cells.len() };
+            let to = if line == end.0 {
+                end.1.saturating_add(1).min(row.cells.len())
+            } else {
+                row.cells.len()
+            };
             let begin = out.len();
             for cell in row.cells.get(from..to).unwrap_or_default() {
-                if !cell.flags().contains(Flags::WIDE_SPACER) && !cell.flags().contains(Flags::WRAP_SPACER) {
+                if !cell.flags().contains(Flags::WIDE_SPACER)
+                    && !cell.flags().contains(Flags::WRAP_SPACER)
+                {
                     self.push_cell(&mut out, *cell);
                 }
             }
@@ -837,7 +907,9 @@ impl Term {
             let begin = out.len();
             let end = (*cols.end()).saturating_add(1).min(row.cells.len());
             for cell in row.cells.get(*cols.start()..end).unwrap_or_default() {
-                if !cell.flags().contains(Flags::WIDE_SPACER) && !cell.flags().contains(Flags::WRAP_SPACER) {
+                if !cell.flags().contains(Flags::WIDE_SPACER)
+                    && !cell.flags().contains(Flags::WRAP_SPACER)
+                {
                     self.push_cell(&mut out, *cell);
                 }
             }
@@ -861,7 +933,11 @@ impl Term {
     /// the logical line holding `line` and returns where that is; matches
     /// starting before it are unaffected.
     pub fn search_from(&self, query: &str, line: u64) -> (u64, Vec<TextRange>) {
-        let first = if self.alt_active { self.lines_scrolled } else { self.first_line() };
+        let first = if self.alt_active {
+            self.lines_scrolled
+        } else {
+            self.first_line()
+        };
         let mut first = line.max(first);
         while first > 0 && self.line(first - 1).is_some_and(|row| row.wrapped) {
             first -= 1;
@@ -871,7 +947,13 @@ impl Term {
 
     fn search_lines(&self, query: &str, first: u64) -> Vec<TextRange> {
         let ignore_case = !query.chars().any(char::is_uppercase);
-        let fold = |c: char| if ignore_case { c.to_lowercase().next().unwrap_or(c) } else { c };
+        let fold = |c: char| {
+            if ignore_case {
+                c.to_lowercase().next().unwrap_or(c)
+            } else {
+                c
+            }
+        };
         let needle: Vec<char> = query.chars().map(fold).collect();
         let mut found = Vec::new();
         if needle.is_empty() {
@@ -885,14 +967,24 @@ impl Term {
         for line in first..end {
             let Some(row) = self.line(line) else { continue };
             for (col, &cell) in row.cells.iter().enumerate() {
-                if cell.flags().contains(Flags::WIDE_SPACER) || cell.flags().contains(Flags::WRAP_SPACER) {
+                if cell.flags().contains(Flags::WIDE_SPACER)
+                    || cell.flags().contains(Flags::WRAP_SPACER)
+                {
                     continue;
                 }
                 cluster.clear();
                 self.push_cell(&mut cluster, cell);
                 for c in cluster.chars() {
                     text.push(fold(c));
-                    at.push((line, col, if cell.flags().contains(Flags::WIDE) { col + 1 } else { col }));
+                    at.push((
+                        line,
+                        col,
+                        if cell.flags().contains(Flags::WIDE) {
+                            col + 1
+                        } else {
+                            col
+                        },
+                    ));
                 }
             }
             if row.wrapped && line + 1 < end {
@@ -919,7 +1011,11 @@ impl Term {
         }
         // The right half of a wide character belongs to its left half.
         let char_at = |i: usize| {
-            let i = if i > 0 && cells[i].flags().contains(Flags::WIDE_SPACER) { i - 1 } else { i };
+            let i = if i > 0 && cells[i].flags().contains(Flags::WIDE_SPACER) {
+                i - 1
+            } else {
+                i
+            };
             self.graphemes.base(cells[i])
         };
         let is_word = |c: char| !c.is_whitespace() && !WORD_DELIMITERS.contains(c);
@@ -965,11 +1061,19 @@ impl Term {
                 let active = is_alt == self.alt_active;
                 // Drop blank rows below the cursor first, then keep the cursor
                 // visible by pushing rows above it off the top.
-                while active && excess > 0 && lines.len() > self.cursor.row + 1 && lines.back().is_some_and(Row::is_blank) {
+                while active
+                    && excess > 0
+                    && lines.len() > self.cursor.row + 1
+                    && lines.back().is_some_and(Row::is_blank)
+                {
                     lines.pop_back();
                     excess -= 1;
                 }
-                let shift = if active { excess.min(self.cursor.row) } else { 0 };
+                let shift = if active {
+                    excess.min(self.cursor.row)
+                } else {
+                    0
+                };
                 for row in lines.drain(..shift) {
                     if !is_alt {
                         self.scrollback.push_back(row);
@@ -998,14 +1102,20 @@ impl Term {
     }
 
     fn lines_mut(&mut self) -> &mut VecDeque<Row> {
-        if self.alt_active { &mut self.alternate } else { &mut self.primary }
+        if self.alt_active {
+            &mut self.alternate
+        } else {
+            &mut self.primary
+        }
     }
 
     /// Blank cell carrying the current background (BCE).
     fn blank(&mut self) -> Cell {
         let id = match self.erased_id {
             Some(id) => id,
-            None => *self.erased_id.insert(self.styles.intern(self.cursor.pen.erased())),
+            None => *self
+                .erased_id
+                .insert(self.styles.intern(self.cursor.pen.erased())),
         };
         Cell::new(' ', id, Flags::empty())
     }
@@ -1015,7 +1125,10 @@ impl Term {
     fn pen(&mut self) -> StyleId {
         match self.pen_id {
             Some(id) => id,
-            None => *self.pen_id.insert(self.styles.intern(Style { link: self.link, ..self.cursor.pen })),
+            None => *self.pen_id.insert(self.styles.intern(Style {
+                link: self.link,
+                ..self.cursor.pen
+            })),
         }
     }
 
@@ -1038,11 +1151,29 @@ impl Term {
         // Ids are renumbered: cached ones would point at other styles, or past the end.
         self.pen_id = None;
         self.erased_id = None;
-        let Self { styles, primary, alternate, scrollback, .. } = self;
-        let live = styles.live(primary.iter().chain(alternate.iter()).chain(scrollback.iter()));
+        let Self {
+            styles,
+            primary,
+            alternate,
+            scrollback,
+            ..
+        } = self;
+        let live = styles.live(
+            primary
+                .iter()
+                .chain(alternate.iter())
+                .chain(scrollback.iter()),
+        );
         let next = (live.len() * 2).max(MIN_STYLE_GC);
         // Room past `next` for the few styles interned before the check runs.
-        styles.compact(&live, primary.iter_mut().chain(alternate.iter_mut()).chain(scrollback.iter_mut()), next + 64);
+        styles.compact(
+            &live,
+            primary
+                .iter_mut()
+                .chain(alternate.iter_mut())
+                .chain(scrollback.iter_mut()),
+            next + 64,
+        );
         self.gc_at = next;
     }
 
@@ -1072,7 +1203,11 @@ impl Term {
     // ---- printing ----
 
     fn input_char(&mut self, c: char) {
-        let c = if self.charsets[self.gl] == Charset::DecGraphics { dec_graphics(c) } else { c };
+        let c = if self.charsets[self.gl] == Charset::DecGraphics {
+            dec_graphics(c)
+        } else {
+            c
+        };
         let width = char_width(c);
         if (width == 0 || self.joining || may_join(c)) && self.join(c, width) {
             return;
@@ -1137,16 +1272,32 @@ impl Term {
     /// (in [mode 2027](Modes::grapheme_cluster)).
     fn join(&mut self, c: char, width: usize) -> bool {
         let (row, col) = (self.cursor.row, self.cursor.col);
-        let Some(col) = (if self.cursor.pending_wrap { Some(col) } else { col.checked_sub(1) }) else { return false };
+        let Some(col) = (if self.cursor.pending_wrap {
+            Some(col)
+        } else {
+            col.checked_sub(1)
+        }) else {
+            return false;
+        };
         let cells = &self.lines()[row].cells;
-        let col = if col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) { col - 1 } else { col };
-        let Some(&cell) = cells.get(col) else { return false };
+        let col = if col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) {
+            col - 1
+        } else {
+            col
+        };
+        let Some(&cell) = cells.get(col) else {
+            return false;
+        };
         let mut text = String::new();
         self.push_cell(&mut text, cell);
         let wide = cell.flags().contains(Flags::WIDE);
         let single = text.chars().count() == 1;
         let flag = is_regional(c) && !wide && single && text.chars().all(is_regional);
-        let emoji = c == '\u{FE0F}' && self.modes.grapheme_cluster && !wide && single && text.chars().all(emoji_style);
+        let emoji = c == '\u{FE0F}'
+            && self.modes.grapheme_cluster
+            && !wide
+            && single
+            && text.chars().all(emoji_style);
         let joins = width == 0
             || (self.joining && text.ends_with('\u{200D}'))
             || (wide && matches!(c, '\u{1F3FB}'..='\u{1F3FF}'))
@@ -1160,11 +1311,24 @@ impl Term {
         text.push(c);
         self.joining = c == '\u{200D}';
         if self.graphemes.should_collect(&text) {
-            let Self { graphemes, primary, alternate, scrollback, .. } = self;
-            graphemes.collect(primary.iter().chain(alternate.iter()).chain(scrollback.iter()));
+            let Self {
+                graphemes,
+                primary,
+                alternate,
+                scrollback,
+                ..
+            } = self;
+            graphemes.collect(
+                primary
+                    .iter()
+                    .chain(alternate.iter())
+                    .chain(scrollback.iter()),
+            );
         }
         // Out of ids even so: the character is dropped.
-        let Some(id) = self.graphemes.intern(&text) else { return true };
+        let Some(id) = self.graphemes.intern(&text) else {
+            return true;
+        };
         let mut flags = cell.flags() | Flags::GRAPHEME;
         // The flag spreads over the cell its second letter would have
         // taken; the emoji over the next cell.
@@ -1233,7 +1397,11 @@ impl Term {
             let (row, start) = (self.cursor.row, self.cursor.col);
             // The right edge is only known after writing; see below.
             self.erase_split_wide(row, start, cols);
-            let lines = if self.alt_active { &mut self.alternate } else { &mut self.primary };
+            let lines = if self.alt_active {
+                &mut self.alternate
+            } else {
+                &mut self.primary
+            };
             let cells = &mut lines[row].cells;
             // Room for the most this pass can write (every char wide, plus
             // one: see below), so the loop only stores; the unused (blank)
@@ -1274,7 +1442,11 @@ impl Term {
             }
             cells.truncate(old_len.max(col));
             // Ending on the right half of a wide character orphans it.
-            if col < cols && col > 0 && flag_at(cells, col, Flags::WIDE_SPACER) && !flag_at(cells, col - 1, Flags::WIDE) {
+            if col < cols
+                && col > 0
+                && flag_at(cells, col, Flags::WIDE_SPACER)
+                && !flag_at(cells, col - 1, Flags::WIDE)
+            {
                 let blank = self.blank();
                 self.lines_mut()[row].cells[col] = blank;
             }
@@ -1304,7 +1476,11 @@ impl Term {
             let (row, col) = (self.cursor.row, self.cursor.col);
             let n = bytes.len().min(cols - col);
             self.erase_split_wide(row, col, col + n);
-            let lines = if self.alt_active { &mut self.alternate } else { &mut self.primary };
+            let lines = if self.alt_active {
+                &mut self.alternate
+            } else {
+                &mut self.primary
+            };
             let cells = &mut lines[row].cells;
             // Overwrite what the row already has, append the rest: rows are
             // usually short (see `Row::cells`), so this is mostly appending.
@@ -1313,7 +1489,11 @@ impl Term {
             for (cell, &b) in cells[col..col + existing].iter_mut().zip(bytes) {
                 *cell = Cell::new(b as char, pen, Flags::empty());
             }
-            cells.extend(bytes[existing..n].iter().map(|&b| Cell::new(b as char, pen, Flags::empty())));
+            cells.extend(
+                bytes[existing..n]
+                    .iter()
+                    .map(|&b| Cell::new(b as char, pen, Flags::empty())),
+            );
             bytes = &bytes[n..];
             if col + n >= cols {
                 self.cursor.col = cols - 1;
@@ -1363,20 +1543,32 @@ impl Term {
 
     /// Absolute position; `row` is relative to the scroll region in origin mode.
     fn goto(&mut self, row: usize, col: usize) {
-        let (base, max) = if self.modes.origin { (self.top, self.bottom) } else { (0, self.rows - 1) };
+        let (base, max) = if self.modes.origin {
+            (self.top, self.bottom)
+        } else {
+            (0, self.rows - 1)
+        };
         self.cursor.row = (base + row).min(max);
         self.cursor.col = col.min(self.cols - 1);
         self.cursor.pending_wrap = false;
     }
 
     fn move_up(&mut self, n: usize) {
-        let min = if self.cursor.row >= self.top { self.top } else { 0 };
+        let min = if self.cursor.row >= self.top {
+            self.top
+        } else {
+            0
+        };
         self.cursor.row = self.cursor.row.saturating_sub(n).max(min);
         self.cursor.pending_wrap = false;
     }
 
     fn move_down(&mut self, n: usize) {
-        let max = if self.cursor.row <= self.bottom { self.bottom } else { self.rows - 1 };
+        let max = if self.cursor.row <= self.bottom {
+            self.bottom
+        } else {
+            self.rows - 1
+        };
         self.cursor.row = (self.cursor.row + n).min(max);
         self.cursor.pending_wrap = false;
     }
@@ -1448,15 +1640,30 @@ impl Term {
         let full_screen = top == 0 && bottom == self.rows - 1;
         let to_history = !self.alt_active && top == 0;
         let keep = to_history && self.scrollback_limit > 0;
-        let lines = if self.alt_active { &mut self.alternate } else { &mut self.primary };
+        let lines = if self.alt_active {
+            &mut self.alternate
+        } else {
+            &mut self.primary
+        };
         for _ in 0..n {
-            let leaving = if full_screen { lines.pop_front() } else { lines.remove(top) };
+            let leaving = if full_screen {
+                lines.pop_front()
+            } else {
+                lines.remove(top)
+            };
             let Some(leaving) = leaving else { return };
             let mut fresh = if keep {
                 // Once scrollback is full, reuse the evicted row's allocation.
-                let recycled = if self.scrollback.len() >= self.scrollback_limit { self.scrollback.pop_front() } else { None };
+                let recycled = if self.scrollback.len() >= self.scrollback_limit {
+                    self.scrollback.pop_front()
+                } else {
+                    None
+                };
                 self.scrollback.push_back(leaving);
-                recycled.unwrap_or_else(|| Row { cells: Vec::with_capacity(cols), wrapped: false })
+                recycled.unwrap_or_else(|| Row {
+                    cells: Vec::with_capacity(cols),
+                    wrapped: false,
+                })
             } else {
                 leaving
             };
@@ -1474,7 +1681,8 @@ impl Term {
             self.lines_scrolled += n as u64;
         } else {
             let scrolled = self.lines_scrolled;
-            self.graphics_mut().scroll(scrolled, top, bottom, -(n as i64));
+            self.graphics_mut()
+                .scroll(scrolled, top, bottom, -(n as i64));
         }
     }
 
@@ -1521,7 +1729,8 @@ impl Term {
         lines[row..=bottom].rotate_left(n);
         clear_rows(&mut lines[bottom + 1 - n..=bottom], blank, cols);
         let scrolled = self.lines_scrolled;
-        self.graphics_mut().scroll(scrolled, row, bottom, -(n as i64));
+        self.graphics_mut()
+            .scroll(scrolled, row, bottom, -(n as i64));
         self.cursor.col = 0;
         self.cursor.pending_wrap = false;
     }
@@ -1554,7 +1763,10 @@ impl Term {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
         let n = n.min(cols - col);
         grow(&mut self.lines_mut()[row].cells, cols);
-        if self.lines()[row].cells[col].flags().contains(Flags::WIDE_SPACER) {
+        if self.lines()[row].cells[col]
+            .flags()
+            .contains(Flags::WIDE_SPACER)
+        {
             self.fill(row, col - 1, col);
         }
         self.lines_mut()[row].cells[col..].rotate_left(n);
@@ -1654,9 +1866,19 @@ impl Term {
         let graphemes = mem::take(&mut self.graphemes);
         let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
-        let (mark_nonce, theme, cell_pixels, wide_emoji) = (self.mark_nonce.take(), mem::take(&mut self.theme), self.cell_pixels, self.wide_emoji);
+        let (mark_nonce, theme, cell_pixels, wide_emoji) = (
+            self.mark_nonce.take(),
+            mem::take(&mut self.theme),
+            self.cell_pixels,
+            self.wide_emoji,
+        );
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
-        (self.mark_nonce, self.theme, self.cell_pixels, self.wide_emoji) = (mark_nonce, theme, cell_pixels, wide_emoji);
+        (
+            self.mark_nonce,
+            self.theme,
+            self.cell_pixels,
+            self.wide_emoji,
+        ) = (mark_nonce, theme, cell_pixels, wide_emoji);
         self.modes.grapheme_cluster = wide_emoji;
         // The configured font again, if a program had changed it (OSC 50).
         self.font_request = Some(None);
@@ -1738,7 +1960,13 @@ impl Term {
                 }
                 1000 => self.modes.mouse = if on { MouseMode::Click } else { MouseMode::Off },
                 1002 => self.modes.mouse = if on { MouseMode::Drag } else { MouseMode::Off },
-                1003 => self.modes.mouse = if on { MouseMode::Motion } else { MouseMode::Off },
+                1003 => {
+                    self.modes.mouse = if on {
+                        MouseMode::Motion
+                    } else {
+                        MouseMode::Off
+                    }
+                }
                 1004 => self.modes.focus_events = on,
                 1006 => self.modes.mouse_sgr = on,
                 2004 => self.modes.bracketed_paste = on,
@@ -1772,7 +2000,8 @@ impl Term {
                         Some(4) => Some(Underline::Dotted),
                         Some(5) => Some(Underline::Dashed),
                         // Unknown: as it was.
-                        Some(_) => Some(attrs.underline()).filter(|_| attrs.flags.contains(Flags::UNDERLINE)),
+                        Some(_) => Some(attrs.underline())
+                            .filter(|_| attrs.flags.contains(Flags::UNDERLINE)),
                     };
                     attrs.set_underline(underline);
                 }
@@ -1851,14 +2080,19 @@ impl Term {
             [b"777", b"notify", title, body @ ..] => self.notify(title, &body.join(&b';')),
             // OSC 52 ; targets ; base64 text, or `?` to read. Every target
             // (clipboard, primary, selection) is the one macOS clipboard.
-            [b"52", _targets, b"?"] => self.request_clipboard(ClipboardRequest::Read { bell_terminated }),
+            [b"52", _targets, b"?"] => {
+                self.request_clipboard(ClipboardRequest::Read { bell_terminated })
+            }
             [b"52", _targets, data] => {
-                if let Some(text) = base64::decode(data).and_then(|bytes| String::from_utf8(bytes).ok()) {
+                if let Some(text) =
+                    base64::decode(data).and_then(|bytes| String::from_utf8(bytes).ok())
+                {
                     self.request_clipboard(ClipboardRequest::Write(text));
                 }
             }
             [b"0" | b"2", rest @ ..] => {
-                self.title = displayable(&String::from_utf8_lossy(&rest.join(&b';')), MAX_TITLE_CHARS);
+                self.title =
+                    displayable(&String::from_utf8_lossy(&rest.join(&b';')), MAX_TITLE_CHARS);
             }
             // The directory decides where new tabs start, so like marks it
             // must carry the nonce: output can't choose it.
@@ -1870,15 +2104,21 @@ impl Term {
             [b"22", name] => self.set_pointer_shape(name),
             [b"50", name] => self.set_font(name),
             [b"104", indices @ ..] => self.osc_reset_palette(indices),
-            [code @ (b"10" | b"11" | b"12"), specs @ ..] => self.osc_dynamic(usize::from(code[1] - b'0') + 10, specs, terminator),
-            [code @ (b"110" | b"111" | b"112"), ..] => self.osc_reset_dynamic(usize::from(code[2] - b'0') + 110),
+            [code @ (b"10" | b"11" | b"12"), specs @ ..] => {
+                self.osc_dynamic(usize::from(code[1] - b'0') + 10, specs, terminator)
+            }
+            [code @ (b"110" | b"111" | b"112"), ..] => {
+                self.osc_reset_dynamic(usize::from(code[2] - b'0') + 110)
+            }
             [b"133", kind, rest @ ..] if self.mark_trusted(rest) => {
                 let kind = match kind.first() {
                     Some(b'A') => MarkKind::PromptStart,
                     Some(b'B') => MarkKind::CommandStart,
                     Some(b'C') => MarkKind::OutputStart,
                     Some(b'D') => MarkKind::CommandEnd {
-                        exit_code: rest.first().and_then(|s| std::str::from_utf8(s).ok()?.parse().ok()),
+                        exit_code: rest
+                            .first()
+                            .and_then(|s| std::str::from_utf8(s).ok()?.parse().ok()),
                     },
                     _ => return,
                 };
@@ -1889,9 +2129,16 @@ impl Term {
                 }
                 let line = self.lines_scrolled + self.cursor.row as u64;
                 if let MarkKind::CommandEnd { exit_code } = kind
-                    && let Some(&Mark { kind: MarkKind::OutputStart, line: started }) = self.marks.last()
+                    && let Some(&Mark {
+                        kind: MarkKind::OutputStart,
+                        line: started,
+                    }) = self.marks.last()
                 {
-                    let command = self.commands.iter().rfind(|(l, _)| *l == started).map(|(_, c)| c.clone());
+                    let command = self
+                        .commands
+                        .iter()
+                        .rfind(|(l, _)| *l == started)
+                        .map(|(_, c)| c.clone());
                     self.command_event(CommandEvent::Finished { command, exit_code });
                 }
                 self.marks.push(Mark { kind, line });
@@ -1906,7 +2153,11 @@ impl Term {
                     self.commands.push((line, command));
                 }
                 if kind == MarkKind::OutputStart {
-                    let command = self.commands.last().filter(|(l, _)| *l == line).map(|(_, c)| c.clone());
+                    let command = self
+                        .commands
+                        .last()
+                        .filter(|(l, _)| *l == line)
+                        .map(|(_, c)| c.clone());
                     self.command_event(CommandEvent::Started { command });
                 }
             }
@@ -2020,9 +2271,9 @@ impl Perform for Term {
             ([], b'c') if arg(0, 0) == 0 => self.respond(b"\x1b[?62;22c"),
             ([b'>'], b'c') => self.respond(b"\x1b[>1;10;0c"),
             // XTVERSION: the terminal's name and version.
-            ([b'>'], b'q') if params.arg(0, 0) == 0 => {
-                self.respond(concat!("\x1bP>|mightty ", env!("CARGO_PKG_VERSION"), "\x1b\\").as_bytes())
-            }
+            ([b'>'], b'q') if params.arg(0, 0) == 0 => self.respond(
+                concat!("\x1bP>|mightty ", env!("CARGO_PKG_VERSION"), "\x1b\\").as_bytes(),
+            ),
             ([], b'd') => {
                 let col = self.cursor.col;
                 self.goto(arg(0, 1) - 1, col);
@@ -2040,7 +2291,11 @@ impl Perform for Term {
             ([b'$'] | [b'?', b'$'], b'p') => {
                 let mode = params.arg(0, 0);
                 let dec = intermediates[0] == b'?';
-                let state = if dec { self.dec_mode(mode) } else { self.ansi_mode(mode) };
+                let state = if dec {
+                    self.dec_mode(mode)
+                } else {
+                    self.ansi_mode(mode)
+                };
                 let reply = format!(
                     "\x1b[{}{mode};{}$y",
                     if dec { "?" } else { "" },
@@ -2054,7 +2309,11 @@ impl Perform for Term {
                 6 => {
                     // A restored cursor can sit above a region set since.
                     let base = if self.modes.origin { self.top } else { 0 };
-                    let reply = format!("\x1b[{};{}R", self.cursor.row.saturating_sub(base) + 1, self.cursor.col + 1);
+                    let reply = format!(
+                        "\x1b[{};{}R",
+                        self.cursor.row.saturating_sub(base) + 1,
+                        self.cursor.col + 1
+                    );
                     self.respond(reply.as_bytes());
                 }
                 _ => {}
@@ -2099,7 +2358,11 @@ impl Perform for Term {
             ([], b't') => {
                 let (cw, ch) = self.cell_pixels;
                 let reply = match arg(0, 0) {
-                    14 => format!("\x1b[4;{};{}t", ch as usize * self.rows, cw as usize * self.cols),
+                    14 => format!(
+                        "\x1b[4;{};{}t",
+                        ch as usize * self.rows,
+                        cw as usize * self.cols
+                    ),
                     16 => format!("\x1b[6;{ch};{cw}t"),
                     18 => format!("\x1b[8;{};{}t", self.rows, self.cols),
                     _ => return,
@@ -2129,7 +2392,11 @@ impl Perform for Term {
             ([], b'>') => self.modes.app_keypad = false,
             ([b'(' | b')'], set) => {
                 let slot = (intermediates[0] == b')') as usize;
-                self.charsets[slot] = if set == b'0' { Charset::DecGraphics } else { Charset::Ascii };
+                self.charsets[slot] = if set == b'0' {
+                    Charset::DecGraphics
+                } else {
+                    Charset::Ascii
+                };
             }
             ([b'#'], b'8') => {
                 let cell = Cell::new('E', StyleId::DEFAULT, Flags::empty());
@@ -2164,7 +2431,9 @@ fn extended_color(params: &Params, i: usize) -> (Option<Color>, usize) {
         // Colon form: 38:5:n, 38:2:r:g:b, or 38:2:colorspace:r:g:b.
         let color = match (group[1], &group[2..]) {
             (5, [n, ..]) => Some(Color::Indexed(*n as u8)),
-            (2, [_, r, g, b, ..]) | (2, [r, g, b]) => Some(Color::Rgb(*r as u8, *g as u8, *b as u8)),
+            (2, [_, r, g, b, ..]) | (2, [r, g, b]) => {
+                Some(Color::Rgb(*r as u8, *g as u8, *b as u8))
+            }
             _ => None,
         };
         return (color, 0);
@@ -2217,7 +2486,11 @@ fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
     let mut i = 0;
     while i < path.len() {
         let hex = |c: u8| (c as char).to_digit(16);
-        match (path[i], path.get(i + 1).copied().and_then(hex), path.get(i + 2).copied().and_then(hex)) {
+        match (
+            path[i],
+            path.get(i + 1).copied().and_then(hex),
+            path.get(i + 2).copied().and_then(hex),
+        ) {
             (b'%', Some(hi), Some(lo)) => {
                 out.push((hi * 16 + lo) as u8);
                 i += 3;
@@ -2242,7 +2515,16 @@ fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
 /// run escape sequences or reorder what's shown.
 fn displayable(text: &str, max: usize) -> String {
     let bidi = |c: char| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
-    text.chars().map(|c| if c.is_control() || bidi(c) { '\u{FFFD}' } else { c }).take(max).collect()
+    text.chars()
+        .map(|c| {
+            if c.is_control() || bidi(c) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .take(max)
+        .collect()
 }
 
 /// DEC Special Graphics (`ESC ( 0`): line drawing used by many TUIs.
@@ -2286,7 +2568,9 @@ fn flag_at(cells: &[Cell], col: usize, flag: Flags) -> bool {
 /// `cells.fill(value)` by doubling `copy_within`: a few vectorised memcpys
 /// instead of one store per field per cell. Hot: runs for every scrolled line.
 fn fill_cells(cells: &mut [Cell], value: Cell) {
-    let Some(first) = cells.first_mut() else { return };
+    let Some(first) = cells.first_mut() else {
+        return;
+    };
     *first = value;
     let mut filled = 1;
     while filled < cells.len() {
@@ -2307,7 +2591,9 @@ const MAX_CLUSTER_BYTES: usize = 64;
 const LINK_GC_BACKOFF: u32 = 4096;
 
 /// What a plain-text URL starts with, for [`Term::url_at`].
-const URL_SCHEMES: &[&str] = &["https://", "http://", "file://", "ftp://", "ssh://", "git://", "mailto:"];
+const URL_SCHEMES: &[&str] = &[
+    "https://", "http://", "file://", "ftp://", "ssh://", "git://", "mailto:",
+];
 
 /// A regional indicator: flags are pairs of them.
 fn is_regional(c: char) -> bool {
@@ -2324,7 +2610,6 @@ fn may_join(c: char) -> bool {
 fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c > 0 && c % TAB_WIDTH == 0).collect()
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -8,25 +8,45 @@ use mightty_json::{self as json, Value};
 use mightty_mux::{Client, Headless, Mux, handle, listen};
 
 fn call(mux: &Arc<Mux>, method: &str, params: &str) -> Value {
-    handle(mux, method, &json::parse(params).unwrap()).unwrap_or_else(|e| panic!("{method}: {}", e.message))
+    handle(mux, method, &json::parse(params).unwrap())
+        .unwrap_or_else(|e| panic!("{method}: {}", e.message))
 }
 
 #[test]
 fn spawn_read_wait_exit() {
     let mux = Mux::new(Arc::new(Headless));
-    let pane = call(&mux, "pane.spawn", r#"{"command": "printf 'hello\\n'; read x; echo got $x; exit 3", "shell": "/bin/sh", "visible": false}"#);
+    let pane = call(
+        &mux,
+        "pane.spawn",
+        r#"{"command": "printf 'hello\\n'; read x; echo got $x; exit 3", "shell": "/bin/sh", "visible": false}"#,
+    );
     let id = pane["id"].as_u64().unwrap();
-    let waited = call(&mux, "pane.wait", &format!(r#"{{"pane": {id}, "text": "hello"}}"#));
+    let waited = call(
+        &mux,
+        "pane.wait",
+        &format!(r#"{{"pane": {id}, "text": "hello"}}"#),
+    );
     assert_eq!(waited["matched"].as_str(), Some("text"));
 
-    call(&mux, "pane.send_text", &format!(r#"{{"pane": {id}, "text": "abc", "enter": true}}"#));
-    let waited = call(&mux, "pane.wait", &format!(r#"{{"pane": {id}, "exited": true}}"#));
+    call(
+        &mux,
+        "pane.send_text",
+        &format!(r#"{{"pane": {id}, "text": "abc", "enter": true}}"#),
+    );
+    let waited = call(
+        &mux,
+        "pane.wait",
+        &format!(r#"{{"pane": {id}, "exited": true}}"#),
+    );
     assert_eq!(waited["exit_code"].as_i64(), Some(3));
 
     let read = call(&mux, "pane.read", &format!(r#"{{"pane": {id}}}"#));
     assert_eq!(read["text"].as_str(), Some("hello\nabc\ngot abc"));
     let listed = call(&mux, "pane.list", "{}");
-    assert_eq!(listed.as_array().unwrap()[0]["alive"].as_bool(), Some(false));
+    assert_eq!(
+        listed.as_array().unwrap()[0]["alive"].as_bool(),
+        Some(false)
+    );
     call(&mux, "pane.close", &format!(r#"{{"pane": {id}}}"#));
     assert!(call(&mux, "pane.list", "{}").as_array().unwrap().is_empty());
 }
@@ -47,7 +67,12 @@ const ECHO_NONCE: &str = "echo ${MIGHTTY_NONCE:-hidden}";
 #[test]
 fn run_uses_zsh_integration() {
     // A .zshrc also stops zsh from starting its new-user wizard.
-    check_integration("/bin/zsh", &[(".zshrc", "PS1='ready> '\n")], ZSH_7, ECHO_NONCE);
+    check_integration(
+        "/bin/zsh",
+        &[(".zshrc", "PS1='ready> '\n")],
+        ZSH_7,
+        ECHO_NONCE,
+    );
 }
 
 /// The same with bash, macOS's 3.2 and a current one: the bootstrap still
@@ -57,12 +82,32 @@ fn run_uses_zsh_integration() {
 fn run_uses_bash_integration() {
     for shell in ["/bin/bash", "/opt/homebrew/bin/bash"] {
         let profile = "PS1='ready> '\nPROMPT_COMMAND='_seen=1;'\n";
-        let Some((mux, id)) = check_integration(shell, &[(".bash_profile", profile)], BASH_7, ECHO_NONCE) else { continue };
-        let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "echo ${{_seen:-none}}; cd /tmp"}}"#));
+        let Some((mux, id)) =
+            check_integration(shell, &[(".bash_profile", profile)], BASH_7, ECHO_NONCE)
+        else {
+            continue;
+        };
+        let out = call(
+            &mux,
+            "pane.run",
+            &format!(r#"{{"pane": {id}, "command": "echo ${{_seen:-none}}; cd /tmp"}}"#),
+        );
         assert_eq!(out["output"].as_str(), Some("1"), "{shell}: {out}");
-        let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "echo abc | tr a x | tr b y"}}"#));
-        assert_eq!((out["output"].as_str(), out["command"].as_str()), (Some("xyc"), Some("echo abc | tr a x | tr b y")), "{shell}: {out}");
-        let commands = call(&mux, "pane.commands", &format!(r#"{{"pane": {id}, "limit": 10}}"#));
+        let out = call(
+            &mux,
+            "pane.run",
+            &format!(r#"{{"pane": {id}, "command": "echo abc | tr a x | tr b y"}}"#),
+        );
+        assert_eq!(
+            (out["output"].as_str(), out["command"].as_str()),
+            (Some("xyc"), Some("echo abc | tr a x | tr b y")),
+            "{shell}: {out}"
+        );
+        let commands = call(
+            &mux,
+            "pane.commands",
+            &format!(r#"{{"pane": {id}, "limit": 10}}"#),
+        );
         assert_eq!(commands.as_array().unwrap().len(), 4, "{shell}: {commands}");
         assert!(cwd(&mux, id).ends_with("/tmp"), "{shell}");
         mux.close(id);
@@ -74,8 +119,16 @@ fn run_uses_bash_integration() {
 fn bash_prompt_command_array() {
     let profile = "PS1='ready> '\nPROMPT_COMMAND=('_seen=1' '_also=2')\n";
     let shell = "/opt/homebrew/bin/bash";
-    let Some((mux, id)) = check_integration(shell, &[(".bash_profile", profile)], BASH_7, ECHO_NONCE) else { return };
-    let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "echo $_seen$_also"}}"#));
+    let Some((mux, id)) =
+        check_integration(shell, &[(".bash_profile", profile)], BASH_7, ECHO_NONCE)
+    else {
+        return;
+    };
+    let out = call(
+        &mux,
+        "pane.run",
+        &format!(r#"{{"pane": {id}, "command": "echo $_seen$_also"}}"#),
+    );
     assert_eq!(out["output"].as_str(), Some("12"), "{out}");
     mux.close(id);
 }
@@ -86,10 +139,18 @@ fn run_uses_fish_integration() {
     let fn_7 = "function exit_with_7; return 7; end";
     let echo_nonce = "set -q MIGHTTY_NONCE; and echo $MIGHTTY_NONCE; or echo hidden";
     let files = [(".config/fish/config.fish", config)];
-    let Some((mux, id)) = check_integration("/opt/homebrew/bin/fish", &files, fn_7, echo_nonce) else { return };
+    let Some((mux, id)) = check_integration("/opt/homebrew/bin/fish", &files, fn_7, echo_nonce)
+    else {
+        return;
+    };
     // Our directory is out of XDG_DATA_DIRS again for what the shell runs.
-    let leak = "cd /tmp; string match -q '*mightty*' -- $XDG_DATA_DIRS; and echo leaked; or echo clean";
-    let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "{leak}"}}"#));
+    let leak =
+        "cd /tmp; string match -q '*mightty*' -- $XDG_DATA_DIRS; and echo leaked; or echo clean";
+    let out = call(
+        &mux,
+        "pane.run",
+        &format!(r#"{{"pane": {id}, "command": "{leak}"}}"#),
+    );
     assert_eq!(out["output"].as_str(), Some("clean"), "{out}");
     assert!(cwd(&mux, id).ends_with("/tmp"));
     mux.close(id);
@@ -97,7 +158,13 @@ fn run_uses_fish_integration() {
 
 fn cwd(mux: &Arc<Mux>, id: u64) -> String {
     let panes = call(mux, "pane.list", "{}");
-    let pane = panes.as_array().unwrap().iter().find(|p| p["id"].as_u64() == Some(id)).unwrap().clone();
+    let pane = panes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"].as_u64() == Some(id))
+        .unwrap()
+        .clone();
     pane["cwd"].as_str().unwrap_or_default().to_owned()
 }
 
@@ -105,14 +172,23 @@ fn cwd(mux: &Arc<Mux>, id: u64) -> String {
 /// in that shell's syntax, `fn_7` defines `exit_with_7` and `echo_nonce`
 /// prints `$MIGHTTY_NONCE` or "hidden". Returns the mux and pane for more
 /// checks, or `None` if the shell isn't installed.
-fn check_integration(shell: &str, files: &[(&str, &str)], fn_7: &str, echo_nonce: &str) -> Option<(Arc<Mux>, u64)> {    if !Path::new(shell).exists() {
+fn check_integration(
+    shell: &str,
+    files: &[(&str, &str)],
+    fn_7: &str,
+    echo_nonce: &str,
+) -> Option<(Arc<Mux>, u64)> {
+    if !Path::new(shell).exists() {
         return None;
     }
     let name = Path::new(shell).file_name().unwrap().to_str().unwrap();
     // Tests run in parallel: a home of their own each.
     static HOMES: AtomicUsize = AtomicUsize::new(0);
     let n = HOMES.fetch_add(1, Ordering::Relaxed);
-    let home = std::env::temp_dir().join(format!("mightty-test-home-{name}-{}-{n}", std::process::id()));
+    let home = std::env::temp_dir().join(format!(
+        "mightty-test-home-{name}-{}-{n}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&home).unwrap();
     for (file, text) in files {
         let path = home.join(file);
@@ -120,13 +196,28 @@ fn check_integration(shell: &str, files: &[(&str, &str)], fn_7: &str, echo_nonce
         std::fs::write(path, text).unwrap();
     }
     let mux = Mux::new(Arc::new(Headless));
-    let params = format!(r#"{{"shell": "{shell}", "visible": false, "env": {{"HOME": "{}"}}}}"#, home.display());
+    let params = format!(
+        r#"{{"shell": "{shell}", "visible": false, "env": {{"HOME": "{}"}}}}"#,
+        home.display()
+    );
     let id = call(&mux, "pane.spawn", &params)["id"].as_u64().unwrap();
-    let ready = call(&mux, "pane.wait", &format!(r#"{{"pane": {id}, "text": "ready>"}}"#));
+    let ready = call(
+        &mux,
+        "pane.wait",
+        &format!(r#"{{"pane": {id}, "text": "ready>"}}"#),
+    );
     let screen = call(&mux, "pane.read", &format!(r#"{{"pane": {id}}}"#));
-    assert_eq!(ready["matched"].as_str(), Some("text"), "{shell} screen: {screen}");
+    assert_eq!(
+        ready["matched"].as_str(),
+        Some("text"),
+        "{shell} screen: {screen}"
+    );
 
-    let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "echo one; echo two; false"}}"#));
+    let out = call(
+        &mux,
+        "pane.run",
+        &format!(r#"{{"pane": {id}, "command": "echo one; echo two; false"}}"#),
+    );
     assert_eq!(out["output"].as_str(), Some("one\ntwo"), "{shell}: {out}");
     assert_eq!(out["exit_code"].as_i64(), Some(1));
     assert_eq!(out["command"].as_str(), Some("echo one; echo two; false"));
@@ -135,7 +226,11 @@ fn check_integration(shell: &str, files: &[(&str, &str)], fn_7: &str, echo_nonce
     // Output imitating a finished command doesn't end the run early, and
     // the nonce that real marks carry isn't visible to the command.
     let spoof = format!(r#"printf '\\e]133;D;0\\a'; sleep 0.3; {echo_nonce}; {fn_7}; exit_with_7"#);
-    let out = call(&mux, "pane.run", &format!(r#"{{"pane": {id}, "command": "{spoof}"}}"#));
+    let out = call(
+        &mux,
+        "pane.run",
+        &format!(r#"{{"pane": {id}, "command": "{spoof}"}}"#),
+    );
     assert_eq!(out["output"].as_str(), Some("hidden"), "{shell}: {out}");
     assert_eq!(out["exit_code"].as_i64(), Some(7));
 
@@ -152,6 +247,12 @@ fn socket_round_trip() {
     let mut client = Client::connect(&path).unwrap();
     let info = client.call("app.info", Value::Null).unwrap();
     assert_eq!(info["pid"].as_u64(), Some(std::process::id().into()));
-    assert!(client.call("pane.read", json::parse(r#"{"pane": 5}"#).unwrap()).unwrap_err().to_string().contains("no pane 5"));
+    assert!(
+        client
+            .call("pane.read", json::parse(r#"{"pane": 5}"#).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("no pane 5")
+    );
     let _ = std::fs::remove_file(path);
 }

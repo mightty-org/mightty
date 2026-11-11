@@ -42,7 +42,10 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
         "info" => print_json(&client.call("app.info", Value::Null)?),
         "list" => {
             let panes = client.call("pane.list", Value::Null)?;
-            println!("{:<4} {:<8} {:<9} {:<30} CWD", "ID", "STATE", "WINDOW", "COMMAND");
+            println!(
+                "{:<4} {:<8} {:<9} {:<30} CWD",
+                "ID", "STATE", "WINDOW", "COMMAND"
+            );
             for p in panes.as_array().unwrap_or_default() {
                 let state = match (p["alive"].as_bool(), p["exit_code"].as_i64()) {
                     (Some(true), _) => p["status"].as_str().unwrap_or("running").to_owned(),
@@ -50,16 +53,38 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                     _ => "exited".to_owned(),
                 };
                 // ! when it needs you.
-                let state = if p["attention"].is_null() { state } else { format!("{state}!") };
+                let state = if p["attention"].is_null() {
+                    state
+                } else {
+                    format!("{state}!")
+                };
                 // Window number, tab, and * where keys go.
                 let window = match p["window"].as_u64() {
-                    Some(w) => format!("{w}/{}{}", p["tab"], if p["focused"].as_bool() == Some(true) { "*" } else { "" }),
+                    Some(w) => format!(
+                        "{w}/{}{}",
+                        p["tab"],
+                        if p["focused"].as_bool() == Some(true) {
+                            "*"
+                        } else {
+                            ""
+                        }
+                    ),
                     None if p["visible"].as_bool() == Some(true) => "yes".to_owned(),
                     None => "-".to_owned(),
                 };
-                let title = p["title"].as_str().filter(|t| !t.is_empty()).or(p["command"].as_str()).unwrap_or("");
+                let title = p["title"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .or(p["command"].as_str())
+                    .unwrap_or("");
                 let cwd = shown(p["cwd"].as_str().unwrap_or(""), false);
-                println!("{:<4} {:<8} {:<9} {:<30} {cwd}", p["id"].to_string(), state, window, truncate(&shown(title, false), 30));
+                println!(
+                    "{:<4} {:<8} {:<9} {:<30} {cwd}",
+                    p["id"].to_string(),
+                    state,
+                    window,
+                    truncate(&shown(title, false), 30)
+                );
             }
         }
         "spawn" => {
@@ -67,10 +92,15 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             if let Some(cwd) = opts.value("--cwd") {
                 params.insert("cwd", cwd);
             }
-            if let Some(placement) = ["tab", "right", "down"].into_iter().find(|p| opts.flag(&format!("--{p}"))) {
+            if let Some(placement) = ["tab", "right", "down"]
+                .into_iter()
+                .find(|p| opts.flag(&format!("--{p}")))
+            {
                 params.insert("placement", placement);
                 // Beside the pane this runs in, unless told otherwise.
-                let beside = opts.value("--beside").or_else(|| std::env::var("MIGHTTY_PANE_ID").ok());
+                let beside = opts
+                    .value("--beside")
+                    .or_else(|| std::env::var("MIGHTTY_PANE_ID").ok());
                 if let Some(beside) = beside {
                     params.insert("beside", number(&beside)?);
                 }
@@ -93,17 +123,28 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             params.insert("command", cmd);
             opts.finish()?;
             let result = client.call("pane.run", params)?;
-            println!("{}", shown(result["output"].as_str().unwrap_or_default(), true));
+            println!(
+                "{}",
+                shown(result["output"].as_str().unwrap_or_default(), true)
+            );
             if result["timed_out"].as_bool() == Some(true) {
                 eprintln!("mightty: still running in pane {}", result["pane"]);
                 return Ok(ExitCode::from(124));
             }
-            return Ok(ExitCode::from(result["exit_code"].as_i64().unwrap_or(0).clamp(0, 255) as u8));
+            return Ok(ExitCode::from(
+                result["exit_code"].as_i64().unwrap_or(0).clamp(0, 255) as u8,
+            ));
         }
         "watch" => {
-            let events: Vec<Value> = std::iter::from_fn(|| opts.positional()).map(Into::into).collect();
+            let events: Vec<Value> = std::iter::from_fn(|| opts.positional())
+                .map(Into::into)
+                .collect();
             opts.finish()?;
-            let params = if events.is_empty() { Value::Null } else { Value::object([("events", events.into())]) };
+            let params = if events.is_empty() {
+                Value::Null
+            } else {
+                Value::object([("events", events.into())])
+            };
             client.call("events.subscribe", params)?;
             loop {
                 let (event, mut params) = client.next_event()?;
@@ -116,11 +157,16 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             let enter = opts.flag("--enter");
             let text = opts.positional().ok_or("send needs TEXT")?;
             opts.finish()?;
-            client.call("pane.send_text", obj(pane, [("text", text.into()), ("enter", enter.into())]))?;
+            client.call(
+                "pane.send_text",
+                obj(pane, [("text", text.into()), ("enter", enter.into())]),
+            )?;
         }
         "keys" => {
             let pane = opts.pane()?;
-            let keys: Vec<Value> = std::iter::from_fn(|| opts.positional()).map(Into::into).collect();
+            let keys: Vec<Value> = std::iter::from_fn(|| opts.positional())
+                .map(Into::into)
+                .collect();
             if keys.is_empty() {
                 return Err("keys needs at least one key".into());
             }
@@ -134,7 +180,15 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                 params.insert("max_lines", number(&lines)?);
             }
             opts.finish()?;
-            println!("{}", shown(client.call("pane.read", params)?["text"].as_str().unwrap_or_default(), true));
+            println!(
+                "{}",
+                shown(
+                    client.call("pane.read", params)?["text"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    true
+                )
+            );
         }
         "commands" => {
             let pane = opts.pane()?;
@@ -143,13 +197,20 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                 params.insert("limit", number(&limit)?);
             }
             opts.finish()?;
-            for block in client.call("pane.commands", params)?.as_array().unwrap_or_default() {
+            for block in client
+                .call("pane.commands", params)?
+                .as_array()
+                .unwrap_or_default()
+            {
                 let status = match (block["running"].as_bool(), block["exit_code"].as_i64()) {
                     (Some(true), _) => "running".to_owned(),
                     (_, Some(code)) => format!("exit {code}"),
                     _ => "done".to_owned(),
                 };
-                println!("$ {}  [{status}]", shown(block["command"].as_str().unwrap_or("?"), false));
+                println!(
+                    "$ {}  [{status}]",
+                    shown(block["command"].as_str().unwrap_or("?"), false)
+                );
                 let output = block["output"].as_str().unwrap_or_default();
                 if !output.is_empty() {
                     println!("{}", shown(output, true));
@@ -158,7 +219,13 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
         }
         "wait" => {
             let pane = opts.pane()?;
-            let mut params = obj(pane, [("command_finished", opts.flag("--command").into()), ("exited", opts.flag("--exit").into())]);
+            let mut params = obj(
+                pane,
+                [
+                    ("command_finished", opts.flag("--command").into()),
+                    ("exited", opts.flag("--exit").into()),
+                ],
+            );
             if let Some(text) = opts.value("--text") {
                 params.insert("text", text);
             }
@@ -176,7 +243,10 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             // A leading number is the pane; otherwise the one this runs in.
             let pane = match opts.args.first().filter(|a| a.parse::<u64>().is_ok()) {
                 Some(_) => opts.pane()?,
-                None => number(&std::env::var("MIGHTTY_PANE_ID").map_err(|_| "notify needs a pane id outside mightty")?)?,
+                None => number(
+                    &std::env::var("MIGHTTY_PANE_ID")
+                        .map_err(|_| "notify needs a pane id outside mightty")?,
+                )?,
             };
             let mut params = obj(pane, []);
             if let Some(text) = opts.positional() {
@@ -187,9 +257,18 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
         }
         "attention" => {
             opts.finish()?;
-            for p in client.call("attention.list", Value::Null)?.as_array().unwrap_or_default() {
+            for p in client
+                .call("attention.list", Value::Null)?
+                .as_array()
+                .unwrap_or_default()
+            {
                 let seconds = p["attention"]["waiting_ms"].as_u64().unwrap_or(0) / 1000;
-                println!("{:<4} {:>5}s  {}", p["id"].to_string(), seconds, shown(p["attention"]["message"].as_str().unwrap_or(""), false));
+                println!(
+                    "{:<4} {:>5}s  {}",
+                    p["id"].to_string(),
+                    seconds,
+                    shown(p["attention"]["message"].as_str().unwrap_or(""), false)
+                );
             }
         }
         "focus" => {
@@ -223,18 +302,31 @@ fn obj<const N: usize>(pane: u64, rest: [(&str, Value); N]) -> Value {
 }
 
 fn number(s: &str) -> Result<u64, String> {
-    s.parse().map_err(|_| format!("expected a number, got `{s}`"))
+    s.parse()
+        .map_err(|_| format!("expected a number, got `{s}`"))
 }
 
 /// Text from panes, printed to a terminal: control characters (escape
 /// sequences, from whatever ran in them) become U+FFFD, keeping line
 /// breaks and tabs only for `multiline` text.
 fn shown(s: &str, multiline: bool) -> String {
-    s.chars().map(|c| if c.is_control() && !(multiline && matches!(c, '\n' | '\t')) { '\u{FFFD}' } else { c }).collect()
+    s.chars()
+        .map(|c| {
+            if c.is_control() && !(multiline && matches!(c, '\n' | '\t')) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max { s.to_owned() } else { s.chars().take(max - 1).chain(['…']).collect() }
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        s.chars().take(max - 1).chain(['…']).collect()
+    }
 }
 
 fn print_json(value: &Value) {
@@ -253,8 +345,14 @@ struct Opts {
 impl Opts {
     fn new(args: &[String]) -> Self {
         match args.iter().position(|a| a == "--") {
-            Some(i) => Self { args: args[..i].to_vec(), command: Some(args[i + 1..].join(" ")).filter(|c| !c.is_empty()) },
-            None => Self { args: args.to_vec(), command: None },
+            Some(i) => Self {
+                args: args[..i].to_vec(),
+                command: Some(args[i + 1..].join(" ")).filter(|c| !c.is_empty()),
+            },
+            None => Self {
+                args: args.to_vec(),
+                command: None,
+            },
         }
     }
 
@@ -299,7 +397,10 @@ mod tests {
     #[test]
     fn pane_text_is_printed_without_controls() {
         // An OSC 52 smuggled in a directory or title doesn't reach the terminal.
-        assert_eq!(shown("/tmp/\u{1b}]52;c;ZXZpbA==\u{7}x", false), "/tmp/\u{FFFD}]52;c;ZXZpbA==\u{FFFD}x");
+        assert_eq!(
+            shown("/tmp/\u{1b}]52;c;ZXZpbA==\u{7}x", false),
+            "/tmp/\u{FFFD}]52;c;ZXZpbA==\u{FFFD}x"
+        );
         assert_eq!(shown("a\nb\tc\u{9b}d", true), "a\nb\tc\u{FFFD}d");
         assert_eq!(shown("a\nb", false), "a\u{FFFD}b");
     }

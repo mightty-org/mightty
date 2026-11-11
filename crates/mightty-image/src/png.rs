@@ -27,10 +27,15 @@ pub fn decode_limited(data: &[u8], max_side: u32) -> Option<Image> {
     if data.get(..8)? != SIGNATURE {
         return None;
     }
-    let be32 = |at: usize| -> Option<u32> { Some(u32::from_be_bytes(data.get(at..at.checked_add(4)?)?.try_into().ok()?)) };
+    let be32 = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(
+            data.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
     let mut at = 8;
     let mut header: Option<Header> = None;
-    let (mut palette, mut transparency, mut compressed): (&[u8], &[u8], Vec<u8>) = (&[], &[], Vec::new());
+    let (mut palette, mut transparency, mut compressed): (&[u8], &[u8], Vec<u8>) =
+        (&[], &[], Vec::new());
     loop {
         let len = be32(at)? as usize;
         let kind = data.get(at + 4..at + 8)?;
@@ -48,7 +53,15 @@ pub fn decode_limited(data: &[u8], max_side: u32) -> Option<Image> {
     }
     let h = header?;
     // The filtered data: each row a filter byte and its bytes, per pass.
-    let limit = Header::passes(h.interlaced, h.width, h.height).map(|(w, rows)| if w == 0 { 0 } else { rows * (1 + h.row_bytes(w)) }).sum();
+    let limit = Header::passes(h.interlaced, h.width, h.height)
+        .map(|(w, rows)| {
+            if w == 0 {
+                0
+            } else {
+                rows * (1 + h.row_bytes(w))
+            }
+        })
+        .sum();
     let raw = inflate::zlib(&compressed, limit)?;
     if raw.len() != limit {
         return None;
@@ -74,12 +87,21 @@ pub fn decode_limited(data: &[u8], max_side: u32) -> Option<Image> {
                 let a = rgba[3] as u32;
                 // Premultiplied, rounded.
                 let pre = |c: u8| ((c as u32 * a + 127) / 255) as u8;
-                pixels[i..i + 4].copy_from_slice(&[pre(rgba[0]), pre(rgba[1]), pre(rgba[2]), rgba[3]]);
+                pixels[i..i + 4].copy_from_slice(&[
+                    pre(rgba[0]),
+                    pre(rgba[1]),
+                    pre(rgba[2]),
+                    rgba[3],
+                ]);
             }
             previous = row;
         }
     }
-    Some(Image { width: h.width, height: h.height, pixels })
+    Some(Image {
+        width: h.width,
+        height: h.height,
+        pixels,
+    })
 }
 
 struct Header {
@@ -91,13 +113,27 @@ struct Header {
 }
 
 /// Adam7's passes: where each starts and how far apart its pixels are.
-const ADAM7: [(usize, usize, usize, usize); 7] = [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)];
+const ADAM7: [(usize, usize, usize, usize); 7] = [
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+];
 
 impl Header {
     fn parse(b: &[u8], max_side: u32) -> Option<Header> {
         let width = u32::from_be_bytes(b.get(0..4)?.try_into().ok()?);
         let height = u32::from_be_bytes(b.get(4..8)?.try_into().ok()?);
-        let (depth, color, compression, filter, interlace) = (*b.get(8)?, *b.get(9)?, *b.get(10)?, *b.get(11)?, *b.get(12)?);
+        let (depth, color, compression, filter, interlace) = (
+            *b.get(8)?,
+            *b.get(9)?,
+            *b.get(10)?,
+            *b.get(11)?,
+            *b.get(12)?,
+        );
         let valid = match color {
             0 => matches!(depth, 1 | 2 | 4 | 8 | 16),
             3 => matches!(depth, 1 | 2 | 4 | 8),
@@ -105,7 +141,13 @@ impl Header {
             _ => false,
         };
         let sized = (1..=max_side).contains(&width) && (1..=max_side).contains(&height);
-        (valid && sized && compression == 0 && filter == 0 && interlace <= 1).then_some(Header { width, height, depth, color, interlaced: interlace == 1 })
+        (valid && sized && compression == 0 && filter == 0 && interlace <= 1).then_some(Header {
+            width,
+            height,
+            depth,
+            color,
+            interlaced: interlace == 1,
+        })
     }
 
     fn channels(&self) -> usize {
@@ -129,7 +171,8 @@ impl Header {
     /// Each pass's width and rows: one pass of the whole image unless interlaced.
     fn passes(interlaced: bool, width: u32, height: u32) -> impl Iterator<Item = (usize, usize)> {
         let (w, h) = (width as usize, height as usize);
-        let passes: &[(usize, usize, usize, usize)] = if interlaced { &ADAM7 } else { &[(0, 0, 1, 1)] };
+        let passes: &[(usize, usize, usize, usize)] =
+            if interlaced { &ADAM7 } else { &[(0, 0, 1, 1)] };
         passes.iter().map(move |&(x0, y0, dx, dy)| {
             let (pw, ph) = ((w + dx - 1 - x0) / dx, (h + dy - 1 - y0) / dy);
             if w <= x0 || h <= y0 { (0, 0) } else { (pw, ph) }
@@ -158,12 +201,24 @@ impl Header {
                 8 => row.get(index).map(|&v| (v as u16, v)),
                 _ => {
                     let bit = index * depth;
-                    let v = (*row.get(bit / 8)? >> (8 - depth - bit % 8)) & ((1 << depth) - 1) as u8;
-                    Some((v as u16, if self.color == 3 { v } else { (v as u32 * 255 / ((1 << depth) - 1)) as u8 }))
+                    let v =
+                        (*row.get(bit / 8)? >> (8 - depth - bit % 8)) & ((1 << depth) - 1) as u8;
+                    Some((
+                        v as u16,
+                        if self.color == 3 {
+                            v
+                        } else {
+                            (v as u32 * 255 / ((1 << depth) - 1)) as u8
+                        },
+                    ))
                 }
             }
         };
-        let key = |i: usize| transparency.get(2 * i..2 * i + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+        let key = |i: usize| {
+            transparency
+                .get(2 * i..2 * i + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        };
         Some(match self.color {
             0 => {
                 let (raw, g) = sample(0)?;
@@ -177,7 +232,12 @@ impl Header {
             3 => {
                 let i = sample(0)?.1 as usize;
                 let c = palette.get(3 * i..3 * i + 3)?;
-                [c[0], c[1], c[2], transparency.get(i).copied().unwrap_or(255)]
+                [
+                    c[0],
+                    c[1],
+                    c[2],
+                    transparency.get(i).copied().unwrap_or(255),
+                ]
             }
             4 => {
                 let g = sample(0)?.1;
@@ -200,7 +260,11 @@ fn unfilter(filter: u8, row: &mut [u8], previous: &[u8], bpp: usize) -> Option<(
             3 => ((left as u16 + up as u16) / 2) as u8,
             4 => {
                 let p = left as i16 + up as i16 - up_left as i16;
-                let (pa, pb, pc) = ((p - left as i16).abs(), (p - up as i16).abs(), (p - up_left as i16).abs());
+                let (pa, pb, pc) = (
+                    (p - left as i16).abs(),
+                    (p - up as i16).abs(),
+                    (p - up_left as i16).abs(),
+                );
                 if pa <= pb && pa <= pc {
                     left
                 } else if pb <= pc {
@@ -222,13 +286,27 @@ pub(crate) mod tests {
 
     /// A PNG of `rows` (each a filter byte and its bytes), stored without
     /// compression: enough to test the decoder on any layout.
-    pub(crate) fn png(width: u32, height: u32, depth: u8, color: u8, interlace: u8, extra: &[(&[u8; 4], Vec<u8>)], rows: &[u8]) -> Vec<u8> {
-        let chunk = |kind: &[u8; 4], body: &[u8]| [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat();
+    pub(crate) fn png(
+        width: u32,
+        height: u32,
+        depth: u8,
+        color: u8,
+        interlace: u8,
+        extra: &[(&[u8; 4], Vec<u8>)],
+        rows: &[u8],
+    ) -> Vec<u8> {
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat()
+        };
         let mut ihdr = [width.to_be_bytes(), height.to_be_bytes()].concat();
         ihdr.extend([depth, color, 0, 0, interlace]);
         // zlib: header, stored blocks of at most 65535 bytes, a dummy checksum.
         let mut z = vec![0x78, 0x01];
-        let blocks: Vec<&[u8]> = if rows.is_empty() { vec![&[]] } else { rows.chunks(65535).collect() };
+        let blocks: Vec<&[u8]> = if rows.is_empty() {
+            vec![&[]]
+        } else {
+            rows.chunks(65535).collect()
+        };
         for (i, block) in blocks.iter().enumerate() {
             z.push((i + 1 == blocks.len()) as u8);
             z.extend((block.len() as u16).to_le_bytes());
@@ -256,10 +334,28 @@ pub(crate) mod tests {
         assert_eq!(image.pixels, [0, 0, 0, 255, 255, 255, 255, 255]);
         // Palette, 2 bits, with transparency for entry 1.
         let palette = vec![10, 20, 30, 40, 50, 60];
-        let image = decode(&png(2, 1, 2, 3, 0, &[(b"PLTE", palette), (b"tRNS", vec![255, 0])], &[0, 0b0001_0000])).unwrap();
+        let image = decode(&png(
+            2,
+            1,
+            2,
+            3,
+            0,
+            &[(b"PLTE", palette), (b"tRNS", vec![255, 0])],
+            &[0, 0b0001_0000],
+        ))
+        .unwrap();
         assert_eq!(image.pixels, [10, 20, 30, 255, 0, 0, 0, 0]);
         // RGB, 16 bits: the high bytes.
-        let image = decode(&png(1, 1, 16, 2, 0, &[], &[0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc])).unwrap();
+        let image = decode(&png(
+            1,
+            1,
+            16,
+            2,
+            0,
+            &[],
+            &[0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc],
+        ))
+        .unwrap();
         assert_eq!(image.pixels, [0x12, 0x56, 0x9a, 255]);
     }
 
@@ -293,18 +389,52 @@ pub(crate) mod tests {
                 interlaced.extend((x0..9).step_by(dx).map(|x| value(x, y)));
             }
         }
-        assert_eq!(decode(&png(9, 9, 8, 0, 1, &[], &interlaced)), decode(&png(9, 9, 8, 0, 0, &[], &plain)));
+        assert_eq!(
+            decode(&png(9, 9, 8, 0, 1, &[], &interlaced)),
+            decode(&png(9, 9, 8, 0, 0, &[], &plain))
+        );
     }
 
     /// A 12×12 RGBA image from Python's zlib (dynamic codes, every filter),
     /// damaged a byte at a time every way: errors or images, never panics.
     #[test]
     fn damaged_compressed_images_dont_panic() {
-        let real = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 12, 0, 0, 0, 12, 8, 6, 0, 0, 0, 86, 117, 92, 231, 0, 0, 0, 230, 73, 68, 65, 84, 120, 218, 21, 207, 33, 150, 67, 33, 16, 5, 209, 78, 50, 226, 75, 36, 18, 217, 18, 137, 68, 34, 145, 44, 135, 157, 103, 110, 68, 157, 42, 195, 233, 71, 68, 220, 251, 196, 253, 22, 84, 221, 56, 209, 245, 224, 137, 165, 55, 31, 188, 226, 185, 223, 7, 229, 185, 183, 114, 67, 234, 206, 3, 83, 47, 222, 56, 250, 29, 197, 131, 114, 111, 225, 138, 166, 147, 59, 134, 158, 188, 176, 245, 225, 79, 84, 147, 170, 11, 168, 186, 113, 162, 235, 193, 19, 75, 111, 62, 248, 139, 230, 2, 74, 51, 137, 27, 82, 119, 30, 152, 122, 241, 198, 209, 17, 233, 65, 154, 196, 21, 77, 39, 119, 12, 61, 121, 97, 235, 147, 191, 79, 119, 147, 186, 11, 168, 186, 113, 162, 235, 193, 19, 75, 111, 62, 120, 199, 112, 1, 101, 152, 196, 13, 169, 59, 15, 76, 189, 120, 227, 232, 79, 76, 15, 166, 73, 92, 209, 116, 114, 199, 208, 147, 23, 182, 62, 243, 247, 233, 101, 210, 114, 1, 85, 55, 78, 116, 61, 120, 98, 233, 205, 7, 17, 219, 5, 148, 109, 18, 55, 164, 238, 60, 48, 245, 226, 141, 163, 95, 113, 60, 56, 38, 113, 69, 211, 201, 29, 67, 79, 94, 216, 250, 240, 63, 85, 150, 241, 54, 132, 50, 80, 41, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+        let real = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 12, 0, 0, 0, 12,
+            8, 6, 0, 0, 0, 86, 117, 92, 231, 0, 0, 0, 230, 73, 68, 65, 84, 120, 218, 21, 207, 33,
+            150, 67, 33, 16, 5, 209, 78, 50, 226, 75, 36, 18, 217, 18, 137, 68, 34, 145, 44, 135,
+            157, 103, 110, 68, 157, 42, 195, 233, 71, 68, 220, 251, 196, 253, 22, 84, 221, 56, 209,
+            245, 224, 137, 165, 55, 31, 188, 226, 185, 223, 7, 229, 185, 183, 114, 67, 234, 206, 3,
+            83, 47, 222, 56, 250, 29, 197, 131, 114, 111, 225, 138, 166, 147, 59, 134, 158, 188,
+            176, 245, 225, 79, 84, 147, 170, 11, 168, 186, 113, 162, 235, 193, 19, 75, 111, 62,
+            248, 139, 230, 2, 74, 51, 137, 27, 82, 119, 30, 152, 122, 241, 198, 209, 17, 233, 65,
+            154, 196, 21, 77, 39, 119, 12, 61, 121, 97, 235, 147, 191, 79, 119, 147, 186, 11, 168,
+            186, 113, 162, 235, 193, 19, 75, 111, 62, 120, 199, 112, 1, 101, 152, 196, 13, 169, 59,
+            15, 76, 189, 120, 227, 232, 79, 76, 15, 166, 73, 92, 209, 116, 114, 199, 208, 147, 23,
+            182, 62, 243, 247, 233, 101, 210, 114, 1, 85, 55, 78, 116, 61, 120, 98, 233, 205, 7,
+            17, 219, 5, 148, 109, 18, 55, 164, 238, 60, 48, 245, 226, 141, 163, 95, 113, 60, 56,
+            38, 113, 69, 211, 201, 29, 67, 79, 94, 216, 250, 240, 63, 85, 150, 241, 54, 132, 50,
+            80, 41, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
         let image = decode(&real).unwrap();
         assert_eq!((image.width, image.height), (12, 12));
         for i in 0..real.len() {
-            for v in [0, 1, 2, 0x0f, 0x10, 0x40, 0x7f, 0x80, 0xc0, 0xf0, 0xfe, 0xff, real[i] ^ 1, real[i] ^ 0x80] {
+            for v in [
+                0,
+                1,
+                2,
+                0x0f,
+                0x10,
+                0x40,
+                0x7f,
+                0x80,
+                0xc0,
+                0xf0,
+                0xfe,
+                0xff,
+                real[i] ^ 1,
+                real[i] ^ 0x80,
+            ] {
                 let mut d = real;
                 d[i] = v;
                 let _ = decode(&d);
@@ -322,7 +452,10 @@ pub(crate) mod tests {
         assert_eq!(decode(&png(1, 1, 8, 0, 0, &[], &[9, 0])), None);
         assert_eq!(decode(&png(100_000, 1, 8, 0, 0, &[], &[])), None);
         // A palette index past the palette.
-        assert_eq!(decode(&png(1, 1, 8, 3, 0, &[(b"PLTE", vec![1, 2, 3])], &[0, 1])), None);
+        assert_eq!(
+            decode(&png(1, 1, 8, 3, 0, &[(b"PLTE", vec![1, 2, 3])], &[0, 1])),
+            None
+        );
         for len in 0..good.len() {
             let _ = decode(&good[..len]);
         }

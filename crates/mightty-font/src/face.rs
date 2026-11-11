@@ -39,13 +39,17 @@ impl<'a> Bytes<'a> {
         self.0.get(at).copied()
     }
     pub(crate) fn u16(self, at: usize) -> Option<u16> {
-        Some(u16::from_be_bytes(self.0.get(at..at.checked_add(2)?)?.try_into().ok()?))
+        Some(u16::from_be_bytes(
+            self.0.get(at..at.checked_add(2)?)?.try_into().ok()?,
+        ))
     }
     pub(crate) fn i16(self, at: usize) -> Option<i16> {
         self.u16(at).map(|v| v as i16)
     }
     pub(crate) fn u32(self, at: usize) -> Option<u32> {
-        Some(u32::from_be_bytes(self.0.get(at..at.checked_add(4)?)?.try_into().ok()?))
+        Some(u32::from_be_bytes(
+            self.0.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
     }
     pub(crate) fn slice(self, at: usize, len: usize) -> Option<Bytes<'a>> {
         self.0.get(at..at.checked_add(len)?).map(Bytes)
@@ -119,7 +123,11 @@ pub struct Face {
 #[derive(Clone)]
 enum Outlines {
     /// TrueType: quadratic curves, found through `loca`.
-    Glyf { glyf: (usize, usize), loca: (usize, usize), long_loca: bool },
+    Glyf {
+        glyf: (usize, usize),
+        loca: (usize, usize),
+        long_loca: bool,
+    },
     /// PostScript: cubic curves as charstrings.
     Cff(Box<Cff>),
     /// None: a font of colour bitmaps.
@@ -154,7 +162,8 @@ impl Face {
                 if index >= count {
                     return Err(Error::Damaged("no such face in the collection"));
                 }
-                b.u32(12 + 4 * index as usize).ok_or(Error::Damaged("collection header"))? as usize
+                b.u32(12 + 4 * index as usize)
+                    .ok_or(Error::Damaged("collection header"))? as usize
             }
             _ if index > 0 => return Err(Error::Damaged("no such face in the file")),
             _ => 0,
@@ -180,7 +189,10 @@ impl Face {
         let hhea = required(b"hhea", "no hhea table")?;
         let maxp = required(b"maxp", "no maxp table")?;
 
-        let units_per_em = b.u16(head.0 + 18).filter(|&u| (16..=16384).contains(&u)).ok_or(Error::Damaged("units per em"))?;
+        let units_per_em = b
+            .u16(head.0 + 18)
+            .filter(|&u| (16..=16384).contains(&u))
+            .ok_or(Error::Damaged("units per em"))?;
         let long_loca = b.i16(head.0 + 50).ok_or(Error::Damaged("head"))? != 0;
         let metrics = Metrics {
             units_per_em,
@@ -188,10 +200,14 @@ impl Face {
             descender: b.i16(hhea.0 + 6).ok_or(Error::Damaged("hhea"))?,
             line_gap: b.i16(hhea.0 + 8).ok_or(Error::Damaged("hhea"))?,
         };
-        let num_h_metrics = b.u16(hhea.0 + 34).filter(|&n| n > 0).ok_or(Error::Damaged("hhea"))?;
+        let num_h_metrics = b
+            .u16(hhea.0 + 34)
+            .filter(|&n| n > 0)
+            .ok_or(Error::Damaged("hhea"))?;
         let num_glyphs = b.u16(maxp.0 + 4).ok_or(Error::Damaged("maxp"))?;
         let cmap = required(b"cmap", "no cmap table")?;
-        let char_map = pick_char_map(b, cmap.0).ok_or(Error::Unsupported("no Unicode character map"))?;
+        let char_map =
+            pick_char_map(b, cmap.0).ok_or(Error::Unsupported("no Unicode character map"))?;
         let hmtx = required(b"hmtx", "no hmtx table")?;
         if hmtx.1 < 4 * num_h_metrics as usize {
             return Err(Error::Damaged("hmtx shorter than hhea says"));
@@ -202,7 +218,11 @@ impl Face {
             if loca.1 < entry * (num_glyphs as usize + 1) {
                 return Err(Error::Damaged("loca shorter than maxp says"));
             }
-            Outlines::Glyf { glyf, loca, long_loca }
+            Outlines::Glyf {
+                glyf,
+                loca,
+                long_loca,
+            }
         } else if let Some(cff) = table(b"CFF ") {
             let cff = Cff::parse(b, cff)?;
             if cff.glyph_count() < num_glyphs as usize {
@@ -215,15 +235,56 @@ impl Face {
             // Colour bitmaps only (Noto Color Emoji): glyphs have no outlines.
             Outlines::None
         } else {
-            return Err(Error::Unsupported("no outlines in a form read here (glyf, CFF, colour bitmaps)"));
+            return Err(Error::Unsupported(
+                "no outlines in a form read here (glyf, CFF, colour bitmaps)",
+            ));
         };
         let name = table(b"name");
         let offset = |tag| table(tag).map(|t| t.0);
-        let (avar, gvar, hvar, mvar) = (offset(b"avar"), offset(b"gvar"), offset(b"HVAR"), offset(b"MVAR"));
-        let axes = offset(b"fvar").and_then(|at| var::axes(b, at)).unwrap_or_default();
-        let color = color::Tables { sbix: table(b"sbix"), cblc: table(b"CBLC"), cbdt: table(b"CBDT"), colr: table(b"COLR"), cpal: table(b"CPAL") };
-        let (gsub, gpos, gdef, morx) = (offset(b"GSUB"), offset(b"GPOS"), offset(b"GDEF"), table(b"morx").is_some());
-        Ok(Face { hmtx, name, outlines, metrics, num_glyphs, num_h_metrics, char_map, axes, avar, gvar, hvar, mvar, coords: Vec::new(), color, gsub, gpos, gdef, morx, prepared: Arc::default(), data })
+        let (avar, gvar, hvar, mvar) = (
+            offset(b"avar"),
+            offset(b"gvar"),
+            offset(b"HVAR"),
+            offset(b"MVAR"),
+        );
+        let axes = offset(b"fvar")
+            .and_then(|at| var::axes(b, at))
+            .unwrap_or_default();
+        let color = color::Tables {
+            sbix: table(b"sbix"),
+            cblc: table(b"CBLC"),
+            cbdt: table(b"CBDT"),
+            colr: table(b"COLR"),
+            cpal: table(b"CPAL"),
+        };
+        let (gsub, gpos, gdef, morx) = (
+            offset(b"GSUB"),
+            offset(b"GPOS"),
+            offset(b"GDEF"),
+            table(b"morx").is_some(),
+        );
+        Ok(Face {
+            hmtx,
+            name,
+            outlines,
+            metrics,
+            num_glyphs,
+            num_h_metrics,
+            char_map,
+            axes,
+            avar,
+            gvar,
+            hvar,
+            mvar,
+            coords: Vec::new(),
+            color,
+            gsub,
+            gpos,
+            gdef,
+            morx,
+            prepared: Arc::default(),
+            data,
+        })
     }
 
     pub(crate) fn bytes(&self) -> Bytes<'_> {
@@ -234,7 +295,10 @@ impl Face {
         self.gsub
     }
 
-    pub(crate) fn prepared(&self, build: impl FnOnce() -> crate::shape::Prepared) -> &crate::shape::Prepared {
+    pub(crate) fn prepared(
+        &self,
+        build: impl FnOnce() -> crate::shape::Prepared,
+    ) -> &crate::shape::Prepared {
         self.prepared.get_or_init(build)
     }
 
@@ -269,8 +333,16 @@ impl Face {
             let delta = |tag: &[u8; 4]| -> Option<f32> {
                 let (size, count) = (b.u16(mvar + 6)? as usize, b.u16(mvar + 8)? as usize);
                 let store = mvar + b.u16(mvar + 10)? as usize;
-                let record = (0..count).map(|i| mvar + 12 + i * size).find(|&r| b.slice(r, 4).is_some_and(|t| t.0 == tag))?;
-                var::item_delta(b, store, &self.coords, b.u16(record + 4)?, b.u16(record + 6)?)
+                let record = (0..count)
+                    .map(|i| mvar + 12 + i * size)
+                    .find(|&r| b.slice(r, 4).is_some_and(|t| t.0 == tag))?;
+                var::item_delta(
+                    b,
+                    store,
+                    &self.coords,
+                    b.u16(record + 4)?,
+                    b.u16(record + 6)?,
+                )
             };
             let apply = |v: i16, tag| (v as f32 + delta(tag).unwrap_or(0.0)).round() as i16;
             m.ascender = apply(m.ascender, b"hasc");
@@ -311,13 +383,21 @@ impl Face {
                 let (mut lo, mut hi) = (0, segments);
                 while lo < hi {
                     let mid = (lo + hi) / 2;
-                    if b.u16(ends + 2 * mid)? < c { lo = mid + 1 } else { hi = mid }
+                    if b.u16(ends + 2 * mid)? < c {
+                        lo = mid + 1
+                    } else {
+                        hi = mid
+                    }
                 }
                 let i = lo;
                 if i == segments || b.u16(starts + 2 * i)? > c {
                     return None;
                 }
-                let (start, delta, range) = (b.u16(starts + 2 * i)?, b.u16(deltas + 2 * i)?, b.u16(ranges + 2 * i)?);
+                let (start, delta, range) = (
+                    b.u16(starts + 2 * i)?,
+                    b.u16(deltas + 2 * i)?,
+                    b.u16(ranges + 2 * i)?,
+                );
                 if range == 0 {
                     c.wrapping_add(delta)
                 } else {
@@ -334,7 +414,11 @@ impl Face {
                 while lo < hi {
                     let mid = (lo + hi) / 2;
                     let group = at + 16 + 12 * mid;
-                    if b.u32(group + 4)? < c { lo = mid + 1 } else { hi = mid }
+                    if b.u32(group + 4)? < c {
+                        lo = mid + 1
+                    } else {
+                        hi = mid
+                    }
                 }
                 let group = at + 16 + 12 * lo;
                 if lo == groups || b.u32(group)? > c {
@@ -378,10 +462,16 @@ impl Face {
     /// The points a TrueType glyph's variations count, phantom points aside:
     /// a simple glyph's points, or a composite's components.
     fn point_count(&self, glyph: u16) -> Option<usize> {
-        let Some(g) = self.glyph_data(glyph).ok()? else { return Some(0) };
+        let Some(g) = self.glyph_data(glyph).ok()? else {
+            return Some(0);
+        };
         let contours = g.i16(0)?;
         if contours >= 0 {
-            return Some(if contours == 0 { 0 } else { g.u16(10 + 2 * (contours as usize - 1))? as usize + 1 });
+            return Some(if contours == 0 {
+                0
+            } else {
+                g.u16(10 + 2 * (contours as usize - 1))? as usize + 1
+            });
         }
         Some(components(g)?.len())
     }
@@ -405,9 +495,16 @@ impl Face {
             let raw = b.slice(strings + offset, len)?.0;
             match platform {
                 // UTF-16BE.
-                0 | 3 => String::from_utf16(&raw.chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect::<Vec<_>>()).ok(),
+                0 | 3 => String::from_utf16(
+                    &raw.chunks_exact(2)
+                        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                        .collect::<Vec<_>>(),
+                )
+                .ok(),
                 // Mac Roman, where it's ASCII.
-                1 => raw.is_ascii().then(|| String::from_utf8_lossy(raw).into_owned()),
+                1 => raw
+                    .is_ascii()
+                    .then(|| String::from_utf8_lossy(raw).into_owned()),
                 _ => None,
             }
         })
@@ -434,7 +531,14 @@ impl Face {
 
     /// Where `glyph`'s data is in `glyf`; `None` for an empty glyph.
     fn glyph_data(&self, glyph: u16) -> Result<Option<Bytes<'_>>, Error> {
-        let Outlines::Glyf { glyf, loca, long_loca } = self.outlines else { return Ok(None) };
+        let Outlines::Glyf {
+            glyf,
+            loca,
+            long_loca,
+        } = self.outlines
+        else {
+            return Ok(None);
+        };
         if glyph >= self.num_glyphs {
             return Err(Error::Damaged("glyph index past the end"));
         }
@@ -442,9 +546,15 @@ impl Face {
         let i = glyph as usize;
         let damaged = Error::Damaged("loca");
         let (start, end) = if long_loca {
-            (b.u32(loca.0 + 4 * i).ok_or(damaged.clone())? as usize, b.u32(loca.0 + 4 * i + 4).ok_or(damaged)? as usize)
+            (
+                b.u32(loca.0 + 4 * i).ok_or(damaged.clone())? as usize,
+                b.u32(loca.0 + 4 * i + 4).ok_or(damaged)? as usize,
+            )
         } else {
-            (2 * b.u16(loca.0 + 2 * i).ok_or(damaged.clone())? as usize, 2 * b.u16(loca.0 + 2 * i + 2).ok_or(damaged)? as usize)
+            (
+                2 * b.u16(loca.0 + 2 * i).ok_or(damaged.clone())? as usize,
+                2 * b.u16(loca.0 + 2 * i + 2).ok_or(damaged)? as usize,
+            )
         };
         if start == end {
             return Ok(None);
@@ -452,20 +562,40 @@ impl Face {
         if start > end || end > glyf.1 {
             return Err(Error::Damaged("loca points outside glyf"));
         }
-        Ok(Some(b.slice(glyf.0 + start, end - start).ok_or(Error::Damaged("glyf"))?))
+        Ok(Some(
+            b.slice(glyf.0 + start, end - start)
+                .ok_or(Error::Damaged("glyf"))?,
+        ))
     }
 
     /// `budget` is how many more components the whole glyph may use.
-    fn add_outline(&self, glyph: u16, transform: Transform, depth: u32, budget: &mut u32, out: &mut Vec<Segment>) -> Result<(), Error> {
-        let Some(g) = self.glyph_data(glyph)? else { return Ok(()) };
+    fn add_outline(
+        &self,
+        glyph: u16,
+        transform: Transform,
+        depth: u32,
+        budget: &mut u32,
+        out: &mut Vec<Segment>,
+    ) -> Result<(), Error> {
+        let Some(g) = self.glyph_data(glyph)? else {
+            return Ok(());
+        };
         let contours = g.i16(0).ok_or(Error::Damaged("glyph header"))?;
         let variations = self.gvar.filter(|_| !self.coords.is_empty());
         if contours >= 0 {
-            let mut simple = SimpleGlyph::parse(g, contours as usize).ok_or(Error::Damaged("simple glyph"))?;
+            let mut simple =
+                SimpleGlyph::parse(g, contours as usize).ok_or(Error::Damaged("simple glyph"))?;
             if let Some(gvar) = variations {
                 let n = simple.points.len();
-                let deltas = var::glyph_deltas(self.bytes(), gvar, &self.coords, glyph, n + 4, Some((&simple.points, &simple.ends)))
-                    .ok_or(Error::Damaged("gvar"))?;
+                let deltas = var::glyph_deltas(
+                    self.bytes(),
+                    gvar,
+                    &self.coords,
+                    glyph,
+                    n + 4,
+                    Some((&simple.points, &simple.ends)),
+                )
+                .ok_or(Error::Damaged("gvar"))?;
                 for (p, d) in simple.points.iter_mut().zip(deltas) {
                     p.x += d.x;
                     p.y += d.y;
@@ -482,7 +612,15 @@ impl Face {
         }
         let components = components(g).ok_or(Error::Damaged("composite glyph"))?;
         let deltas = match variations {
-            Some(gvar) => var::glyph_deltas(self.bytes(), gvar, &self.coords, glyph, components.len() + 4, None).ok_or(Error::Damaged("gvar"))?,
+            Some(gvar) => var::glyph_deltas(
+                self.bytes(),
+                gvar,
+                &self.coords,
+                glyph,
+                components.len() + 4,
+                None,
+            )
+            .ok_or(Error::Damaged("gvar"))?,
             None => Vec::new(),
         };
         for (i, (component, mut inner)) in components.into_iter().enumerate() {
@@ -490,7 +628,9 @@ impl Face {
                 inner.dx += d.x;
                 inner.dy += d.y;
             }
-            *budget = budget.checked_sub(1).ok_or(Error::Damaged("composite glyph has too many components"))?;
+            *budget = budget
+                .checked_sub(1)
+                .ok_or(Error::Damaged("composite glyph has too many components"))?;
             self.add_outline(component, transform.then(inner), depth + 1, budget, out)?;
         }
         Ok(())
@@ -520,7 +660,11 @@ fn components(g: Bytes<'_>) -> Option<Vec<(u16, Transform)>> {
             (g.u8(at - 2)? as i8 as f32, g.u8(at - 1)? as i8 as f32)
         };
         // Anchoring by matching points (rare) is placed at the origin.
-        let (dx, dy) = if flags & ARGS_ARE_XY != 0 { (dx, dy) } else { (0.0, 0.0) };
+        let (dx, dy) = if flags & ARGS_ARE_XY != 0 {
+            (dx, dy)
+        } else {
+            (0.0, 0.0)
+        };
         let f2dot14 = |at: usize| g.i16(at).map(|v| v as f32 / 16384.0);
         let (a, b, c, d) = if flags & SCALE != 0 {
             at += 2;
@@ -531,7 +675,12 @@ fn components(g: Bytes<'_>) -> Option<Vec<(u16, Transform)>> {
             (f2dot14(at - 4)?, 0.0, 0.0, f2dot14(at - 2)?)
         } else if flags & TWO_BY_TWO != 0 {
             at += 8;
-            (f2dot14(at - 8)?, f2dot14(at - 6)?, f2dot14(at - 4)?, f2dot14(at - 2)?)
+            (
+                f2dot14(at - 8)?,
+                f2dot14(at - 6)?,
+                f2dot14(at - 4)?,
+                f2dot14(at - 2)?,
+            )
         } else {
             (1.0, 0.0, 0.0, 1.0)
         };
@@ -555,10 +704,20 @@ struct Transform {
 }
 
 impl Transform {
-    const IDENTITY: Transform = Transform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, dx: 0.0, dy: 0.0 };
+    const IDENTITY: Transform = Transform {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+    };
 
     fn apply(self, p: Point) -> Point {
-        Point { x: self.a * p.x + self.c * p.y + self.dx, y: self.b * p.x + self.d * p.y + self.dy }
+        Point {
+            x: self.a * p.x + self.c * p.y + self.dx,
+            y: self.b * p.x + self.d * p.y + self.dy,
+        }
     }
 
     /// `inner` applied first, then `self`.
@@ -592,9 +751,15 @@ impl SimpleGlyph {
         const X_SAME_OR_POSITIVE: u8 = 0x10;
         const Y_SAME_OR_POSITIVE: u8 = 0x20;
         if contours == 0 {
-            return Some(SimpleGlyph { points: Vec::new(), on_curve: Vec::new(), ends: Vec::new() });
+            return Some(SimpleGlyph {
+                points: Vec::new(),
+                on_curve: Vec::new(),
+                ends: Vec::new(),
+            });
         }
-        let ends: Vec<usize> = (0..contours).map(|i| g.u16(10 + 2 * i).map(usize::from)).collect::<Option<_>>()?;
+        let ends: Vec<usize> = (0..contours)
+            .map(|i| g.u16(10 + 2 * i).map(usize::from))
+            .collect::<Option<_>>()?;
         // Ends must rise; the last is the point count.
         if ends.windows(2).any(|w| w[1] <= w[0]) {
             return None;
@@ -621,7 +786,11 @@ impl SimpleGlyph {
                 if flag & short != 0 {
                     let delta = g.u8(at)? as i32;
                     at += 1;
-                    value += if flag & same_or_positive != 0 { delta } else { -delta };
+                    value += if flag & same_or_positive != 0 {
+                        delta
+                    } else {
+                        -delta
+                    };
                 } else if flag & same_or_positive == 0 {
                     value += g.i16(at)? as i32;
                     at += 2;
@@ -633,19 +802,28 @@ impl SimpleGlyph {
         let xs = coordinates(X_SHORT, X_SAME_OR_POSITIVE)?;
         let ys = coordinates(Y_SHORT, Y_SAME_OR_POSITIVE)?;
         Some(SimpleGlyph {
-            points: xs.into_iter().zip(ys).map(|(x, y)| Point { x, y }).collect(),
+            points: xs
+                .into_iter()
+                .zip(ys)
+                .map(|(x, y)| Point { x, y })
+                .collect(),
             on_curve: flags.iter().map(|f| f & ON_CURVE != 0).collect(),
             ends,
         })
     }
 
     fn emit(&self, transform: Transform, out: &mut Vec<Segment>) {
-        let mid = |p: Point, q: Point| Point { x: (p.x + q.x) / 2.0, y: (p.y + q.y) / 2.0 };
+        let mid = |p: Point, q: Point| Point {
+            x: (p.x + q.x) / 2.0,
+            y: (p.y + q.y) / 2.0,
+        };
         let mut first = 0;
         for &last in &self.ends {
             let range = first..=last;
             first = last + 1;
-            let contour: Vec<(Point, bool)> = range.map(|i| (transform.apply(self.points[i]), self.on_curve[i])).collect();
+            let contour: Vec<(Point, bool)> = range
+                .map(|i| (transform.apply(self.points[i]), self.on_curve[i]))
+                .collect();
             if contour.is_empty() {
                 continue;
             }

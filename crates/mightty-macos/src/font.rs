@@ -100,7 +100,15 @@ impl Font {
     /// `name` alone, with ligatures. `size` is in pixels (points × backing scale).
     #[cfg(test)]
     pub fn new(name: &str, size: f64, backend: FontBackend) -> Self {
-        Self::with(&Fonts { families: vec![name.into()], ..Fonts::default() }, size, backend, true)
+        Self::with(
+            &Fonts {
+                families: vec![name.into()],
+                ..Fonts::default()
+            },
+            size,
+            backend,
+            true,
+        )
     }
 
     /// The fonts `fonts` describes, at `size` pixels.
@@ -133,7 +141,13 @@ impl Font {
                 let font = match &fonts.styled[style - 1] {
                     Some(name) => open_font(name, size),
                     None => {
-                        let font = CTFontCreateCopyWithSymbolicTraits(base, 0.0, ptr::null(), traits, traits);
+                        let font = CTFontCreateCopyWithSymbolicTraits(
+                            base,
+                            0.0,
+                            ptr::null(),
+                            traits,
+                            traits,
+                        );
                         if font.is_null() { CFRetain(base) } else { font }
                     }
                 };
@@ -144,17 +158,33 @@ impl Font {
             let italic = variant(2, kCTFontTraitItalic);
             let bold_italic = variant(3, kCTFontTraitBold | kCTFontTraitItalic);
             CFRelease(base);
-            let chain = fonts.families.iter().skip(1).map(|name| with_settings(open_font(name, size), &[], &features)).collect();
+            let chain = fonts
+                .families
+                .iter()
+                .skip(1)
+                .map(|name| with_settings(open_font(name, size), &[], &features))
+                .collect();
 
             let mut variants = [regular, bold, italic, bold_italic];
             let mut synthetic = [0; 4];
             for (i, font) in variants.iter_mut().enumerate() {
                 let traits = CTFontGetSymbolicTraits(*font);
-                let has = Style::new(traits & kCTFontTraitBold != 0, traits & kCTFontTraitItalic != 0).0;
+                let has = Style::new(
+                    traits & kCTFontTraitBold != 0,
+                    traits & kCTFontTraitItalic != 0,
+                )
+                .0;
                 synthetic[i] = i as u8 & !has;
                 // Italic is the regular slanted; bold is drawn stroked.
                 if synthetic[i] & Style::ITALIC != 0 {
-                    let slant = CGAffineTransform { a: 1.0, b: 0.0, c: OBLIQUE as f64, d: 1.0, tx: 0.0, ty: 0.0 };
+                    let slant = CGAffineTransform {
+                        a: 1.0,
+                        b: 0.0,
+                        c: OBLIQUE as f64,
+                        d: 1.0,
+                        tx: 0.0,
+                        ty: 0.0,
+                    };
                     let slanted = CTFontCreateCopyWithAttributes(*font, 0.0, &slant, ptr::null());
                     if !slanted.is_null() {
                         CFRelease(*font);
@@ -173,15 +203,27 @@ impl Font {
                 Some(face) => {
                     let m = face.metrics();
                     let scale = size / m.units_per_em as f64;
-                    let m_advance = face.glyph('M').map_or(size / 2.0, |g| face.advance(g) as f64 * scale);
-                    (m.ascender as f64 * scale, -m.descender as f64 * scale, m.line_gap as f64 * scale, m_advance)
+                    let m_advance = face
+                        .glyph('M')
+                        .map_or(size / 2.0, |g| face.advance(g) as f64 * scale);
+                    (
+                        m.ascender as f64 * scale,
+                        -m.descender as f64 * scale,
+                        m.line_gap as f64 * scale,
+                        m_advance,
+                    )
                 }
                 None => {
                     let mut glyph = 0u16;
                     let mut advance = CGSize::default();
                     CTFontGetGlyphsForCharacters(regular, &(b'M' as u16), &mut glyph, 1);
                     CTFontGetAdvancesForGlyphs(regular, 0, &glyph, &mut advance, 1);
-                    (CTFontGetAscent(regular), CTFontGetDescent(regular), CTFontGetLeading(regular), advance.width)
+                    (
+                        CTFontGetAscent(regular),
+                        CTFontGetDescent(regular),
+                        CTFontGetLeading(regular),
+                        advance.width,
+                    )
                 }
             };
 
@@ -235,18 +277,31 @@ impl Font {
         // created here are released before returning.
         unsafe {
             let mut fallback: CTFontRef = ptr::null();
-            let has = |font: CTFontRef, glyphs: &mut [u16; 2]| CTFontGetGlyphsForCharacters(font, units.as_ptr(), glyphs.as_mut_ptr(), n) && glyphs[0] != 0;
+            let has = |font: CTFontRef, glyphs: &mut [u16; 2]| {
+                CTFontGetGlyphsForCharacters(font, units.as_ptr(), glyphs.as_mut_ptr(), n)
+                    && glyphs[0] != 0
+            };
             if !has(base, &mut glyphs) {
                 if let Some(&font) = self.chain.iter().find(|&&font| has(font, &mut glyphs)) {
                     // The next `font-family` that has it.
                     fallback = CFRetain(font);
-                } else if is_private_use(c) && !self.symbols.is_null() && has(self.symbols, &mut glyphs) {
+                } else if is_private_use(c)
+                    && !self.symbols.is_null()
+                    && has(self.symbols, &mut glyphs)
+                {
                     fallback = CFRetain(self.symbols);
                 } else {
                     // Let CoreText pick a font that covers the character (CJK, emoji, symbols).
                     let mut buf = [0u8; 4];
                     let s = cfstring(c.encode_utf8(&mut buf));
-                    fallback = CTFontCreateForString(base, s, CFRange { location: 0, length: n });
+                    fallback = CTFontCreateForString(
+                        base,
+                        s,
+                        CFRange {
+                            location: 0,
+                            length: n,
+                        },
+                    );
                     CFRelease(s);
                     if fallback.is_null() || !has(fallback, &mut glyphs) {
                         if !fallback.is_null() {
@@ -263,7 +318,9 @@ impl Font {
             let font = if fallback.is_null() { base } else { fallback };
             // Ours draws what CoreText picked, if it can read it.
             if !fallback.is_null() && self.backend == FontBackend::Mightty {
-                let raster = self.fallback_face(fallback, |face| self.draw_own(face, glyphs[0], style, cells));
+                let raster = self.fallback_face(fallback, |face| {
+                    self.draw_own(face, glyphs[0], style, cells)
+                });
                 if let Some(raster) = raster {
                     CFRelease(fallback);
                     return Some(raster);
@@ -294,7 +351,10 @@ impl Font {
         // SAFETY: CoreFoundation/CoreText calls with valid arguments; every
         // object created here is released before returning.
         unsafe {
-            let keys = [kCTFontAttributeName, kCTForegroundColorFromContextAttributeName];
+            let keys = [
+                kCTFontAttributeName,
+                kCTForegroundColorFromContextAttributeName,
+            ];
             let values = [self.variants[style.0 as usize], kCFBooleanTrue];
             let attributes = CFDictionaryCreate(
                 ptr::null(),
@@ -316,11 +376,16 @@ impl Font {
             if line.is_null() {
                 return None;
             }
-            let width = CTLineGetTypographicBounds(line, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            let width =
+                CTLineGetTypographicBounds(line, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             // Too wide for its cells (an emoji the shell counts as one cell
             // wide): shrunk about the cell's middle, rather than cut off.
             let room = (self.cell_width * cells) as f64;
-            let scale = if width > room * 1.05 { room / width } else { 1.0 };
+            let scale = if width > room * 1.05 {
+                room / width
+            } else {
+                1.0
+            };
             let middle = self.cell_height as f64 / 2.0;
             let raster = self.draw(cells, width * scale, style, |ctx, origin| {
                 if scale < 1.0 {
@@ -334,7 +399,13 @@ impl Font {
             });
             CFRelease(line);
             // Masks are drawn in white, so any tint means colour glyphs (emoji).
-            raster.map(|r| RasterGlyph { color: r.pixels.chunks_exact(4).any(|p| p[0] != p[1] || p[1] != p[2]), ..r })
+            raster.map(|r| RasterGlyph {
+                color: r
+                    .pixels
+                    .chunks_exact(4)
+                    .any(|p| p[0] != p[1] || p[1] != p[2]),
+                ..r
+            })
         }
     }
 
@@ -344,7 +415,10 @@ impl Font {
         let own = self.own[style.0 as usize].as_ref();
         let (shaped, nominal): (Vec<(u16, usize)>, Vec<u16>) = match own {
             Some(face) => (
-                face.shape(text, &self.shaping).iter().map(|s| (s.glyph, s.cluster as usize)).collect(),
+                face.shape(text, &self.shaping)
+                    .iter()
+                    .map(|s| (s.glyph, s.cluster as usize))
+                    .collect(),
                 text.iter().map(|&c| face.glyph(c).unwrap_or(0)).collect(),
             ),
             // SAFETY: a live CTFont of ours.
@@ -357,10 +431,13 @@ impl Font {
             }
         }
         // Characters the font lacks (glyph 0) are left to fallback fonts.
-        let changed: Vec<bool> = (0..text.len()).map(|i| nominal[i] != 0 && !per_char[i].contains(&0) && per_char[i] != [nominal[i]]).collect();
+        let changed: Vec<bool> = (0..text.len())
+            .map(|i| nominal[i] != 0 && !per_char[i].contains(&0) && per_char[i] != [nominal[i]])
+            .collect();
         // Runs of changed glyphs can be long (`====…` in Fira Code), and
         // each is one tile: cut them so a tile fits the glyph atlas.
-        let longest = (MAX_TILE_WIDTH / self.cell_width.max(1)).clamp(1, MAX_LIGATURE_CELLS) as usize;
+        let longest =
+            (MAX_TILE_WIDTH / self.cell_width.max(1)).clamp(1, MAX_LIGATURE_CELLS) as usize;
         let mut out = Vec::new();
         let mut i = 0;
         while i < text.len() {
@@ -372,8 +449,14 @@ impl Font {
             while i < text.len() && changed[i] && i - start < longest {
                 i += 1;
             }
-            let glyphs = (start..i).flat_map(|c| per_char[c].iter().map(move |&g| (g, (c - start) as u16))).collect();
-            out.push(Ligature { start, cells: i - start, glyphs });
+            let glyphs = (start..i)
+                .flat_map(|c| per_char[c].iter().map(move |&g| (g, (c - start) as u16)))
+                .collect();
+            out.push(Ligature {
+                start,
+                cells: i - start,
+                glyphs,
+            });
         }
         out
     }
@@ -381,7 +464,11 @@ impl Font {
     /// `text` shaped by CoreText in `font`: each glyph and the character
     /// it starts at. Glyphs of fallback fonts come back as glyph 0, and the
     /// glyphs CoreText would draw for each character alone as well.
-    unsafe fn shape_coretext(&self, text: &[char], font: CTFontRef) -> (Vec<(u16, usize)>, Vec<u16>) {
+    unsafe fn shape_coretext(
+        &self,
+        text: &[char],
+        font: CTFontRef,
+    ) -> (Vec<(u16, usize)>, Vec<u16>) {
         let string: String = text.iter().collect();
         // UTF-16 offsets to character indices.
         let mut char_at = Vec::new();
@@ -398,7 +485,12 @@ impl Font {
                 let mut units = [0u16; 2];
                 let units = c.encode_utf16(&mut units);
                 let mut glyphs = [0u16; 2];
-                let found = CTFontGetGlyphsForCharacters(font, units.as_ptr(), glyphs.as_mut_ptr(), units.len() as isize);
+                let found = CTFontGetGlyphsForCharacters(
+                    font,
+                    units.as_ptr(),
+                    glyphs.as_mut_ptr(),
+                    units.len() as isize,
+                );
                 nominal.push(if found { glyphs[0] } else { 0 });
             }
             let keys = [kCTFontAttributeName];
@@ -429,8 +521,22 @@ impl Font {
                 let n = CTRunGetGlyphCount(run).max(0);
                 let mut glyphs = vec![0u16; n as usize];
                 let mut indices = vec![0isize; n as usize];
-                CTRunGetGlyphs(run, CFRange { location: 0, length: n }, glyphs.as_mut_ptr());
-                CTRunGetStringIndices(run, CFRange { location: 0, length: n }, indices.as_mut_ptr());
+                CTRunGetGlyphs(
+                    run,
+                    CFRange {
+                        location: 0,
+                        length: n,
+                    },
+                    glyphs.as_mut_ptr(),
+                );
+                CTRunGetStringIndices(
+                    run,
+                    CFRange {
+                        location: 0,
+                        length: n,
+                    },
+                    indices.as_mut_ptr(),
+                );
                 let run_font = CFDictionaryGetValue(CTRunGetAttributes(run), kCTFontAttributeName);
                 let ours = !run_font.is_null() && CFEqual(run_font, font);
                 for (g, i) in glyphs.into_iter().zip(indices) {
@@ -446,7 +552,12 @@ impl Font {
 
     /// A ligature's glyphs drawn together into a tile `cells` wide, each
     /// placed in its cell as `rasterize` places a lone glyph.
-    pub fn rasterize_ligature(&self, glyphs: &[(u16, u16)], style: Style, cells: u32) -> Option<RasterGlyph> {
+    pub fn rasterize_ligature(
+        &self,
+        glyphs: &[(u16, u16)],
+        style: Style,
+        cells: u32,
+    ) -> Option<RasterGlyph> {
         let (cw, width) = (self.cell_width as f32, self.cell_width * cells);
         if let Some(face) = &self.own[style.0 as usize] {
             // One outline, so pieces meeting at a cell edge join without a seam.
@@ -455,7 +566,8 @@ impl Font {
             let synthetic = self.synthetic[style.0 as usize];
             let mut outline = Vec::new();
             for &(glyph, cell) in glyphs {
-                let x = cell as f32 * cw + ((cw - face.advance(glyph) * scale) / 2.0).max(0.0).round();
+                let x =
+                    cell as f32 * cw + ((cw - face.advance(glyph) * scale) / 2.0).max(0.0).round();
                 let mut part = face.outline(glyph).ok()?;
                 if synthetic & Style::ITALIC != 0 {
                     mightty_font::oblique(&mut part, OBLIQUE);
@@ -466,24 +578,53 @@ impl Font {
                 mightty_font::translate(&mut part, x / scale, 0.0);
                 outline.extend(part);
             }
-            let coverage = mightty_font::rasterize(&outline, scale, 0.0, self.baseline as f32, width as usize, self.cell_height as usize);
+            let coverage = mightty_font::rasterize(
+                &outline,
+                scale,
+                0.0,
+                self.baseline as f32,
+                width as usize,
+                self.cell_height as usize,
+            );
             let pixels = coverage.iter().flat_map(|&c| [c; 4]).collect();
-            return Some(RasterGlyph { pixels, width, height: self.cell_height, color: false });
+            return Some(RasterGlyph {
+                pixels,
+                width,
+                height: self.cell_height,
+                color: false,
+            });
         }
         let font = self.variants[style.0 as usize];
         let ids: Vec<u16> = glyphs.iter().map(|g| g.0).collect();
         let mut advances = vec![CGSize::default(); ids.len()];
         // SAFETY: buffers sized for the glyphs; the font is ours.
-        unsafe { CTFontGetAdvancesForGlyphs(font, 0, ids.as_ptr(), advances.as_mut_ptr(), ids.len() as isize) };
+        unsafe {
+            CTFontGetAdvancesForGlyphs(
+                font,
+                0,
+                ids.as_ptr(),
+                advances.as_mut_ptr(),
+                ids.len() as isize,
+            )
+        };
         let positions: Vec<CGPoint> = glyphs
             .iter()
             .zip(&advances)
-            .map(|(&(_, cell), a)| CGPoint { x: cell as f64 * cw as f64 + ((cw as f64 - a.width) / 2.0).max(0.0).round(), y: 0.0 })
+            .map(|(&(_, cell), a)| CGPoint {
+                x: cell as f64 * cw as f64 + ((cw as f64 - a.width) / 2.0).max(0.0).round(),
+                y: 0.0,
+            })
             .collect();
         // SAFETY: as `rasterize`; positions are relative to the tile's origin.
         unsafe {
             self.draw(cells, width as f64, style, |ctx, origin| {
-                let placed: Vec<CGPoint> = positions.iter().map(|p| CGPoint { x: origin.x + p.x, y: origin.y }).collect();
+                let placed: Vec<CGPoint> = positions
+                    .iter()
+                    .map(|p| CGPoint {
+                        x: origin.x + p.x,
+                        y: origin.y,
+                    })
+                    .collect();
                 CTFontDrawGlyphs(font, ids.as_ptr(), placed.as_ptr(), ids.len(), ctx);
             })
         }
@@ -503,7 +644,11 @@ impl Font {
             // Joiners and variation selectors a font doesn't map only steer
             // substitution; any other character it lacks is another font's.
             let invisible = |c: char| matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}');
-            let shaped: Vec<_> = face.shape(&chars, &self.shaping).into_iter().filter(|s| s.glyph != 0 || !invisible(chars[s.cluster as usize])).collect();
+            let shaped: Vec<_> = face
+                .shape(&chars, &self.shaping)
+                .into_iter()
+                .filter(|s| s.glyph != 0 || !invisible(chars[s.cluster as usize]))
+                .collect();
             if shaped.is_empty() || shaped.iter().any(|s| s.glyph == 0) {
                 return None;
             }
@@ -514,15 +659,31 @@ impl Font {
             let x = ((width as f32 - advance * scale) / 2.0).max(0.0).round();
             let baseline = self.baseline as f32;
             if let [one] = placed[..]
-                && let Some(mut pixels) = mightty_font::draw_color(face, one.glyph, self.size as f32, x, baseline, width as usize, height as usize)
+                && let Some(mut pixels) = mightty_font::draw_color(
+                    face,
+                    one.glyph,
+                    self.size as f32,
+                    x,
+                    baseline,
+                    width as usize,
+                    height as usize,
+                )
             {
                 for p in pixels.chunks_exact_mut(4) {
                     p.swap(0, 2);
                 }
-                return Some(RasterGlyph { pixels, width, height, color: true });
+                return Some(RasterGlyph {
+                    pixels,
+                    width,
+                    height,
+                    color: true,
+                });
             }
             // Several colour glyphs: a sequence the font didn't join.
-            if placed.iter().any(|p| face.color_glyph(p.glyph, self.size as f32).is_some()) {
+            if placed
+                .iter()
+                .any(|p| face.color_glyph(p.glyph, self.size as f32).is_some())
+            {
                 return None;
             }
             let synthetic = self.synthetic[style.0 as usize];
@@ -538,13 +699,31 @@ impl Font {
                 mightty_font::translate(&mut part, p.x, p.y);
                 outline.extend(part);
             }
-            let coverage = mightty_font::rasterize(&outline, scale, x, baseline, width as usize, height as usize);
-            Some(RasterGlyph { pixels: coverage.iter().flat_map(|&c| [c; 4]).collect(), width, height, color: false })
+            let coverage = mightty_font::rasterize(
+                &outline,
+                scale,
+                x,
+                baseline,
+                width as usize,
+                height as usize,
+            );
+            Some(RasterGlyph {
+                pixels: coverage.iter().flat_map(|&c| [c; 4]).collect(),
+                width,
+                height,
+                color: false,
+            })
         };
         // VS16 asks for the emoji, which a text face's glyph isn't.
         if let Some(face) = &self.own[style.0 as usize]
-            && (!chars.contains(&'\u{FE0F}') || face.glyph(chars[0]).is_some_and(|g| face.color_glyph(g, self.size as f32).is_some()))
-            && chars.iter().all(|&c| face.glyph(c).is_some() || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}'))
+            && (!chars.contains(&'\u{FE0F}')
+                || face
+                    .glyph(chars[0])
+                    .is_some_and(|g| face.color_glyph(g, self.size as f32).is_some()))
+            && chars.iter().all(|&c| {
+                face.glyph(c).is_some()
+                    || matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}')
+            })
         {
             return draw(face);
         }
@@ -552,7 +731,14 @@ impl Font {
         unsafe {
             let cf = cfstring(text);
             let length = text.encode_utf16().count() as isize;
-            let fallback = CTFontCreateForString(self.variants[style.0 as usize], cf, CFRange { location: 0, length });
+            let fallback = CTFontCreateForString(
+                self.variants[style.0 as usize],
+                cf,
+                CFRange {
+                    location: 0,
+                    length,
+                },
+            );
             CFRelease(cf);
             if fallback.is_null() {
                 return None;
@@ -594,12 +780,25 @@ impl Font {
         let advance = face.advance(glyph) * scale;
         let x = ((width as f32 - advance) / 2.0).max(0.0).round();
         let baseline = self.baseline as f32;
-        if let Some(mut pixels) = mightty_font::draw_color(face, glyph, self.size as f32, x, baseline, width as usize, height as usize) {
+        if let Some(mut pixels) = mightty_font::draw_color(
+            face,
+            glyph,
+            self.size as f32,
+            x,
+            baseline,
+            width as usize,
+            height as usize,
+        ) {
             // RGBA to BGRA.
             for p in pixels.chunks_exact_mut(4) {
                 p.swap(0, 2);
             }
-            return Some(RasterGlyph { pixels, width, height, color: true });
+            return Some(RasterGlyph {
+                pixels,
+                width,
+                height,
+                color: true,
+            });
         }
         let mut outline = face.outline(glyph).ok()?;
         let synthetic = self.synthetic[style.0 as usize];
@@ -609,10 +808,22 @@ impl Font {
         if synthetic & Style::BOLD != 0 {
             mightty_font::embolden(&mut outline, EMBOLDEN * em);
         }
-        let coverage = mightty_font::rasterize(&outline, scale, x, baseline, width as usize, height as usize);
+        let coverage = mightty_font::rasterize(
+            &outline,
+            scale,
+            x,
+            baseline,
+            width as usize,
+            height as usize,
+        );
         // White, premultiplied: every channel is the coverage.
         let pixels = coverage.iter().flat_map(|&c| [c; 4]).collect();
-        Some(RasterGlyph { pixels, width, height, color: false })
+        Some(RasterGlyph {
+            pixels,
+            width,
+            height,
+            color: false,
+        })
     }
 
     /// A tile `cells` wide with `draw` called on it at the baseline origin
@@ -628,11 +839,18 @@ impl Font {
             let ink = CTFontGetBoundingRectsForGlyphs(self.symbols, 0, &glyph, ptr::null_mut(), 1);
             // A pixel clear each side, so anti-aliasing isn't cut off.
             let scale = if ink.size.width > 0.0 && ink.size.height > 0.0 {
-                ((width - 2.0) / ink.size.width).min((height - 2.0) / ink.size.height).min(1.0)
+                ((width - 2.0) / ink.size.width)
+                    .min((height - 2.0) / ink.size.height)
+                    .min(1.0)
             } else {
                 1.0
             };
-            let font = CTFontCreateCopyWithAttributes(self.symbols, self.size * scale, ptr::null(), ptr::null());
+            let font = CTFontCreateCopyWithAttributes(
+                self.symbols,
+                self.size * scale,
+                ptr::null(),
+                ptr::null(),
+            );
             if font.is_null() {
                 return None;
             }
@@ -640,13 +858,21 @@ impl Font {
                 x: ((width - ink.size.width * scale) / 2.0 - ink.origin.x * scale).round(),
                 y: ((height - ink.size.height * scale) / 2.0 - ink.origin.y * scale).round(),
             };
-            let raster = self.draw(cells, width, style, |ctx, _| CTFontDrawGlyphs(font, &glyph, &origin, 1, ctx));
+            let raster = self.draw(cells, width, style, |ctx, _| {
+                CTFontDrawGlyphs(font, &glyph, &origin, 1, ctx)
+            });
             CFRelease(font);
             raster
         }
     }
 
-    unsafe fn draw(&self, cells: u32, width: f64, style: Style, draw: impl FnOnce(CGContextRef, CGPoint)) -> Option<RasterGlyph> {
+    unsafe fn draw(
+        &self,
+        cells: u32,
+        width: f64,
+        style: Style,
+        draw: impl FnOnce(CGContextRef, CGPoint),
+    ) -> Option<RasterGlyph> {
         let (tile_width, height) = (self.cell_width * cells, self.cell_height);
         let mut pixels = vec![0u8; (tile_width * height * 4) as usize];
         // SAFETY: the context draws into `pixels`, sized for it, and is released here.
@@ -678,7 +904,12 @@ impl Font {
             draw(ctx, CGPoint { x, y });
             CGContextRelease(ctx);
         }
-        Some(RasterGlyph { pixels, width: tile_width, height, color: false })
+        Some(RasterGlyph {
+            pixels,
+            width: tile_width,
+            height,
+            color: false,
+        })
     }
 }
 
@@ -692,7 +923,9 @@ unsafe fn open_font(name: &str, size: f64) -> CTFontRef {
         let font = CTFontCreateWithName(cf, size, ptr::null());
         CFRelease(cf);
         let names = [CTFontCopyFamilyName(font), CTFontCopyPostScriptName(font)];
-        let found = names.iter().any(|&n| !n.is_null() && string_from_ns(n as Id).eq_ignore_ascii_case(name));
+        let found = names
+            .iter()
+            .any(|&n| !n.is_null() && string_from_ns(n as Id).eq_ignore_ascii_case(name));
         for n in names.into_iter().filter(|n| !n.is_null()) {
             CFRelease(n);
         }
@@ -720,7 +953,12 @@ fn symbols_font(size: f64) -> CTFontRef {
         // SAFETY: `SYMBOLS` is static, so the data can borrow it without
         // copying; both objects live for the rest of the process.
         unsafe {
-            let data = CFDataCreateWithBytesNoCopy(ptr::null(), SYMBOLS.as_ptr(), SYMBOLS.len() as isize, kCFAllocatorNull);
+            let data = CFDataCreateWithBytesNoCopy(
+                ptr::null(),
+                SYMBOLS.as_ptr(),
+                SYMBOLS.len() as isize,
+                kCFAllocatorNull,
+            );
             if data.is_null() {
                 return 0;
             }
@@ -735,7 +973,11 @@ fn symbols_font(size: f64) -> CTFontRef {
 }
 
 /// `font` (consumed) with `font-variation` axes and `font-feature`s set.
-unsafe fn with_settings(font: CTFontRef, variations: &[([u8; 4], f64)], features: &[([u8; 4], u32)]) -> CTFontRef {
+unsafe fn with_settings(
+    font: CTFontRef,
+    variations: &[([u8; 4], f64)],
+    features: &[([u8; 4], u32)],
+) -> CTFontRef {
     if variations.is_empty() && features.is_empty() {
         return font;
     }
@@ -753,12 +995,16 @@ unsafe fn with_settings(font: CTFontRef, variations: &[([u8; 4], f64)], features
             )
         };
         let int = |v: i64| CFNumberCreate(ptr::null(), kCFNumberSInt64Type, (&raw const v).cast());
-        let float = |v: f64| CFNumberCreate(ptr::null(), kCFNumberFloat64Type, (&raw const v).cast());
+        let float =
+            |v: f64| CFNumberCreate(ptr::null(), kCFNumberFloat64Type, (&raw const v).cast());
         let mut owned = Vec::new();
         let mut keys = Vec::new();
         let mut values = Vec::new();
         if !variations.is_empty() {
-            let tags: Vec<CFTypeRef> = variations.iter().map(|(t, _)| int(u32::from_be_bytes(*t) as i64)).collect();
+            let tags: Vec<CFTypeRef> = variations
+                .iter()
+                .map(|(t, _)| int(u32::from_be_bytes(*t) as i64))
+                .collect();
             let amounts: Vec<CFTypeRef> = variations.iter().map(|&(_, v)| float(v)).collect();
             let axes = dict(&tags, &amounts);
             owned.extend(tags.into_iter().chain(amounts));
@@ -770,13 +1016,24 @@ unsafe fn with_settings(font: CTFontRef, variations: &[([u8; 4], f64)], features
             let settings: Vec<CFTypeRef> = features
                 .iter()
                 .map(|&(tag, value)| {
-                    let (name, number) = (cfstring(std::str::from_utf8(&tag).unwrap_or("    ")), int(value as i64));
-                    let setting = dict(&[kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue], &[name, number]);
+                    let (name, number) = (
+                        cfstring(std::str::from_utf8(&tag).unwrap_or("    ")),
+                        int(value as i64),
+                    );
+                    let setting = dict(
+                        &[kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue],
+                        &[name, number],
+                    );
                     owned.extend([name, number]);
                     setting
                 })
                 .collect();
-            let array = CFArrayCreate(ptr::null(), settings.as_ptr(), settings.len() as isize, (&raw const kCFTypeArrayCallBacks).cast());
+            let array = CFArrayCreate(
+                ptr::null(),
+                settings.as_ptr(),
+                settings.len() as isize,
+                (&raw const kCFTypeArrayCallBacks).cast(),
+            );
             owned.extend(settings);
             keys.push(kCTFontFeatureSettingsAttribute);
             values.push(array);
@@ -825,14 +1082,28 @@ fn own_face(font: CTFontRef, files: &mut Vec<(String, FontData)>) -> Option<Face
             }
         };
         let faces = Face::count(&data);
-        let face = (0..faces).find_map(|i| Face::parse(data.clone(), i).ok().filter(|f| f.postscript_name().as_deref() == Some(name.as_str())));
-        let mut face = face.or_else(|| if faces == 1 { Face::parse(data.clone(), 0).ok() } else { None });
+        let face = (0..faces).find_map(|i| {
+            Face::parse(data.clone(), i)
+                .ok()
+                .filter(|f| f.postscript_name().as_deref() == Some(name.as_str()))
+        });
+        let mut face = face.or_else(|| {
+            if faces == 1 {
+                Face::parse(data.clone(), 0).ok()
+            } else {
+                None
+            }
+        });
         match &mut face {
-            None => eprintln!("mightty: font-backend=mightty can't read {name} ({path}); CoreText draws it"),
+            None => eprintln!(
+                "mightty: font-backend=mightty can't read {name} ({path}); CoreText draws it"
+            ),
             // CoreText names the axes it moved; none means the defaults,
             // whatever the PostScript name says.
             // SAFETY: a live CTFont.
-            Some(face) if !face.axes().is_empty() => face.set_variations(&unsafe { variation(font) }),
+            Some(face) if !face.axes().is_empty() => {
+                face.set_variations(&unsafe { variation(font) })
+            }
             Some(_) => {}
         }
         face
@@ -886,7 +1157,12 @@ impl Drop for Font {
 mod tests {
     use super::*;
 
-    const STYLES: [Style; 4] = [Style(0), Style(Style::BOLD), Style(Style::ITALIC), Style(Style::BOLD | Style::ITALIC)];
+    const STYLES: [Style; 4] = [
+        Style(0),
+        Style(Style::BOLD),
+        Style(Style::ITALIC),
+        Style(Style::BOLD | Style::ITALIC),
+    ];
 
     /// How far our glyphs may be from CoreText's, as shares of their ink:
     /// any one glyph, the average glyph, and all of them together.
@@ -899,12 +1175,22 @@ mod tests {
     /// Edges anti-aliased a little differently, no more: a misplaced or
     /// misread glyph differs by far more of its ink. Small glyphs (a
     /// colon's dots) are mostly edge, so one may differ more.
-    const CLOSE: Limits = Limits { worst: 0.10, mean: 0.02, total: 0.02 };
+    const CLOSE: Limits = Limits {
+        worst: 0.10,
+        mean: 0.02,
+        total: 0.02,
+    };
 
     /// Our rasterizer against CoreText on font `name` at `size`: the same
     /// cell, and glyphs within `limits` of each other. Skipped where the
     /// font isn't installed.
-    fn compare(name: &str, size: f64, styles: &[Style], chars: impl Iterator<Item = char> + Clone, limits: Limits) {
+    fn compare(
+        name: &str,
+        size: f64,
+        styles: &[Style],
+        chars: impl Iterator<Item = char> + Clone,
+        limits: Limits,
+    ) {
         let theirs = Font::new(name, size, FontBackend::CoreText);
         // SAFETY: a live CTFont; the copied name is released.
         let found = unsafe {
@@ -918,17 +1204,33 @@ mod tests {
             return;
         }
         let ours = Font::new(name, size, FontBackend::Mightty);
-        assert_eq!((ours.cell_width, ours.cell_height, ours.baseline), (theirs.cell_width, theirs.cell_height, theirs.baseline), "{name} {size}");
+        assert_eq!(
+            (ours.cell_width, ours.cell_height, ours.baseline),
+            (theirs.cell_width, theirs.cell_height, theirs.baseline),
+            "{name} {size}"
+        );
         let mut worst = (0.0f64, ' ', Style::default());
         let (mut sum, mut count, mut ink) = (0.0, 0, (0u64, 0u64));
         for &style in styles {
-            assert!(ours.own[style.0 as usize].is_some(), "{name} {style:?} is read by us");
+            assert!(
+                ours.own[style.0 as usize].is_some(),
+                "{name} {style:?} is read by us"
+            );
             for c in chars.clone() {
                 let a = theirs.rasterize(c, style, 1).unwrap();
                 let b = ours.rasterize(c, style, 1).unwrap();
                 let total: u64 = a.pixels.iter().step_by(4).map(|&p| p as u64).sum();
-                let diff: u64 = a.pixels.iter().zip(&b.pixels).step_by(4).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
-                ink = (ink.0 + total, ink.1 + b.pixels.iter().step_by(4).map(|&p| p as u64).sum::<u64>());
+                let diff: u64 = a
+                    .pixels
+                    .iter()
+                    .zip(&b.pixels)
+                    .step_by(4)
+                    .map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64)
+                    .sum();
+                ink = (
+                    ink.0 + total,
+                    ink.1 + b.pixels.iter().step_by(4).map(|&p| p as u64).sum::<u64>(),
+                );
                 let relative = diff as f64 / total.max(1) as f64;
                 (sum, count) = (sum + relative, count + 1);
                 if relative > worst.0 {
@@ -938,9 +1240,23 @@ mod tests {
         }
         let mean = sum / count as f64;
         let total = ink.1 as f64 / ink.0 as f64 - 1.0;
-        assert!(worst.0 < limits.worst, "{name} {size}: {:?} {:?} differs by {:.1}% of its ink", worst.1, worst.2, worst.0 * 100.0);
-        assert!(mean < limits.mean, "{name} {size}: glyphs differ by {:.1}% of their ink on average", mean * 100.0);
-        assert!(total.abs() < limits.total, "{name} {size}: {:+.1}% ink in all", total * 100.0);
+        assert!(
+            worst.0 < limits.worst,
+            "{name} {size}: {:?} {:?} differs by {:.1}% of its ink",
+            worst.1,
+            worst.2,
+            worst.0 * 100.0
+        );
+        assert!(
+            mean < limits.mean,
+            "{name} {size}: glyphs differ by {:.1}% of their ink on average",
+            mean * 100.0
+        );
+        assert!(
+            total.abs() < limits.total,
+            "{name} {size}: {:+.1}% ink in all",
+            total * 100.0
+        );
     }
 
     fn ascii() -> impl Iterator<Item = char> + Clone {
@@ -950,7 +1266,13 @@ mod tests {
     #[test]
     fn matches_coretext() {
         for size in [24.0, 28.0, 33.0] {
-            compare("Menlo", size, &STYLES, ascii().chain(['é', 'ß', '─', '█', '→']), CLOSE);
+            compare(
+                "Menlo",
+                size,
+                &STYLES,
+                ascii().chain(['é', 'ß', '─', '█', '→']),
+                CLOSE,
+            );
         }
     }
 
@@ -958,8 +1280,20 @@ mod tests {
     #[test]
     fn matches_coretext_cff() {
         for size in [24.0, 33.0] {
-            compare("HiraginoSans-W3", size, &STYLES[..1], ascii().chain("あア字漢".chars()), CLOSE);
-            compare("KohinoorDevanagari-Regular", size, &STYLES[..1], ascii().chain("कख".chars()), CLOSE);
+            compare(
+                "HiraginoSans-W3",
+                size,
+                &STYLES[..1],
+                ascii().chain("あア字漢".chars()),
+                CLOSE,
+            );
+            compare(
+                "KohinoorDevanagari-Regular",
+                size,
+                &STYLES[..1],
+                ascii().chain("कख".chars()),
+                CLOSE,
+            );
         }
     }
 
@@ -973,7 +1307,17 @@ mod tests {
         for size in [24.0, 33.0] {
             compare("Monaco", size, &STYLES[..1], ascii(), CLOSE);
             compare("Monaco", size, &STYLES[2..3], ascii(), CLOSE);
-            compare("Monaco", size, &[STYLES[1], STYLES[3]], ascii(), Limits { worst: 0.2, mean: 0.08, ..CLOSE });
+            compare(
+                "Monaco",
+                size,
+                &[STYLES[1], STYLES[3]],
+                ascii(),
+                Limits {
+                    worst: 0.2,
+                    mean: 0.08,
+                    ..CLOSE
+                },
+            );
         }
     }
 
@@ -990,9 +1334,18 @@ mod tests {
                 let b = ours.rasterize(c, Style(0), 2).unwrap();
                 assert_eq!(a.color, b.color, "{c}");
                 let total: u64 = a.pixels.iter().map(|&p| p as u64).sum();
-                let diff: u64 = a.pixels.iter().zip(&b.pixels).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
+                let diff: u64 = a
+                    .pixels
+                    .iter()
+                    .zip(&b.pixels)
+                    .map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64)
+                    .sum();
                 let relative = diff as f64 / total as f64;
-                assert!(relative < 0.08, "{size} {c}: differs by {:.1}%", relative * 100.0);
+                assert!(
+                    relative < 0.08,
+                    "{size} {c}: differs by {:.1}%",
+                    relative * 100.0
+                );
             }
         }
     }
@@ -1011,8 +1364,16 @@ mod tests {
             let rows = (0..h).filter(|&y| (0..w).any(|x| inked(x, y))).count();
             // Shrunk to the cell's width, square as an emoji is; cut off,
             // it would be half as wide as it's tall.
-            assert!(columns.len() * 10 >= w * 8, "{text}: {} of {w} columns", columns.len());
-            assert!(rows * 10 <= columns.len() * 12, "{text}: {rows} rows, {} columns", columns.len());
+            assert!(
+                columns.len() * 10 >= w * 8,
+                "{text}: {} of {w} columns",
+                columns.len()
+            );
+            assert!(
+                rows * 10 <= columns.len() * 12,
+                "{text}: {rows} rows, {} columns",
+                columns.len()
+            );
         }
     }
 
@@ -1021,16 +1382,25 @@ mod tests {
         for backend in [FontBackend::CoreText, FontBackend::Mightty] {
             let font = Font::new("Menlo", 32.0, backend);
             for c in ['\u{F418}', '\u{F07B}', '\u{F179}', '\u{F0001}'] {
-                let raster = font.rasterize(c, Style(0), 1).unwrap_or_else(|| panic!("{:X}", c as u32));
+                let raster = font
+                    .rasterize(c, Style(0), 1)
+                    .unwrap_or_else(|| panic!("{:X}", c as u32));
                 let ink = raster.pixels.iter().filter(|&&p| p > 0).count();
                 assert!(ink > 50, "U+{:X}: {ink} pixels drawn", c as u32);
                 // Whole: no solid ink in the tile's edge columns, where it would be cut.
                 let (w, h) = (raster.width as usize, raster.height as usize);
-                let edge = (0..h).any(|y| raster.pixels[(y * w) * 4 + 3] > 128 || raster.pixels[(y * w + w - 1) * 4 + 3] > 128);
+                let edge = (0..h).any(|y| {
+                    raster.pixels[(y * w) * 4 + 3] > 128
+                        || raster.pixels[(y * w + w - 1) * 4 + 3] > 128
+                });
                 assert!(!edge, "U+{:X} touches the cell's edge", c as u32);
                 let wide = font.rasterize(c, Style(0), 2).unwrap();
                 let wide_ink = wide.pixels.iter().filter(|&&p| p > 0).count();
-                assert!(wide_ink > ink, "U+{:X}: two cells draw it no larger", c as u32);
+                assert!(
+                    wide_ink > ink,
+                    "U+{:X}: two cells draw it no larger",
+                    c as u32
+                );
             }
         }
     }
@@ -1057,7 +1427,11 @@ mod tests {
             let ligatures = font.ligatures(&run, Style(0));
             assert!(ligatures.len() > 1, "{size}: one tile for 200 cells");
             for lig in &ligatures {
-                assert!(lig.cells as u32 * font.cell_width <= MAX_TILE_WIDTH, "{size}: {} cells", lig.cells);
+                assert!(
+                    lig.cells as u32 * font.cell_width <= MAX_TILE_WIDTH,
+                    "{size}: {} cells",
+                    lig.cells
+                );
             }
         }
     }
@@ -1066,7 +1440,10 @@ mod tests {
     /// as by CoreText, and drawn alike. Skipped where the fonts aren't installed.
     #[test]
     fn ligatures_match_coretext() {
-        let texts = ["->", "a != b", "===", "<=>", "www", "/* x */", "|>", "::", "0x1F", "<!--", "a->b->c", "=>>", "fi", "plain"];
+        let texts = [
+            "->", "a != b", "===", "<=>", "www", "/* x */", "|>", "::", "0x1F", "<!--", "a->b->c",
+            "=>>", "fi", "plain",
+        ];
         for name in ["JetBrainsMono-Regular", "FiraCode-Regular"] {
             let theirs = Font::new(name, 28.0, FontBackend::CoreText);
             // SAFETY: a live CTFont; the copied name is released.
@@ -1084,25 +1461,55 @@ mod tests {
             for style in STYLES {
                 for text in texts {
                     let chars: Vec<char> = text.chars().collect();
-                    let (a, b) = (theirs.ligatures(&chars, style), ours.ligatures(&chars, style));
+                    let (a, b) = (
+                        theirs.ligatures(&chars, style),
+                        ours.ligatures(&chars, style),
+                    );
                     assert_eq!(a, b, "{name} {style:?} {text}");
                     for lig in &a {
-                        let (x, y) = (theirs.rasterize_ligature(&lig.glyphs, style, lig.cells as u32).unwrap(), ours.rasterize_ligature(&lig.glyphs, style, lig.cells as u32).unwrap());
+                        let (x, y) = (
+                            theirs
+                                .rasterize_ligature(&lig.glyphs, style, lig.cells as u32)
+                                .unwrap(),
+                            ours.rasterize_ligature(&lig.glyphs, style, lig.cells as u32)
+                                .unwrap(),
+                        );
                         let total: u64 = x.pixels.iter().step_by(4).map(|&p| p as u64).sum();
-                        let diff: u64 = x.pixels.iter().zip(&y.pixels).step_by(4).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
-                        let limit = if ours.synthetic[style.0 as usize] & Style::BOLD != 0 { 0.2 } else { CLOSE.worst };
-                        assert!((diff as f64) < total as f64 * limit, "{name} {style:?} {text}: differs by {:.1}%", diff as f64 / total as f64 * 100.0);
+                        let diff: u64 = x
+                            .pixels
+                            .iter()
+                            .zip(&y.pixels)
+                            .step_by(4)
+                            .map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64)
+                            .sum();
+                        let limit = if ours.synthetic[style.0 as usize] & Style::BOLD != 0 {
+                            0.2
+                        } else {
+                            CLOSE.worst
+                        };
+                        assert!(
+                            (diff as f64) < total as f64 * limit,
+                            "{name} {style:?} {text}: differs by {:.1}%",
+                            diff as f64 / total as f64 * 100.0
+                        );
                     }
                 }
             }
             // An arrow: two cells drawn as one.
             let arrow = ours.ligatures(&['-', '>'], Style::default());
             assert_eq!((arrow.len(), arrow[0].start, arrow[0].cells), (1, 0, 2));
-            assert!(ours.ligatures(&"plain".chars().collect::<Vec<_>>(), Style::default()).is_empty());
+            assert!(
+                ours.ligatures(&"plain".chars().collect::<Vec<_>>(), Style::default())
+                    .is_empty()
+            );
         }
         // A font without them: none.
         let menlo = Font::new("Menlo", 28.0, FontBackend::Mightty);
-        assert!(menlo.ligatures(&['-', '>', '!', '='], Style::default()).is_empty());
+        assert!(
+            menlo
+                .ligatures(&['-', '>', '!', '='], Style::default())
+                .is_empty()
+        );
     }
 
     /// Clusters (a letter and its accents) shaped and placed by us in
@@ -1111,21 +1518,50 @@ mod tests {
     /// Fonts composing with Apple's `morx` are left to CoreText.
     #[test]
     fn clusters_match_coretext() {
-        let texts = ["e\u{301}", "a\u{308}", "n\u{303}", "e\u{301}\u{302}", "A\u{30A}", "x\u{301}"];
+        let texts = [
+            "e\u{301}",
+            "a\u{308}",
+            "n\u{303}",
+            "e\u{301}\u{302}",
+            "A\u{30A}",
+            "x\u{301}",
+        ];
         for name in ["JetBrainsMono-Regular", "FiraCode-Regular", "Menlo"] {
             let theirs = Font::new(name, 28.0, FontBackend::CoreText);
             let ours = Font::new(name, 28.0, FontBackend::Mightty);
-            if ours.own[0].as_ref().and_then(|f| f.postscript_name()).as_deref() != Some(name) {
+            if ours.own[0]
+                .as_ref()
+                .and_then(|f| f.postscript_name())
+                .as_deref()
+                != Some(name)
+            {
                 eprintln!("{name} isn't installed; skipped");
                 continue;
             }
             let morx = ours.own[0].as_ref().is_some_and(|f| f.uses_morx());
             for text in texts {
-                assert_eq!(ours.draw_cluster_own(text, Style::default(), 1).is_some(), !morx, "{name} {text:?}");
-                let (a, b) = (theirs.rasterize_cluster(text, Style::default(), 1).unwrap(), ours.rasterize_cluster(text, Style::default(), 1).unwrap());
+                assert_eq!(
+                    ours.draw_cluster_own(text, Style::default(), 1).is_some(),
+                    !morx,
+                    "{name} {text:?}"
+                );
+                let (a, b) = (
+                    theirs.rasterize_cluster(text, Style::default(), 1).unwrap(),
+                    ours.rasterize_cluster(text, Style::default(), 1).unwrap(),
+                );
                 let total: u64 = a.pixels.iter().step_by(4).map(|&p| p as u64).sum();
-                let diff: u64 = a.pixels.iter().zip(&b.pixels).step_by(4).map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64).sum();
-                assert!((diff as f64) < total as f64 * 0.12, "{name} {text:?}: differs by {:.1}%", diff as f64 / total as f64 * 100.0);
+                let diff: u64 = a
+                    .pixels
+                    .iter()
+                    .zip(&b.pixels)
+                    .step_by(4)
+                    .map(|(&p, &q)| (p as i32 - q as i32).unsigned_abs() as u64)
+                    .sum();
+                assert!(
+                    (diff as f64) < total as f64 * 0.12,
+                    "{name} {text:?}: differs by {:.1}%",
+                    diff as f64 / total as f64 * 100.0
+                );
             }
         }
     }
@@ -1136,7 +1572,16 @@ mod tests {
     #[test]
     fn matches_coretext_variable() {
         for size in [24.0, 33.0] {
-            compare("Manrope", size, &STYLES, ascii(), Limits { worst: 0.12, ..CLOSE });
+            compare(
+                "Manrope",
+                size,
+                &STYLES,
+                ascii(),
+                Limits {
+                    worst: 0.12,
+                    ..CLOSE
+                },
+            );
         }
     }
 }

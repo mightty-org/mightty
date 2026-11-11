@@ -19,9 +19,20 @@ pub unsafe fn save_texture(texture: Id, path: &Path) -> bool {
         let mut pixels = vec![0u8; width * height * 4];
         let region = MTLRegion {
             origin: MTLOrigin { x: 0, y: 0, z: 0 },
-            size: MTLSize { width, height, depth: 1 },
+            size: MTLSize {
+                width,
+                height,
+                depth: 1,
+            },
         };
-        call!(texture, c"getBytes:bytesPerRow:fromRegion:mipmapLevel:", pixels.as_mut_ptr() as *mut c_void, width * 4, region, 0usize);
+        call!(
+            texture,
+            c"getBytes:bytesPerRow:fromRegion:mipmapLevel:",
+            pixels.as_mut_ptr() as *mut c_void,
+            width * 4,
+            region,
+            0usize
+        );
 
         let colorspace = CGColorSpaceCreateDeviceRGB();
         let ctx = CGBitmapContextCreate(
@@ -35,7 +46,12 @@ pub unsafe fn save_texture(texture: Id, path: &Path) -> bool {
         );
         let image = CGBitmapContextCreateImage(ctx);
         let bytes = path.as_os_str().as_bytes();
-        let url = CFURLCreateFromFileSystemRepresentation(ptr::null(), bytes.as_ptr(), bytes.len() as isize, false);
+        let url = CFURLCreateFromFileSystemRepresentation(
+            ptr::null(),
+            bytes.as_ptr(),
+            bytes.len() as isize,
+            false,
+        );
         let png = cfstring("public.png");
         let dest = CGImageDestinationCreateWithURL(url, png, 1, ptr::null());
         let ok = !dest.is_null() && {

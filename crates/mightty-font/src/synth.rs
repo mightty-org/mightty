@@ -51,7 +51,10 @@ pub fn embolden(outline: &mut [Segment], amount: f32) {
 
     let mut start = 0;
     while start < outline.len() {
-        let end = outline[start + 1..].iter().position(|s| matches!(s, Segment::MoveTo(_))).map_or(outline.len(), |i| start + 1 + i);
+        let end = outline[start + 1..]
+            .iter()
+            .position(|s| matches!(s, Segment::MoveTo(_)))
+            .map_or(outline.len(), |i| start + 1 + i);
         grow_contour(&mut outline[start..end], amount * outward);
         start = end;
     }
@@ -94,7 +97,10 @@ fn grow_contour(contour: &mut [Segment], amount: f32) {
             // 1 + cos of the turn: small at a hairpin, where the bisector
             // would shoot far out; limited there.
             let d = (1.0 + a.0 * b.0 + a.1 * b.1).max(0.25);
-            Point { x: p.x + sx * amount / d, y: p.y + sy * amount / d }
+            Point {
+                x: p.x + sx * amount / d,
+                y: p.y + sy * amount / d,
+            }
         })
         .collect();
     for (p, r) in contour.iter_mut().flat_map(points).zip(run_of) {
@@ -123,11 +129,21 @@ mod tests {
     }
 
     fn square(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Segment> {
-        vec![Segment::MoveTo(p(x0, y0)), Segment::LineTo(p(x1, y0)), Segment::LineTo(p(x1, y1)), Segment::LineTo(p(x0, y1)), Segment::LineTo(p(x0, y0)), Segment::Close]
+        vec![
+            Segment::MoveTo(p(x0, y0)),
+            Segment::LineTo(p(x1, y0)),
+            Segment::LineTo(p(x1, y1)),
+            Segment::LineTo(p(x0, y1)),
+            Segment::LineTo(p(x0, y0)),
+            Segment::Close,
+        ]
     }
 
     fn ink(outline: &[Segment]) -> f32 {
-        rasterize(outline, 1.0, 0.0, 10.0, 10, 10).iter().map(|&c| c as f32 / 255.0).sum()
+        rasterize(outline, 1.0, 0.0, 10.0, 10, 10)
+            .iter()
+            .map(|&c| c as f32 / 255.0)
+            .sum()
     }
 
     #[test]
@@ -149,7 +165,11 @@ mod tests {
     /// same (once quadratic), takes no time.
     #[test]
     fn many_repeated_points() {
-        let mut outline = vec![Segment::MoveTo(p(0.0, 0.0)), Segment::LineTo(p(4.0, 0.0)), Segment::LineTo(p(4.0, 4.0))];
+        let mut outline = vec![
+            Segment::MoveTo(p(0.0, 0.0)),
+            Segment::LineTo(p(4.0, 0.0)),
+            Segment::LineTo(p(4.0, 4.0)),
+        ];
         outline.extend(std::iter::repeat_n(Segment::LineTo(p(0.0, 4.0)), 65_535));
         outline.push(Segment::Close);
         let started = std::time::Instant::now();

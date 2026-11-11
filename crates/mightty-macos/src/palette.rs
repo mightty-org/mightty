@@ -3,7 +3,7 @@
 //! arrows move the selection, Return runs it, Escape closes. What runs is
 //! up to `app`; this is the list and its AppKit side.
 
-use crate::bindings::{Action, Bindings, Key, Named, Trigger, ALT, CMD, CTRL, SHIFT};
+use crate::bindings::{ALT, Action, Bindings, CMD, CTRL, Key, Named, SHIFT, Trigger};
 use crate::ffi::*;
 use crate::split::Direction;
 
@@ -69,7 +69,14 @@ pub struct Entry {
 pub fn entries(bindings: &Bindings) -> Vec<Entry> {
     commands()
         .into_iter()
-        .map(|(title, action)| Entry { title, keys: bindings.trigger_for(&action).map(symbols).unwrap_or_default(), action })
+        .map(|(title, action)| Entry {
+            title,
+            keys: bindings
+                .trigger_for(&action)
+                .map(symbols)
+                .unwrap_or_default(),
+            action,
+        })
         .collect()
 }
 
@@ -83,23 +90,25 @@ pub(crate) fn symbols(trigger: Trigger) -> String {
     match trigger.key {
         Key::Char(c) => out.extend(c.to_uppercase()),
         Key::Named(Named::F(n)) => out += &format!("F{n}"),
-        Key::Named(n) => out += match n {
-            Named::Enter => "↩",
-            Named::Tab => "⇥",
-            Named::Space => "Space",
-            Named::Backspace => "⌫",
-            Named::Delete => "⌦",
-            Named::Escape => "⎋",
-            Named::Up => "↑",
-            Named::Down => "↓",
-            Named::Left => "←",
-            Named::Right => "→",
-            Named::Home => "↖",
-            Named::End => "↘",
-            Named::PageUp => "⇞",
-            Named::PageDown => "⇟",
-            Named::F(_) => "",
-        },
+        Key::Named(n) => {
+            out += match n {
+                Named::Enter => "↩",
+                Named::Tab => "⇥",
+                Named::Space => "Space",
+                Named::Backspace => "⌫",
+                Named::Delete => "⌦",
+                Named::Escape => "⎋",
+                Named::Up => "↑",
+                Named::Down => "↓",
+                Named::Left => "←",
+                Named::Right => "→",
+                Named::Home => "↖",
+                Named::End => "↘",
+                Named::PageUp => "⇞",
+                Named::PageDown => "⇟",
+                Named::F(_) => "",
+            }
+        }
     }
     out
 }
@@ -109,7 +118,11 @@ pub(crate) fn symbols(trigger: Trigger) -> String {
 /// then one whose words' initials hold it (`nt`: New Tab), then letters
 /// scattered, fewer gaps first; ties keep the list's order.
 fn filter(query: &str, titles: &[&str]) -> Vec<usize> {
-    let query: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let query: Vec<char> = query
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     let mut scored: Vec<(usize, usize)> = titles
         .iter()
         .enumerate()
@@ -163,12 +176,20 @@ impl Palette {
     /// delegate; `dark` picks a dark panel for a dark theme.
     pub unsafe fn open(container: Id, target: Id, dark: bool, entries: Vec<Entry>) -> Self {
         unsafe {
-            let panel: Id = msg!(msg!(class(c"NSVisualEffectView"), c"alloc"), c"initWithFrame:", rect(0.0, 0.0, WIDTH, FIELD_HEIGHT));
+            let panel: Id = msg!(
+                msg!(class(c"NSVisualEffectView"), c"alloc"),
+                c"initWithFrame:",
+                rect(0.0, 0.0, WIDTH, FIELD_HEIGHT)
+            );
             call!(panel, c"setMaterial:", 6isize); // popover
             call!(panel, c"setBlendingMode:", 1isize); // within the window
             call!(panel, c"setState:", 1isize); // always active
             call!(panel, c"setAutoresizingMask:", 2usize | 8); // centred, at the top
-            let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+            let name = if dark {
+                "NSAppearanceNameDarkAqua"
+            } else {
+                "NSAppearanceNameAqua"
+            };
             let appearance: Id = msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name));
             call!(panel, c"setAppearance:", appearance);
             call!(panel, c"setWantsLayer:", YES);
@@ -179,7 +200,11 @@ impl Palette {
             let border: Id = msg!(msg!(class(c"NSColor"), c"separatorColor"), c"CGColor");
             call!(layer, c"setBorderColor:", border);
 
-            let field: Id = msg!(msg!(class(c"NSTextField"), c"alloc"), c"initWithFrame:", rect(0.0, 0.0, WIDTH, FIELD_HEIGHT));
+            let field: Id = msg!(
+                msg!(class(c"NSTextField"), c"alloc"),
+                c"initWithFrame:",
+                rect(0.0, 0.0, WIDTH, FIELD_HEIGHT)
+            );
             call!(field, c"setPlaceholderString:", nsstring("Run a command…"));
             call!(field, c"setBezeled:", NO);
             call!(field, c"setDrawsBackground:", NO);
@@ -192,11 +217,20 @@ impl Palette {
 
             // Faint: the text colour, lightly, so it suits either appearance.
             let tint = |alpha: f64| -> Id {
-                let color: Id = msg!(class(c"NSColor"), c"colorWithWhite:alpha:", if dark { 1.0f64 } else { 0.0f64 }, alpha);
+                let color: Id = msg!(
+                    class(c"NSColor"),
+                    c"colorWithWhite:alpha:",
+                    if dark { 1.0f64 } else { 0.0f64 },
+                    alpha
+                );
                 msg!(color, c"CGColor")
             };
             let plain = |radius: f64, alpha: f64| -> Id {
-                let view: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", rect(0.0, 0.0, 0.0, 0.0));
+                let view: Id = msg!(
+                    msg!(class(c"NSView"), c"alloc"),
+                    c"initWithFrame:",
+                    rect(0.0, 0.0, 0.0, 0.0)
+                );
                 call!(view, c"setWantsLayer:", YES);
                 let layer: Id = msg!(view, c"layer");
                 call!(layer, c"setBackgroundColor:", tint(alpha));
@@ -220,7 +254,16 @@ impl Palette {
             let rows = (0..ROWS).map(|_| (label(0), label(2))).collect(); // left, right
 
             call!(container, c"addSubview:", panel);
-            let mut palette = Self { panel, field, divider, highlight, rows, entries, matches: Vec::new(), selected: 0 };
+            let mut palette = Self {
+                panel,
+                field,
+                divider,
+                highlight,
+                rows,
+                entries,
+                matches: Vec::new(),
+                selected: 0,
+            };
             palette.update();
             palette
         }
@@ -247,7 +290,9 @@ impl Palette {
 
     /// The selected entry's action.
     pub fn chosen(&self) -> Option<Action> {
-        self.matches.get(self.selected).map(|&i| self.entries[i].action.clone())
+        self.matches
+            .get(self.selected)
+            .map(|&i| self.entries[i].action.clone())
     }
 
     /// Lays the panel out for the matches, centred at the top of its container.
@@ -258,28 +303,84 @@ impl Palette {
             let bounds = send_rect(container, c"bounds");
             let width = WIDTH.min(bounds.size.width - 2.0 * MARGIN).max(200.0);
             let shown = self.matches.len().min(ROWS);
-            let height = PAD + FIELD_HEIGHT + PAD + shown as f64 * ROW_HEIGHT + if shown > 0 { PAD } else { 0.0 };
-            let frame = rect(((bounds.size.width - width) / 2.0).max(0.0), bounds.size.height - height - MARGIN, width, height);
+            let height = PAD
+                + FIELD_HEIGHT
+                + PAD
+                + shown as f64 * ROW_HEIGHT
+                + if shown > 0 { PAD } else { 0.0 };
+            let frame = rect(
+                ((bounds.size.width - width) / 2.0).max(0.0),
+                bounds.size.height - height - MARGIN,
+                width,
+                height,
+            );
             call!(self.panel, c"setFrame:", frame);
-            call!(self.field, c"setFrame:", rect(PAD + 8.0, height - PAD - FIELD_HEIGHT + 2.0, width - 2.0 * PAD - 16.0, FIELD_HEIGHT - 4.0));
+            call!(
+                self.field,
+                c"setFrame:",
+                rect(
+                    PAD + 8.0,
+                    height - PAD - FIELD_HEIGHT + 2.0,
+                    width - 2.0 * PAD - 16.0,
+                    FIELD_HEIGHT - 4.0
+                )
+            );
             let below_field = height - PAD - FIELD_HEIGHT - PAD / 2.0;
-            call!(self.divider, c"setFrame:", rect(0.0, below_field, width, 1.0));
-            call!(self.divider, c"setHidden:", if shown > 0 { NO } else { YES });
-            call!(self.highlight, c"setHidden:", if shown > 0 { NO } else { YES });
+            call!(
+                self.divider,
+                c"setFrame:",
+                rect(0.0, below_field, width, 1.0)
+            );
+            call!(
+                self.divider,
+                c"setHidden:",
+                if shown > 0 { NO } else { YES }
+            );
+            call!(
+                self.highlight,
+                c"setHidden:",
+                if shown > 0 { NO } else { YES }
+            );
             let color = |name: &std::ffi::CStr| -> Id { msg!(class(c"NSColor"), name) };
             // Rows hold their text vertically centred, a line's height being less than a row's.
             let inset = (ROW_HEIGHT - 17.0) / 2.0;
             for (r, &(title, keys)) in self.rows.iter().enumerate() {
-                let entry = self.matches.get(r).filter(|_| r < shown).map(|&i| &self.entries[i]);
+                let entry = self
+                    .matches
+                    .get(r)
+                    .filter(|_| r < shown)
+                    .map(|&i| &self.entries[i]);
                 call!(title, c"setHidden:", if entry.is_some() { NO } else { YES });
                 call!(keys, c"setHidden:", if entry.is_some() { NO } else { YES });
                 let Some(entry) = entry else { continue };
                 let y = height - PAD - FIELD_HEIGHT - PAD - (r + 1) as f64 * ROW_HEIGHT;
                 if r == self.selected {
-                    call!(self.highlight, c"setFrame:", rect(PAD, y, width - 2.0 * PAD, ROW_HEIGHT));
+                    call!(
+                        self.highlight,
+                        c"setFrame:",
+                        rect(PAD, y, width - 2.0 * PAD, ROW_HEIGHT)
+                    );
                 }
-                call!(title, c"setFrame:", rect(PAD + 10.0, y + inset, width - 2.0 * PAD - 140.0, ROW_HEIGHT - 2.0 * inset));
-                call!(keys, c"setFrame:", rect(width - PAD - 10.0 - 120.0, y + inset, 120.0, ROW_HEIGHT - 2.0 * inset));
+                call!(
+                    title,
+                    c"setFrame:",
+                    rect(
+                        PAD + 10.0,
+                        y + inset,
+                        width - 2.0 * PAD - 140.0,
+                        ROW_HEIGHT - 2.0 * inset
+                    )
+                );
+                call!(
+                    keys,
+                    c"setFrame:",
+                    rect(
+                        width - PAD - 10.0 - 120.0,
+                        y + inset,
+                        120.0,
+                        ROW_HEIGHT - 2.0 * inset
+                    )
+                );
                 call!(title, c"setStringValue:", nsstring(entry.title));
                 call!(keys, c"setStringValue:", nsstring(&entry.keys));
                 call!(title, c"setTextColor:", color(c"labelColor"));
@@ -300,7 +401,10 @@ impl Drop for Palette {
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
-    CGRect { origin: CGPoint { x, y }, size: CGSize { width, height } }
+    CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize { width, height },
+    }
 }
 
 #[cfg(test)]
@@ -309,7 +413,14 @@ mod tests {
 
     #[test]
     fn filtering() {
-        let titles = ["New Window", "New Tab", "Split Right", "Next Tab", "Reload Configuration", "Previous Tab"];
+        let titles = [
+            "New Window",
+            "New Tab",
+            "Split Right",
+            "Next Tab",
+            "Reload Configuration",
+            "Previous Tab",
+        ];
         assert_eq!(filter("", &titles), [0, 1, 2, 3, 4, 5]);
         // A start beats a word's start, which beats scattered letters.
         assert_eq!(filter("tab", &titles), [1, 3, 5]);

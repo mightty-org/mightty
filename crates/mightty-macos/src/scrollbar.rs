@@ -54,13 +54,21 @@ fn bar_class() -> Id {
         let mouse = mouse as extern "C" fn(Id, Sel, Id) as *const c_void;
         // SAFETY: a new subclass, its methods with their signatures.
         unsafe {
-            register_class(c"MighttyScrollbar", c"NSView", &[
-                (c"mouseDown:", mouse, c"v@:@"),
-                (c"mouseDragged:", mouse, c"v@:@"),
-                (c"mouseUp:", mouse, c"v@:@"),
-                // A click on an inactive window grabs at once, as scrollers do.
-                (c"acceptsFirstMouse:", yes as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void, c"c@:@"),
-            ]) as usize
+            register_class(
+                c"MighttyScrollbar",
+                c"NSView",
+                &[
+                    (c"mouseDown:", mouse, c"v@:@"),
+                    (c"mouseDragged:", mouse, c"v@:@"),
+                    (c"mouseUp:", mouse, c"v@:@"),
+                    // A click on an inactive window grabs at once, as scrollers do.
+                    (
+                        c"acceptsFirstMouse:",
+                        yes as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
+                        c"c@:@",
+                    ),
+                ],
+            ) as usize
         }
     }) as Id
 }
@@ -91,33 +99,62 @@ impl Scrollbar {
         unsafe {
             let bounds = send_rect(container, c"bounds");
             let frame = CGRect {
-                origin: CGPoint { x: bounds.size.width - WIDTH, y: 0.0 },
-                size: CGSize { width: WIDTH, height: bounds.size.height },
+                origin: CGPoint {
+                    x: bounds.size.width - WIDTH,
+                    y: 0.0,
+                },
+                size: CGSize {
+                    width: WIDTH,
+                    height: bounds.size.height,
+                },
             };
             let bar: Id = msg!(msg!(bar_class(), c"alloc"), c"initWithFrame:", frame);
             call!(bar, c"setAutoresizingMask:", 1usize | 16); // pinned right, full height
             // Hidden, not just clear: a clear one would still take the clicks at the pane's edge.
             call!(bar, c"setHidden:", YES);
-            let knob: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", CGRect::default());
+            let knob: Id = msg!(
+                msg!(class(c"NSView"), c"alloc"),
+                c"initWithFrame:",
+                CGRect::default()
+            );
             call!(knob, c"setWantsLayer:", YES);
             let layer: Id = msg!(knob, c"layer");
             call!(layer, c"setCornerRadius:", KNOB / 2.0);
             call!(bar, c"addSubview:", knob);
             call!(knob, c"release");
             call!(container, c"addSubview:", bar);
-            Self { bar, knob, shown: (0, 0, 0), dark: None, hide_at: None, grab: None }
+            Self {
+                bar,
+                knob,
+                shown: (0, 0, 0),
+                dark: None,
+                hide_at: None,
+                grab: None,
+            }
         }
     }
 
     /// Shows `offset` lines scrolled back through `history` with `rows` on
     /// screen; it appears when the offset changed (`enabled` and with
     /// history to show), light on a `dark` terminal.
-    pub fn update(&mut self, history: usize, rows: usize, offset: usize, enabled: bool, dark: bool) {
+    pub fn update(
+        &mut self,
+        history: usize,
+        rows: usize,
+        offset: usize,
+        enabled: bool,
+        dark: bool,
+    ) {
         if self.dark != Some(dark) {
             self.dark = Some(dark);
             // SAFETY: main thread; documented signatures.
             unsafe {
-                let color: Id = msg!(class(c"NSColor"), c"colorWithWhite:alpha:", if dark { 1.0f64 } else { 0.0f64 }, 0.45f64);
+                let color: Id = msg!(
+                    class(c"NSColor"),
+                    c"colorWithWhite:alpha:",
+                    if dark { 1.0f64 } else { 0.0f64 },
+                    0.45f64
+                );
                 let cg: Id = msg!(color, c"CGColor");
                 let layer: Id = msg!(self.knob, c"layer");
                 call!(layer, c"setBackgroundColor:", cg);
@@ -138,7 +175,8 @@ impl Scrollbar {
         let (history, rows, _) = self.shown;
         // SAFETY: main thread; documented signature.
         let height = (unsafe { send_rect(self.bar, c"bounds") }.size.height - 2.0 * INSET).max(0.0);
-        let knob = (height * rows as f64 / (history + rows).max(1) as f64).clamp(MIN_KNOB.min(height), height);
+        let knob = (height * rows as f64 / (history + rows).max(1) as f64)
+            .clamp(MIN_KNOB.min(height), height);
         (knob, height - knob)
     }
 
@@ -147,12 +185,26 @@ impl Scrollbar {
     fn knob_bottom(&self) -> f64 {
         let (history, _, offset) = self.shown;
         let (_, travel) = self.geometry();
-        INSET + if history == 0 { 0.0 } else { travel * offset as f64 / history as f64 }
+        INSET
+            + if history == 0 {
+                0.0
+            } else {
+                travel * offset as f64 / history as f64
+            }
     }
 
     fn place_knob(&self) {
         let (knob, _) = self.geometry();
-        let frame = CGRect { origin: CGPoint { x: WIDTH - KNOB - INSET, y: self.knob_bottom() }, size: CGSize { width: KNOB, height: knob } };
+        let frame = CGRect {
+            origin: CGPoint {
+                x: WIDTH - KNOB - INSET,
+                y: self.knob_bottom(),
+            },
+            size: CGSize {
+                width: KNOB,
+                height: knob,
+            },
+        };
         // SAFETY: main thread; documented signature.
         unsafe { call!(self.knob, c"setFrame:", frame) };
     }
@@ -198,7 +250,9 @@ impl Scrollbar {
             Drag::Press(y) if y > bottom => (offset + rows).min(history),
             Drag::Press(_) => offset.saturating_sub(rows),
             Drag::Move(y) => match self.grab {
-                Some(grab) if travel > 0.0 => ((y - grab - INSET).clamp(0.0, travel) / travel * history as f64).round() as usize,
+                Some(grab) if travel > 0.0 => ((y - grab - INSET).clamp(0.0, travel) / travel
+                    * history as f64)
+                    .round() as usize,
                 _ => offset,
             },
             Drag::Release => {

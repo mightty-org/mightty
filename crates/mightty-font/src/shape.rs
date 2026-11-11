@@ -46,15 +46,32 @@ impl Face {
     /// `text`'s glyphs after the substitutions of `features`. Characters the
     /// face lacks are glyph 0.
     pub fn shape(&self, text: &[char], features: &[[u8; 4]]) -> Vec<Shaped> {
-        let mut buffer: Vec<Shaped> = text.iter().enumerate().map(|(i, &c)| Shaped { glyph: self.glyph(c).unwrap_or(0), cluster: i as u32 }).collect();
+        let mut buffer: Vec<Shaped> = text
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Shaped {
+                glyph: self.glyph(c).unwrap_or(0),
+                cluster: i as u32,
+            })
+            .collect();
         if let Some(gsub) = self.gsub_table() {
             let b = self.bytes();
             let gdef = self.gdef_table();
             let prepared = self.prepared(|| prepare(b, gsub, self.glyph_count()));
             let budget = (4 + text.len()).saturating_mul(WORK_PER_CHAR).min(MAX_WORK);
-            let mut run = Run { b, prepared, gdef, work: 0, budget, limit: text.len().max(1) * MAX_GLYPHS_PER_CHAR };
+            let mut run = Run {
+                b,
+                prepared,
+                gdef,
+                work: 0,
+                budget,
+                limit: text.len().max(1) * MAX_GLYPHS_PER_CHAR,
+            };
             for lookup in lookups_of(b, gsub, features) {
-                let starts = prepared.starts.get(lookup as usize).and_then(Option::as_deref);
+                let starts = prepared
+                    .starts
+                    .get(lookup as usize)
+                    .and_then(Option::as_deref);
                 // Most lookups can't start at most glyphs: skip those quickly.
                 if starts.is_some_and(|set| !buffer.iter().any(|s| has(set, s.glyph))) {
                     continue;
@@ -76,8 +93,12 @@ pub(crate) fn lookups_of(b: Bytes<'_>, gsub: usize, features: &[[u8; 4]]) -> Vec
         let scripts = gsub + b.u16(gsub + 4)? as usize;
         let feature_list = gsub + b.u16(gsub + 6)? as usize;
         let count = b.u16(scripts)? as usize;
-        let script_at = |tag: &[u8; 4]| (0..count).find(|&i| b.slice(scripts + 2 + 6 * i, 4).is_some_and(|t| t.0 == tag));
-        let i = script_at(b"DFLT").or_else(|| script_at(b"latn")).or((count > 0).then_some(0))?;
+        let script_at = |tag: &[u8; 4]| {
+            (0..count).find(|&i| b.slice(scripts + 2 + 6 * i, 4).is_some_and(|t| t.0 == tag))
+        };
+        let i = script_at(b"DFLT")
+            .or_else(|| script_at(b"latn"))
+            .or((count > 0).then_some(0))?;
         let script = scripts + b.u16(scripts + 6 + 6 * i)? as usize;
         let lang = script + b.u16(script)? as usize;
         if lang == script {
@@ -85,11 +106,16 @@ pub(crate) fn lookups_of(b: Bytes<'_>, gsub: usize, features: &[[u8; 4]]) -> Vec
         }
         let required = b.u16(lang + 2)?;
         let n = b.u16(lang + 4)? as usize;
-        let indices = (0..n).filter_map(|k| b.u16(lang + 6 + 2 * k)).chain((required != 0xFFFF).then_some(required));
+        let indices = (0..n)
+            .filter_map(|k| b.u16(lang + 6 + 2 * k))
+            .chain((required != 0xFFFF).then_some(required));
         let mut out = Vec::new();
         for f in indices {
             let record = feature_list + 2 + 6 * f as usize;
-            if !features.iter().any(|t| b.slice(record, 4).is_some_and(|r| r.0 == t)) {
+            if !features
+                .iter()
+                .any(|t| b.slice(record, 4).is_some_and(|r| r.0 == t))
+            {
                 continue;
             }
             let feature = feature_list + b.u16(record + 4)? as usize;
@@ -131,11 +157,15 @@ impl<'a> Run<'a> {
     /// Runs lookup `index` along the buffer. `starts`: the glyphs it can
     /// start at, if known.
     fn apply_lookup(&mut self, buffer: &mut Vec<Shaped>, index: u16, starts: Option<&[u64]>) {
-        let Some(lookup) = self.lookup(index) else { return };
+        let Some(lookup) = self.lookup(index) else {
+            return;
+        };
         let mut i = 0;
         while i < buffer.len() && self.work <= self.budget {
             self.work += 1;
-            if starts.is_some_and(|set| !has(set, buffer[i].glyph)) || self.ignored(lookup.flags, buffer[i].glyph) {
+            if starts.is_some_and(|set| !has(set, buffer[i].glyph))
+                || self.ignored(lookup.flags, buffer[i].glyph)
+            {
                 i += 1;
                 continue;
             }
@@ -148,7 +178,13 @@ impl<'a> Run<'a> {
 
     /// Applies the first subtable of `lookup` that matches at `i`; where to
     /// go on from, if one did.
-    fn apply_at(&mut self, buffer: &mut Vec<Shaped>, lookup: &Lookup, i: usize, depth: usize) -> Option<usize> {
+    fn apply_at(
+        &mut self,
+        buffer: &mut Vec<Shaped>,
+        lookup: &Lookup,
+        i: usize,
+        depth: usize,
+    ) -> Option<usize> {
         for &s in &lookup.subtables {
             self.work += 1;
             if self.work > self.budget {
@@ -161,7 +197,14 @@ impl<'a> Run<'a> {
         None
     }
 
-    fn subtable(&mut self, buffer: &mut Vec<Shaped>, lookup: &Lookup, s: usize, i: usize, depth: usize) -> Option<usize> {
+    fn subtable(
+        &mut self,
+        buffer: &mut Vec<Shaped>,
+        lookup: &Lookup,
+        s: usize,
+        i: usize,
+        depth: usize,
+    ) -> Option<usize> {
         let b = self.b;
         let glyph = buffer.get(i)?.glyph;
         let format = b.u16(s)?;
@@ -187,7 +230,9 @@ impl<'a> Run<'a> {
                 if buffer.len() + n > self.limit + 1 {
                     return None;
                 }
-                let glyphs: Vec<u16> = (0..n).map(|j| b.u16(sequence + 2 + 2 * j)).collect::<Option<_>>()?;
+                let glyphs: Vec<u16> = (0..n)
+                    .map(|j| b.u16(sequence + 2 + 2 * j))
+                    .collect::<Option<_>>()?;
                 let cluster = buffer[i].cluster;
                 buffer.splice(i..=i, glyphs.iter().map(|&g| Shaped { glyph: g, cluster }));
                 Some(i + n)
@@ -216,7 +261,13 @@ impl<'a> Run<'a> {
                     if count == 0 {
                         continue;
                     }
-                    let Some(positions) = self.match_sequence(buffer, lookup.flags, i, count - 1, |j, g| b.u16(lig + 4 + 2 * j) == Some(g)) else { continue };
+                    let Some(positions) =
+                        self.match_sequence(buffer, lookup.flags, i, count - 1, |j, g| {
+                            b.u16(lig + 4 + 2 * j) == Some(g)
+                        })
+                    else {
+                        continue;
+                    };
                     buffer[i].glyph = result;
                     for &p in positions.iter().rev() {
                         buffer.remove(p);
@@ -233,7 +284,14 @@ impl<'a> Run<'a> {
     /// Context (5) and chained context (6) substitutions, formats 1 to 3:
     /// match a sequence (and in a chain, what comes before and after it),
     /// then run other lookups at places in it.
-    fn context(&mut self, buffer: &mut Vec<Shaped>, lookup: &Lookup, s: usize, i: usize, depth: usize) -> Option<usize> {
+    fn context(
+        &mut self,
+        buffer: &mut Vec<Shaped>,
+        lookup: &Lookup,
+        s: usize,
+        i: usize,
+        depth: usize,
+    ) -> Option<usize> {
         let b = self.b;
         let chained = lookup.kind == 6;
         let flags = lookup.flags;
@@ -270,19 +328,36 @@ impl<'a> Run<'a> {
             // record count, the input list, then records.
             3 => {
                 let list = |at: usize| Some((b.u16(at)? as usize, at + 2));
-                let covered = |(n, base): (usize, usize), j: usize, g: u16| j < n && b.u16(base + 2 * j).and_then(|o| coverage(b, s + o as usize, g)).is_some();
+                let covered = |(n, base): (usize, usize), j: usize, g: u16| {
+                    j < n
+                        && b.u16(base + 2 * j)
+                            .and_then(|o| coverage(b, s + o as usize, g))
+                            .is_some()
+                };
                 let (back, input_list, ahead, records) = if chained {
                     let back = list(s + 2)?;
                     let input_list = list(back.1 + 2 * back.0)?;
                     let ahead = list(input_list.1 + 2 * input_list.0)?;
                     let records_at = ahead.1 + 2 * ahead.0;
-                    (back, input_list, ahead, (records_at + 2, b.u16(records_at)? as usize))
+                    (
+                        back,
+                        input_list,
+                        ahead,
+                        (records_at + 2, b.u16(records_at)? as usize),
+                    )
                 } else {
                     let n = b.u16(s + 2)? as usize;
-                    ((0, 0), (n, s + 6), (0, 0), (s + 6 + 2 * n, b.u16(s + 4)? as usize))
+                    (
+                        (0, 0),
+                        (n, s + 6),
+                        (0, 0),
+                        (s + 6 + 2 * n, b.u16(s + 4)? as usize),
+                    )
                 };
                 (input_list.0 > 0 && covered(input_list, 0, glyph)).then_some(())?;
-                let input = self.match_sequence(buffer, flags, i, input_list.0 - 1, |j, g| covered(input_list, j + 1, g))?;
+                let input = self.match_sequence(buffer, flags, i, input_list.0 - 1, |j, g| {
+                    covered(input_list, j + 1, g)
+                })?;
                 self.match_back(buffer, flags, i, back.0, |j, g| covered(back, j, g))?;
                 let last = input.last().copied().unwrap_or(i);
                 self.match_sequence(buffer, flags, last, ahead.0, |j, g| covered(ahead, j, g))?;
@@ -297,13 +372,20 @@ impl<'a> Run<'a> {
         if depth < MAX_NESTING {
             let (at, n) = records;
             for r in 0..n.min(64) {
-                let (Some(sequence), Some(index)) = (b.u16(at + 4 * r), b.u16(at + 4 * r + 2)) else { break };
-                let Some(&p) = positions.get(sequence as usize) else { continue };
+                let (Some(sequence), Some(index)) = (b.u16(at + 4 * r), b.u16(at + 4 * r + 2))
+                else {
+                    break;
+                };
+                let Some(&p) = positions.get(sequence as usize) else {
+                    continue;
+                };
                 self.work += NESTED_CALL;
                 if self.work > self.budget {
                     break;
                 }
-                let Some(nested) = self.lookup(index) else { continue };
+                let Some(nested) = self.lookup(index) else {
+                    continue;
+                };
                 let len = buffer.len();
                 self.apply_at(buffer, nested, p, depth + 1);
                 // Glyphs added or taken out move the positions after.
@@ -320,7 +402,15 @@ impl<'a> Run<'a> {
 
     /// Format 1 rules: the first whose glyph sequences match.
     #[allow(clippy::type_complexity)]
-    fn first_rule(&mut self, buffer: &[Shaped], flags: u16, i: usize, set: usize, chained: bool, is: impl Fn(usize, u16) -> bool) -> Option<(Vec<usize>, (usize, usize))> {
+    fn first_rule(
+        &mut self,
+        buffer: &[Shaped],
+        flags: u16,
+        i: usize,
+        set: usize,
+        chained: bool,
+        is: impl Fn(usize, u16) -> bool,
+    ) -> Option<(Vec<usize>, (usize, usize))> {
         let b = self.b;
         for r in 0..b.u16(set)? as usize {
             self.work += 1;
@@ -328,7 +418,8 @@ impl<'a> Run<'a> {
                 return None;
             }
             let rule = set + b.u16(set + 2 + 2 * r)? as usize;
-            if let Some(m) = self.match_rule(buffer, flags, i, rule, chained, |_, at, g| is(at, g)) {
+            if let Some(m) = self.match_rule(buffer, flags, i, rule, chained, |_, at, g| is(at, g))
+            {
                 return Some(m);
             }
         }
@@ -337,7 +428,15 @@ impl<'a> Run<'a> {
 
     /// Format 2 rules: the first whose class sequences match.
     #[allow(clippy::type_complexity)]
-    fn first_rule_by_class(&mut self, buffer: &[Shaped], flags: u16, i: usize, set: usize, chained: bool, classes: [usize; 3]) -> Option<(Vec<usize>, (usize, usize))> {
+    fn first_rule_by_class(
+        &mut self,
+        buffer: &[Shaped],
+        flags: u16,
+        i: usize,
+        set: usize,
+        chained: bool,
+        classes: [usize; 3],
+    ) -> Option<(Vec<usize>, (usize, usize))> {
         let b = self.b;
         for r in 0..b.u16(set)? as usize {
             self.work += 1;
@@ -345,7 +444,8 @@ impl<'a> Run<'a> {
                 return None;
             }
             let rule = set + b.u16(set + 2 + 2 * r)? as usize;
-            let matches = |part: usize, at: usize, g: u16| b.u16(at) == Some(class_of(b, classes[part], g));
+            let matches =
+                |part: usize, at: usize, g: u16| b.u16(at) == Some(class_of(b, classes[part], g));
             if let Some(m) = self.match_rule(buffer, flags, i, rule, chained, matches) {
                 return Some(m);
             }
@@ -356,13 +456,22 @@ impl<'a> Run<'a> {
     /// A rule of glyphs or classes (read by `is(part, offset, glyph)`, part
     /// 0 backtrack, 1 input, 2 lookahead): the input positions and records.
     #[allow(clippy::type_complexity)]
-    fn match_rule(&mut self, buffer: &[Shaped], flags: u16, i: usize, rule: usize, chained: bool, is: impl Fn(usize, usize, u16) -> bool) -> Option<(Vec<usize>, (usize, usize))> {
+    fn match_rule(
+        &mut self,
+        buffer: &[Shaped],
+        flags: u16,
+        i: usize,
+        rule: usize,
+        chained: bool,
+        is: impl Fn(usize, usize, u16) -> bool,
+    ) -> Option<(Vec<usize>, (usize, usize))> {
         let b = self.b;
         if !chained {
             // Glyph count, record count, input (after the first), records.
             let (n, records) = (b.u16(rule)? as usize, b.u16(rule + 2)? as usize);
             (n > 0).then_some(())?;
-            let input = self.match_sequence(buffer, flags, i, n - 1, |j, g| is(1, rule + 4 + 2 * j, g))?;
+            let input =
+                self.match_sequence(buffer, flags, i, n - 1, |j, g| is(1, rule + 4 + 2 * j, g))?;
             return Some((input, (rule + 4 + 2 * (n - 1), records)));
         }
         let back = b.u16(rule)? as usize;
@@ -370,7 +479,8 @@ impl<'a> Run<'a> {
         let at = rule + 2 + 2 * back;
         let n = b.u16(at)? as usize;
         (n > 0).then_some(())?;
-        let input = self.match_sequence(buffer, flags, i, n - 1, |j, g| is(1, at + 2 + 2 * j, g))?;
+        let input =
+            self.match_sequence(buffer, flags, i, n - 1, |j, g| is(1, at + 2 + 2 * j, g))?;
         let at = at + 2 + 2 * (n - 1);
         let ahead = b.u16(at)? as usize;
         let last = input.last().copied().unwrap_or(i);
@@ -381,7 +491,14 @@ impl<'a> Run<'a> {
 
     /// `n` glyphs after `i` (skipping those the flags ignore) for which
     /// `is(j, glyph)` holds; their positions.
-    fn match_sequence(&mut self, buffer: &[Shaped], flags: u16, i: usize, n: usize, is: impl Fn(usize, u16) -> bool) -> Option<Vec<usize>> {
+    fn match_sequence(
+        &mut self,
+        buffer: &[Shaped],
+        flags: u16,
+        i: usize,
+        n: usize,
+        is: impl Fn(usize, u16) -> bool,
+    ) -> Option<Vec<usize>> {
         let mut positions = Vec::with_capacity(n);
         let mut p = i;
         for j in 0..n {
@@ -400,7 +517,14 @@ impl<'a> Run<'a> {
     }
 
     /// The `n` glyphs before `i`, nearest first.
-    fn match_back(&mut self, buffer: &[Shaped], flags: u16, i: usize, n: usize, is: impl Fn(usize, u16) -> bool) -> Option<()> {
+    fn match_back(
+        &mut self,
+        buffer: &[Shaped],
+        flags: u16,
+        i: usize,
+        n: usize,
+        is: impl Fn(usize, u16) -> bool,
+    ) -> Option<()> {
         let mut p = i;
         for j in 0..n {
             loop {
@@ -431,7 +555,10 @@ impl<'a> Run<'a> {
         }
         let Some(gdef) = self.gdef else { return false };
         let b = self.b;
-        let class = b.u16(gdef + 4).filter(|&o| o != 0).map_or(0, |o| class_of(b, gdef + o as usize, glyph));
+        let class = b
+            .u16(gdef + 4)
+            .filter(|&o| o != 0)
+            .map_or(0, |o| class_of(b, gdef + o as usize, glyph));
         match class {
             1 => flags & IGNORE_BASE != 0,
             2 => flags & IGNORE_LIGATURES != 0,
@@ -440,7 +567,11 @@ impl<'a> Run<'a> {
                     return true;
                 }
                 let wanted = flags >> 8;
-                wanted != 0 && b.u16(gdef + 10).filter(|&o| o != 0).map_or(0, |o| class_of(b, gdef + o as usize, glyph)) != wanted
+                wanted != 0
+                    && b.u16(gdef + 10)
+                        .filter(|&o| o != 0)
+                        .map_or(0, |o| class_of(b, gdef + o as usize, glyph))
+                        != wanted
             }
             _ => false,
         }
@@ -456,7 +587,8 @@ pub(crate) struct Prepared {
 }
 
 fn has(set: &[u64], glyph: u16) -> bool {
-    set.get(glyph as usize / 64).is_some_and(|w| w >> (glyph % 64) & 1 != 0)
+    set.get(glyph as usize / 64)
+        .is_some_and(|w| w >> (glyph % 64) & 1 != 0)
 }
 
 /// Reads GSUB's lookups for a font of `glyphs` glyphs, within `PREPARE_WORK`.
@@ -466,16 +598,29 @@ fn prepare(b: Bytes<'_>, gsub: usize, glyphs: u16) -> Prepared {
         let list = gsub + b.u16(gsub + 8)? as usize;
         Some((list, b.u16(list)?))
     })();
-    let Some((list, count)) = count else { return Prepared { lookups: Vec::new(), starts: Vec::new() } };
+    let Some((list, count)) = count else {
+        return Prepared {
+            lookups: Vec::new(),
+            starts: Vec::new(),
+        };
+    };
     let mut lookups = Vec::with_capacity(count as usize);
     let mut starts = Vec::with_capacity(count as usize);
     for index in 0..count as usize {
         work += 1;
-        let lookup = (work <= PREPARE_WORK).then(|| read_lookup(b, list, index, &mut work)).flatten();
+        let lookup = (work <= PREPARE_WORK)
+            .then(|| read_lookup(b, list, index, &mut work))
+            .flatten();
         let start = lookup.as_ref().and_then(|lookup| {
             let mut set = vec![0u64; (glyphs as usize).div_ceil(64)].into_boxed_slice();
             for &s in &lookup.subtables {
-                add_covered(b, first_coverage(b, lookup.kind, s)?, &mut set, glyphs, &mut work)?;
+                add_covered(
+                    b,
+                    first_coverage(b, lookup.kind, s)?,
+                    &mut set,
+                    glyphs,
+                    &mut work,
+                )?;
             }
             Some(set)
         });
@@ -493,13 +638,22 @@ fn read_lookup(b: Bytes<'_>, list: usize, index: usize, work: &mut usize) -> Opt
         return None;
     }
     *work += count;
-    let mut subtables: Vec<usize> = (0..count).filter_map(|i| Some(at + b.u16(at + 6 + 2 * i)? as usize)).collect();
+    let mut subtables: Vec<usize> = (0..count)
+        .filter_map(|i| Some(at + b.u16(at + 6 + 2 * i)? as usize))
+        .collect();
     if kind == 7 {
         // Extension: the real type, and 32-bit offsets.
         kind = subtables.first().and_then(|&s| b.u16(s + 2))?;
-        subtables = subtables.iter().filter_map(|&s| (b.u16(s + 2)? == kind).then(|| Some(s + b.u32(s + 4)? as usize))?).collect();
+        subtables = subtables
+            .iter()
+            .filter_map(|&s| (b.u16(s + 2)? == kind).then(|| Some(s + b.u32(s + 4)? as usize))?)
+            .collect();
     }
-    Some(Lookup { kind, flags, subtables })
+    Some(Lookup {
+        kind,
+        flags,
+        subtables,
+    })
 }
 
 /// The Coverage table of the first glyph a subtable matches.
@@ -520,7 +674,13 @@ fn first_coverage(b: Bytes<'_>, kind: u16, s: usize) -> Option<usize> {
 
 /// Sets the bits of the glyphs (fewer than `glyphs`) a Coverage table
 /// covers, counting each in `work`; gives up past `PREPARE_WORK`.
-fn add_covered(b: Bytes<'_>, at: usize, set: &mut [u64], glyphs: u16, work: &mut usize) -> Option<()> {
+fn add_covered(
+    b: Bytes<'_>,
+    at: usize,
+    set: &mut [u64],
+    glyphs: u16,
+    work: &mut usize,
+) -> Option<()> {
     let mut add = |g: u16| {
         if let Some(word) = set.get_mut(g as usize / 64) {
             *word |= 1 << (g % 64);
@@ -535,7 +695,10 @@ fn add_covered(b: Bytes<'_>, at: usize, set: &mut [u64], glyphs: u16, work: &mut
         1 => (0..count).for_each(|i| b.u16(at + 4 + 2 * i).into_iter().for_each(&mut add)),
         2 => {
             for i in 0..count {
-                let (start, end) = (b.u16(at + 4 + 6 * i)?, b.u16(at + 6 + 6 * i)?.min(glyphs.saturating_sub(1)));
+                let (start, end) = (
+                    b.u16(at + 4 + 6 * i)?,
+                    b.u16(at + 6 + 6 * i)?.min(glyphs.saturating_sub(1)),
+                );
                 *work += (end as usize + 1).saturating_sub(start as usize);
                 if *work > PREPARE_WORK {
                     return None;

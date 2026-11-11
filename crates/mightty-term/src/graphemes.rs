@@ -31,12 +31,16 @@ impl Graphemes {
         if !cell.flags().contains(Flags::GRAPHEME) {
             return None;
         }
-        self.texts.get((cell.c as u32 - FIRST) as usize).map(|s| &**s)
+        self.texts
+            .get((cell.c as u32 - FIRST) as usize)
+            .map(|s| &**s)
     }
 
     /// The character `cell` stands for: its own, or its cluster's first.
     pub(crate) fn base(&self, cell: Cell) -> char {
-        self.get(cell).and_then(|s| s.chars().next()).unwrap_or(cell.c)
+        self.get(cell)
+            .and_then(|s| s.chars().next())
+            .unwrap_or(cell.c)
     }
 
     /// The stand-in character for `text`, or `None` once every id is in use.

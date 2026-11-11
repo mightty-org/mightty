@@ -41,8 +41,16 @@ pub struct Tab {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Layout {
     /// `title`: one the user gave it (Change Title…), if any.
-    Pane { cwd: Option<String>, title: Option<String> },
-    Split { axis: Axis, ratio: f64, first: Box<Layout>, second: Box<Layout> },
+    Pane {
+        cwd: Option<String>,
+        title: Option<String>,
+    },
+    Split {
+        axis: Axis,
+        ratio: f64,
+        first: Box<Layout>,
+        second: Box<Layout>,
+    },
 }
 
 impl Layout {
@@ -64,9 +72,19 @@ impl Layout {
 
     fn to_json(&self) -> Value {
         match self {
-            Layout::Pane { cwd, title } => Value::object([("cwd", cwd.clone().into()), ("title", title.clone().into())]),
-            Layout::Split { axis, ratio, first, second } => Value::object([
-                ("axis", if *axis == Axis::Row { "row" } else { "column" }.into()),
+            Layout::Pane { cwd, title } => {
+                Value::object([("cwd", cwd.clone().into()), ("title", title.clone().into())])
+            }
+            Layout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Value::object([
+                (
+                    "axis",
+                    if *axis == Axis::Row { "row" } else { "column" }.into(),
+                ),
                 ("ratio", (*ratio).into()),
                 ("first", first.to_json()),
                 ("second", second.to_json()),
@@ -81,7 +99,10 @@ impl Layout {
         }
         if v.get("axis").is_none() {
             let text = |key: &str| v[key].as_str().map(str::to_owned);
-            return Some(Layout::Pane { cwd: text("cwd"), title: text("title") });
+            return Some(Layout::Pane {
+                cwd: text("cwd"),
+                title: text("title"),
+            });
         }
         let axis = match v["axis"].as_str()? {
             "row" => Axis::Row,
@@ -101,15 +122,30 @@ impl Session {
     pub fn to_json(&self) -> String {
         let groups = self.groups.iter().map(|g| {
             let tabs = g.tabs.iter().map(|t| {
-                Value::object([("layout", t.layout.to_json()), ("focused", t.focused.into()), ("zoomed", t.zoomed.into())])
+                Value::object([
+                    ("layout", t.layout.to_json()),
+                    ("focused", t.focused.into()),
+                    ("zoomed", t.zoomed.into()),
+                ])
             });
             Value::object([
-                ("frame", g.frame.iter().map(|&n| n.into()).collect::<Vec<Value>>().into()),
+                (
+                    "frame",
+                    g.frame
+                        .iter()
+                        .map(|&n| n.into())
+                        .collect::<Vec<Value>>()
+                        .into(),
+                ),
                 ("tabs", tabs.collect::<Vec<_>>().into()),
                 ("selected", g.selected.into()),
             ])
         });
-        Value::object([("version", VERSION.into()), ("groups", groups.collect::<Vec<_>>().into())]).to_string()
+        Value::object([
+            ("version", VERSION.into()),
+            ("groups", groups.collect::<Vec<_>>().into()),
+        ])
+        .to_string()
     }
 
     /// `None` for a file that isn't a session this version reads.
@@ -120,21 +156,34 @@ impl Session {
         }
         let mut groups = Vec::new();
         for g in v["groups"].as_array()? {
-            let frame: Vec<f64> = g["frame"].as_array().unwrap_or_default().iter().filter_map(Value::as_f64).collect();
+            let frame: Vec<f64> = g["frame"]
+                .as_array()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(Value::as_f64)
+                .collect();
             let tabs: Vec<Tab> = g["tabs"]
                 .as_array()
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|t| {
                     let layout = Layout::from_json(&t["layout"], 0)?;
-                    Some(Tab { layout, focused: t["focused"].as_u64().unwrap_or(0) as usize, zoomed: t["zoomed"].as_bool() == Some(true) })
+                    Some(Tab {
+                        layout,
+                        focused: t["focused"].as_u64().unwrap_or(0) as usize,
+                        zoomed: t["zoomed"].as_bool() == Some(true),
+                    })
                 })
                 .collect();
             if frame.len() != 4 || tabs.is_empty() {
                 continue;
             }
             let selected = (g["selected"].as_u64().unwrap_or(0) as usize).min(tabs.len() - 1);
-            groups.push(Group { frame: [frame[0], frame[1], frame[2], frame[3]], tabs, selected });
+            groups.push(Group {
+                frame: [frame[0], frame[1], frame[2], frame[3]],
+                tabs,
+                selected,
+            });
         }
         Some(Session { groups })
     }
@@ -153,7 +202,9 @@ pub fn load() -> Option<Session> {
 /// Writes `text` whole: to a temporary file, then renamed over the old one.
 pub fn save(text: &str) -> io::Result<()> {
     let path = path().ok_or_else(|| io::Error::other("no home directory"))?;
-    let dir = path.parent().ok_or_else(|| io::Error::other("no directory"))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("no directory"))?;
     fs::create_dir_all(dir)?;
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, text)?;
@@ -172,7 +223,10 @@ mod tests {
     use super::*;
 
     fn pane(cwd: &str) -> Box<Layout> {
-        Box::new(Layout::Pane { cwd: Some(cwd.into()), title: None })
+        Box::new(Layout::Pane {
+            cwd: Some(cwd.into()),
+            title: None,
+        })
     }
 
     #[test]
@@ -181,21 +235,54 @@ mod tests {
             axis: Axis::Row,
             ratio: 0.25,
             first: pane("/a"),
-            second: Box::new(Layout::Split { axis: Axis::Column, ratio: 0.5, first: pane("/b c"), second: Box::new(Layout::Pane { cwd: None, title: Some("logs".into()) }) }),
+            second: Box::new(Layout::Split {
+                axis: Axis::Column,
+                ratio: 0.5,
+                first: pane("/b c"),
+                second: Box::new(Layout::Pane {
+                    cwd: None,
+                    title: Some("logs".into()),
+                }),
+            }),
         };
         let session = Session {
             groups: vec![
                 Group {
                     frame: [10.0, 20.0, 800.0, 600.0],
-                    tabs: vec![Tab { layout, focused: 2, zoomed: false }, Tab { layout: *pane("/d"), focused: 0, zoomed: true }],
+                    tabs: vec![
+                        Tab {
+                            layout,
+                            focused: 2,
+                            zoomed: false,
+                        },
+                        Tab {
+                            layout: *pane("/d"),
+                            focused: 0,
+                            zoomed: true,
+                        },
+                    ],
                     selected: 1,
                 },
-                Group { frame: [0.0, 0.0, 500.0, 400.0], tabs: vec![Tab { layout: *pane("/e"), focused: 0, zoomed: false }], selected: 0 },
+                Group {
+                    frame: [0.0, 0.0, 500.0, 400.0],
+                    tabs: vec![Tab {
+                        layout: *pane("/e"),
+                        focused: 0,
+                        zoomed: false,
+                    }],
+                    selected: 0,
+                },
             ],
         };
-        assert_eq!(Session::from_json(&session.to_json()), Some(session.clone()));
+        assert_eq!(
+            Session::from_json(&session.to_json()),
+            Some(session.clone())
+        );
         assert_eq!(session.groups[0].tabs[0].layout.first_cwd(), Some("/a"));
-        assert_eq!(session.groups[0].tabs[0].layout.titles(), [None, None, Some("logs")]);
+        assert_eq!(
+            session.groups[0].tabs[0].layout.titles(),
+            [None, None, Some("logs")]
+        );
     }
 
     #[test]
@@ -209,10 +296,20 @@ mod tests {
         ]}"#;
         let session = Session::from_json(text).unwrap();
         assert_eq!(session.groups.len(), 1);
-        assert_eq!((session.groups[0].selected, session.groups[0].tabs[0].layout.first_cwd()), (0, Some("/y")));
+        assert_eq!(
+            (
+                session.groups[0].selected,
+                session.groups[0].tabs[0].layout.first_cwd()
+            ),
+            (0, Some("/y"))
+        );
         // Absurd nesting.
-        let deep = format!(r#"{{"version": 1, "groups": [{{"frame": [0,0,1,1], "tabs": [{{"layout": {}}}]}}]}}"#,
-            "{\"axis\": \"row\", \"ratio\": 0.5, \"second\": {}, \"first\": ".repeat(100) + "{}" + &"}".repeat(100));
+        let deep = format!(
+            r#"{{"version": 1, "groups": [{{"frame": [0,0,1,1], "tabs": [{{"layout": {}}}]}}]}}"#,
+            "{\"axis\": \"row\", \"ratio\": 0.5, \"second\": {}, \"first\": ".repeat(100)
+                + "{}"
+                + &"}".repeat(100)
+        );
         assert_eq!(Session::from_json(&deep).map(|s| s.groups.len()), Some(0));
     }
 }

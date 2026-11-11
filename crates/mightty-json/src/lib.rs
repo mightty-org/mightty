@@ -69,11 +69,15 @@ impl Value {
 
     /// Non-negative integers only.
     pub fn as_u64(&self) -> Option<u64> {
-        self.as_f64().filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n <= u64::MAX as f64).map(|n| n as u64)
+        self.as_f64()
+            .filter(|n| n.fract() == 0.0 && *n >= 0.0 && *n <= u64::MAX as f64)
+            .map(|n| n as u64)
     }
 
     pub fn as_i64(&self) -> Option<i64> {
-        self.as_f64().filter(|n| n.fract() == 0.0 && n.abs() <= i64::MAX as f64).map(|n| n as i64)
+        self.as_f64()
+            .filter(|n| n.fract() == 0.0 && n.abs() <= i64::MAX as f64)
+            .map(|n| n as i64)
     }
 
     pub fn as_array(&self) -> Option<&[Value]> {
@@ -206,7 +210,11 @@ impl std::error::Error for Error {}
 const MAX_DEPTH: usize = 128;
 
 pub fn parse(input: &str) -> Result<Value, Error> {
-    let mut p = Parser { bytes: input.as_bytes(), pos: 0, depth: 0 };
+    let mut p = Parser {
+        bytes: input.as_bytes(),
+        pos: 0,
+        depth: 0,
+    };
     let value = p.value()?;
     p.skip_ws();
     if p.pos != p.bytes.len() {
@@ -223,7 +231,10 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn error(&self, message: &'static str) -> Error {
-        Error { offset: self.pos, message }
+        Error {
+            offset: self.pos,
+            message,
+        }
     }
 
     fn peek(&self) -> Option<u8> {
@@ -328,12 +339,16 @@ impl Parser<'_> {
         self.pos += 1; // "
         let mut out = Vec::new();
         loop {
-            let Some(b) = self.peek() else { return Err(self.error("unterminated string")) };
+            let Some(b) = self.peek() else {
+                return Err(self.error("unterminated string"));
+            };
             self.pos += 1;
             match b {
                 b'"' => break,
                 b'\\' => {
-                    let Some(e) = self.peek() else { return Err(self.error("unterminated escape")) };
+                    let Some(e) = self.peek() else {
+                        return Err(self.error("unterminated escape"));
+                    };
                     self.pos += 1;
                     let c = match e {
                         b'"' => '"',
@@ -358,7 +373,10 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, Error> {
-        let digits = self.bytes.get(self.pos..self.pos + 4).ok_or_else(|| self.error("short \\u escape"))?;
+        let digits = self
+            .bytes
+            .get(self.pos..self.pos + 4)
+            .ok_or_else(|| self.error("short \\u escape"))?;
         let s = std::str::from_utf8(digits).map_err(|_| self.error("invalid \\u escape"))?;
         let n = u32::from_str_radix(s, 16).map_err(|_| self.error("invalid \\u escape"))?;
         self.pos += 4;
@@ -415,7 +433,9 @@ impl Parser<'_> {
             }
         }
         let text = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or_default();
-        text.parse().map(Value::Number).map_err(|_| self.error("invalid number"))
+        text.parse()
+            .map(Value::Number)
+            .map_err(|_| self.error("invalid number"))
     }
 }
 
@@ -438,7 +458,10 @@ mod tests {
         let v = parse(r#""é 😀 中""#).unwrap();
         assert_eq!(v.as_str(), Some("é 😀 中"));
         assert_eq!(Value::from("\u{1}").to_string(), r#""\u0001""#);
-        assert_eq!(Value::from("\u{7f}\u{9b}é").to_string(), r#""\u007f\u009bé""#);
+        assert_eq!(
+            Value::from("\u{7f}\u{9b}é").to_string(),
+            r#""\u007f\u009bé""#
+        );
     }
 
     #[test]
@@ -451,7 +474,16 @@ mod tests {
 
     #[test]
     fn errors() {
-        for bad in ["", "{", "[1,]", r#"{"a" 1}"#, "01x", "\"\u{1}\"", "tru", "1 2"] {
+        for bad in [
+            "",
+            "{",
+            "[1,]",
+            r#"{"a" 1}"#,
+            "01x",
+            "\"\u{1}\"",
+            "tru",
+            "1 2",
+        ] {
             assert!(parse(bad).is_err(), "{bad:?} should fail");
         }
         let deep = "[".repeat(200) + &"]".repeat(200);

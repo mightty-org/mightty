@@ -17,11 +17,19 @@ impl LinkHint {
     /// A hint in `container` (the window's content view); `dark` as for the find bar.
     pub unsafe fn new(container: Id, dark: bool) -> Self {
         unsafe {
-            let panel: Id = msg!(msg!(class(c"NSVisualEffectView"), c"alloc"), c"initWithFrame:", CGRect::default());
+            let panel: Id = msg!(
+                msg!(class(c"NSVisualEffectView"), c"alloc"),
+                c"initWithFrame:",
+                CGRect::default()
+            );
             call!(panel, c"setMaterial:", 6isize); // popover
             call!(panel, c"setBlendingMode:", 1isize); // within the window
             call!(panel, c"setState:", 1isize); // always active
-            let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+            let name = if dark {
+                "NSAppearanceNameDarkAqua"
+            } else {
+                "NSAppearanceNameAqua"
+            };
             let appearance: Id = msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name));
             call!(panel, c"setAppearance:", appearance);
             call!(panel, c"setWantsLayer:", YES);
@@ -55,12 +63,29 @@ impl LinkHint {
             let container: Id = msg!(self.panel, c"superview");
             let bounds = send_rect(container, c"bounds");
             let size = send_rect(self.label, c"frame").size;
-            let width = (size.width + 2.0 * PAD).min(bounds.size.width - 2.0 * MARGIN).max(0.0);
-            let frame = CGRect { origin: CGPoint { x: MARGIN, y: MARGIN }, size: CGSize { width, height: HEIGHT } };
+            let width = (size.width + 2.0 * PAD)
+                .min(bounds.size.width - 2.0 * MARGIN)
+                .max(0.0);
+            let frame = CGRect {
+                origin: CGPoint {
+                    x: MARGIN,
+                    y: MARGIN,
+                },
+                size: CGSize {
+                    width,
+                    height: HEIGHT,
+                },
+            };
             call!(self.panel, c"setFrame:", frame);
             let label = CGRect {
-                origin: CGPoint { x: PAD, y: ((HEIGHT - size.height) / 2.0).round() },
-                size: CGSize { width: width - 2.0 * PAD, height: size.height },
+                origin: CGPoint {
+                    x: PAD,
+                    y: ((HEIGHT - size.height) / 2.0).round(),
+                },
+                size: CGSize {
+                    width: width - 2.0 * PAD,
+                    height: size.height,
+                },
             };
             call!(self.label, c"setFrame:", label);
             call!(self.panel, c"setHidden:", NO);
@@ -78,12 +103,20 @@ pub fn describe(uri: &str) -> String {
         s.chars()
             .map(|c| {
                 let hide = c.is_control() || is_invisible(c) || (ascii && !c.is_ascii());
-                if hide { format!("<U+{:04X}>", c as u32) } else { c.to_string() }
+                if hide {
+                    format!("<U+{:04X}>", c as u32)
+                } else {
+                    c.to_string()
+                }
             })
             .collect::<String>()
     };
     match host(uri).filter(|h| !h.is_empty()) {
-        Some(host) => format!("{}  —  {}", tail(&visible(host, true), MAX_HOST_CHARS), visible(uri, false)),
+        Some(host) => format!(
+            "{}  —  {}",
+            tail(&visible(host, true), MAX_HOST_CHARS),
+            visible(uri, false)
+        ),
         None => visible(uri, false),
     }
 }
@@ -108,7 +141,11 @@ fn tail(text: &str, max: usize) -> String {
 fn host(uri: &str) -> Option<&str> {
     let (_, rest) = uri.split_once("://")?;
     let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or_default();
-    Some(authority.rsplit_once('@').map_or(authority, |(_, host)| host))
+    Some(
+        authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host),
+    )
 }
 
 /// Format characters and other default-ignorable code points: they render
@@ -138,21 +175,53 @@ mod tests {
 
     #[test]
     fn hint_shows_host_and_hidden_characters() {
-        assert_eq!(describe("https://example.com/a?b"), "example.com  —  https://example.com/a?b");
+        assert_eq!(
+            describe("https://example.com/a?b"),
+            "example.com  —  https://example.com/a?b"
+        );
         assert_eq!(describe("mailto:me@x.org"), "mailto:me@x.org");
         // Right-to-left override could make "evil.com/moc.elgoog" read as google.com.
-        assert_eq!(describe("https://evil.com/\u{202E}moc.elgoog"), "evil.com  —  https://evil.com/<U+202E>moc.elgoog");
-        assert_eq!(describe("https://a\u{200B}b.com"), "a<U+200B>b.com  —  https://a<U+200B>b.com");
+        assert_eq!(
+            describe("https://evil.com/\u{202E}moc.elgoog"),
+            "evil.com  —  https://evil.com/<U+202E>moc.elgoog"
+        );
+        assert_eq!(
+            describe("https://a\u{200B}b.com"),
+            "a<U+200B>b.com  —  https://a<U+200B>b.com"
+        );
         // What comes before an @ is a user name, not where the link goes.
-        assert_eq!(describe("https://google.com@evil.com/x"), "evil.com  —  https://google.com@evil.com/x");
-        assert_eq!(describe("https://evil.com\\@google.com/"), "evil.com  —  https://evil.com\\@google.com/");
+        assert_eq!(
+            describe("https://google.com@evil.com/x"),
+            "evil.com  —  https://google.com@evil.com/x"
+        );
+        assert_eq!(
+            describe("https://evil.com\\@google.com/"),
+            "evil.com  —  https://evil.com\\@google.com/"
+        );
         // Look-alike letters, variation selectors and tag characters.
-        assert_eq!(describe("https://\u{0430}pple.com"), "<U+0430>pple.com  —  https://\u{0430}pple.com");
-        assert_eq!(describe("https://x.com/a\u{FE0F}\u{E0041}"), "x.com  —  https://x.com/a<U+FE0F><U+E0041>");
+        assert_eq!(
+            describe("https://\u{0430}pple.com"),
+            "<U+0430>pple.com  —  https://\u{0430}pple.com"
+        );
+        assert_eq!(
+            describe("https://x.com/a\u{FE0F}\u{E0041}"),
+            "x.com  —  https://x.com/a<U+FE0F><U+E0041>"
+        );
         // A long host keeps its end, where the real domain is.
         let long = format!("https://google.com.{}.evil.com/", "a".repeat(100));
         let shown = describe(&long);
-        assert!(shown.starts_with("…") && shown.split("  —  ").next().unwrap().ends_with("aaa.evil.com"), "{shown}");
-        assert_eq!(shown.split("  —  ").next().unwrap().chars().count(), MAX_HOST_CHARS);
+        assert!(
+            shown.starts_with("…")
+                && shown
+                    .split("  —  ")
+                    .next()
+                    .unwrap()
+                    .ends_with("aaa.evil.com"),
+            "{shown}"
+        );
+        assert_eq!(
+            shown.split("  —  ").next().unwrap().chars().count(),
+            MAX_HOST_CHARS
+        );
     }
 }

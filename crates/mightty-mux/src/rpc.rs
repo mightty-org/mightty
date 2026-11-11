@@ -36,11 +36,17 @@ pub struct RpcError {
 
 impl RpcError {
     fn invalid(message: impl Into<String>) -> Self {
-        Self { code: -32602, message: message.into() }
+        Self {
+            code: -32602,
+            message: message.into(),
+        }
     }
 
     fn failed(message: impl Into<String>) -> Self {
-        Self { code: -32000, message: message.into() }
+        Self {
+            code: -32000,
+            message: message.into(),
+        }
     }
 }
 
@@ -61,11 +67,19 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
             ("name", "mightty".into()),
             ("version", env!("CARGO_PKG_VERSION").into()),
             ("pid", process::id().into()),
-            ("socket", mux.socket_path().map(|p| p.display().to_string()).into()),
+            (
+                "socket",
+                mux.socket_path().map(|p| p.display().to_string()).into(),
+            ),
         ])),
         "pane.list" => {
             let locations = mux.host().locations();
-            Ok(Value::Array(mux.panes().iter().map(|p| info(p, location(&locations, p.id))).collect()))
+            Ok(Value::Array(
+                mux.panes()
+                    .iter()
+                    .map(|p| info(p, location(&locations, p.id)))
+                    .collect(),
+            ))
         }
         "pane.spawn" => {
             let pane = spawn(mux, params)?;
@@ -81,18 +95,28 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
         }
         "attention.list" => {
             let locations = mux.host().locations();
-            Ok(Value::Array(mux.attention_queue().iter().map(|p| info(p, location(&locations, p.id))).collect()))
+            Ok(Value::Array(
+                mux.attention_queue()
+                    .iter()
+                    .map(|p| info(p, location(&locations, p.id)))
+                    .collect(),
+            ))
         }
         "pane.focus" => {
             let pane = pane(mux, params)?;
             if !mux.host().focus_pane(pane.id) {
-                return Err(RpcError::failed(format!("pane {} isn't shown in a window", pane.id)));
+                return Err(RpcError::failed(format!(
+                    "pane {} isn't shown in a window",
+                    pane.id
+                )));
             }
             Ok(Value::Null)
         }
         "pane.send_text" => {
             let pane = pane(mux, params)?;
-            let text = params["text"].as_str().ok_or_else(|| RpcError::invalid("`text` is required"))?;
+            let text = params["text"]
+                .as_str()
+                .ok_or_else(|| RpcError::invalid("`text` is required"))?;
             let seen = pane.generation();
             write(&pane, text.as_bytes())?;
             if params["enter"].as_bool() == Some(true) {
@@ -107,12 +131,17 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
         }
         "pane.send_keys" => {
             let pane = pane(mux, params)?;
-            let keys = params["keys"].as_array().ok_or_else(|| RpcError::invalid("`keys` must be an array"))?;
+            let keys = params["keys"]
+                .as_array()
+                .ok_or_else(|| RpcError::invalid("`keys` must be an array"))?;
             let app_cursor = pane.term.lock().unwrap().modes().app_cursor;
             let mut bytes = Vec::new();
             for key in keys {
                 let name = key.as_str().unwrap_or_default();
-                bytes.extend(key_bytes(name, app_cursor).ok_or_else(|| RpcError::invalid(format!("unknown key `{name}`")))?);
+                bytes.extend(
+                    key_bytes(name, app_cursor)
+                        .ok_or_else(|| RpcError::invalid(format!("unknown key `{name}`")))?,
+                );
             }
             write(&pane, &bytes)?;
             Ok(Value::Null)
@@ -125,7 +154,12 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
             let term = pane.term.lock().unwrap();
             let blocks = term.command_blocks();
             let skip = blocks.len().saturating_sub(limit);
-            Ok(Value::Array(blocks[skip..].iter().map(|b| block_info(&term, b, max_output)).collect()))
+            Ok(Value::Array(
+                blocks[skip..]
+                    .iter()
+                    .map(|b| block_info(&term, b, max_output))
+                    .collect(),
+            ))
         }
         "pane.wait" => wait(&*pane(mux, params)?, params),
         "pane.run" => run(mux, params),
@@ -136,32 +170,44 @@ pub fn handle(mux: &Arc<Mux>, method: &str, params: &Value) -> Result<Value> {
             }
             Ok(Value::Null)
         }
-        _ => Err(RpcError { code: -32601, message: format!("unknown method `{method}`") }),
+        _ => Err(RpcError {
+            code: -32601,
+            message: format!("unknown method `{method}`"),
+        }),
     }
 }
 
 fn pane_id(params: &Value) -> Result<u64> {
-    params["pane"].as_u64().ok_or_else(|| RpcError::invalid("`pane` (a pane id) is required"))
+    params["pane"]
+        .as_u64()
+        .ok_or_else(|| RpcError::invalid("`pane` (a pane id) is required"))
 }
 
 fn pane(mux: &Mux, params: &Value) -> Result<Arc<Pane>> {
     let id = pane_id(params)?;
-    mux.pane(id).ok_or_else(|| RpcError::invalid(format!("no pane {id}")))
+    mux.pane(id)
+        .ok_or_else(|| RpcError::invalid(format!("no pane {id}")))
 }
 
 fn write(pane: &Pane, bytes: &[u8]) -> Result<()> {
     if !pane.is_alive() {
         return Err(RpcError::failed(format!("pane {} has exited", pane.id)));
     }
-    pane.write(bytes).map_err(|e| RpcError::failed(e.to_string()))
+    pane.write(bytes)
+        .map_err(|e| RpcError::failed(e.to_string()))
 }
 
 fn timeout(params: &Value, default: Duration) -> Duration {
-    params["timeout_ms"].as_u64().map_or(default, Duration::from_millis).min(MAX_WAIT)
+    params["timeout_ms"]
+        .as_u64()
+        .map_or(default, Duration::from_millis)
+        .min(MAX_WAIT)
 }
 
 fn max_output(params: &Value) -> usize {
-    params["max_output"].as_u64().map_or(DEFAULT_MAX_OUTPUT, |n| n as usize)
+    params["max_output"]
+        .as_u64()
+        .map_or(DEFAULT_MAX_OUTPUT, |n| n as usize)
 }
 
 /// Keeps the end of `text`, which is where command output matters most.
@@ -230,20 +276,31 @@ fn spawn(mux: &Mux, params: &Value) -> Result<Arc<Pane>> {
         shell: params["shell"].as_str().map(str::to_owned),
         cwd: params["cwd"].as_str().map(Into::into),
         env: match &params["env"] {
-            Value::Object(vars) => vars.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect(),
+            Value::Object(vars) => vars
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                .collect(),
             _ => Vec::new(),
         },
-        cols: params["cols"].as_u64().map_or(120, |n| n.clamp(10, 1000) as u16),
-        rows: params["rows"].as_u64().map_or(40, |n| n.clamp(4, 1000) as u16),
+        cols: params["cols"]
+            .as_u64()
+            .map_or(120, |n| n.clamp(10, 1000) as u16),
+        rows: params["rows"]
+            .as_u64()
+            .map_or(40, |n| n.clamp(4, 1000) as u16),
         visible: params["visible"].as_bool().unwrap_or(true),
         placement: {
             let beside = params["beside"].as_u64();
             let name = params["placement"].as_str().unwrap_or("window");
-            Placement::parse(name, beside)
-                .ok_or_else(|| RpcError::invalid(format!("unknown placement `{name}` (window, tab, right, down)")))?
+            Placement::parse(name, beside).ok_or_else(|| {
+                RpcError::invalid(format!(
+                    "unknown placement `{name}` (window, tab, right, down)"
+                ))
+            })?
         },
     };
-    mux.spawn(opts).map_err(|e| RpcError::failed(format!("spawn failed: {e}")))
+    mux.spawn(opts)
+        .map_err(|e| RpcError::failed(format!("spawn failed: {e}")))
 }
 
 fn read(pane: &Pane, params: &Value) -> Result<Value> {
@@ -254,7 +311,11 @@ fn read(pane: &Pane, params: &Value) -> Result<Value> {
             let last = term.lines_scrolled() + term.rows() as u64;
             term.text_range((term.first_line(), 0), (last, usize::MAX))
         }
-        other => return Err(RpcError::invalid(format!("unknown source `{other}` (screen, all)"))),
+        other => {
+            return Err(RpcError::invalid(format!(
+                "unknown source `{other}` (screen, all)"
+            )));
+        }
     };
     let text = text.trim_end();
     let max_lines = params["max_lines"].as_u64().map_or(500, |n| n as usize);
@@ -270,13 +331,20 @@ fn read(pane: &Pane, params: &Value) -> Result<Value> {
 }
 
 fn finished_commands(term: &Term) -> usize {
-    term.marks().iter().filter(|m| matches!(m.kind, MarkKind::CommandEnd { .. })).count()
+    term.marks()
+        .iter()
+        .filter(|m| matches!(m.kind, MarkKind::CommandEnd { .. }))
+        .count()
 }
 
 /// Re-checks `done` whenever the pane produces output, until it returns a
 /// value or `timeout` passes. Checks are throttled so heavy output can't
 /// turn waiting into a busy loop.
-fn wait_until(pane: &Pane, timeout: Duration, mut done: impl FnMut(&Pane) -> Option<Value>) -> Option<Value> {
+fn wait_until(
+    pane: &Pane,
+    timeout: Duration,
+    mut done: impl FnMut(&Pane) -> Option<Value>,
+) -> Option<Value> {
     let deadline = Instant::now() + timeout;
     let mut seen = pane.generation();
     loop {
@@ -288,7 +356,9 @@ fn wait_until(pane: &Pane, timeout: Duration, mut done: impl FnMut(&Pane) -> Opt
             return None;
         }
         seen = pane.wait_output(seen, deadline - now);
-        std::thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())));
+        std::thread::sleep(
+            Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 }
 
@@ -297,31 +367,46 @@ fn wait(pane: &Pane, params: &Value) -> Result<Value> {
     let command_finished = params["command_finished"].as_bool() == Some(true);
     let exited = params["exited"].as_bool() == Some(true);
     if text.is_none() && !command_finished && !exited {
-        return Err(RpcError::invalid("give at least one of `text`, `command_finished`, `exited`"));
+        return Err(RpcError::invalid(
+            "give at least one of `text`, `command_finished`, `exited`",
+        ));
     }
     let baseline = finished_commands(&pane.term.lock().unwrap());
     let result = wait_until(pane, timeout(params, DEFAULT_WAIT), |pane| {
         if exited && let Some(code) = pane.exit_status() {
-            return Some(Value::object([("matched", "exited".into()), ("exit_code", code.into())]));
+            return Some(Value::object([
+                ("matched", "exited".into()),
+                ("exit_code", code.into()),
+            ]));
         }
         let term = pane.term.lock().unwrap();
         if command_finished && finished_commands(&term) > baseline {
             let exit_code = term.command_blocks().last().and_then(|b| b.exit_code);
-            return Some(Value::object([("matched", "command_finished".into()), ("exit_code", exit_code.into())]));
+            return Some(Value::object([
+                ("matched", "command_finished".into()),
+                ("exit_code", exit_code.into()),
+            ]));
         }
         if let Some(text) = text {
             let last = term.lines_scrolled() + term.rows() as u64;
-            if term.text_range((term.first_line(), 0), (last, usize::MAX)).contains(text) {
+            if term
+                .text_range((term.first_line(), 0), (last, usize::MAX))
+                .contains(text)
+            {
                 return Some(Value::object([("matched", "text".into())]));
             }
         }
         if !pane.is_alive() {
             // Nothing more will happen.
-            return Some(Value::object([("matched", Value::Null), ("exited", true.into())]));
+            return Some(Value::object([
+                ("matched", Value::Null),
+                ("exited", true.into()),
+            ]));
         }
         None
     });
-    Ok(result.unwrap_or_else(|| Value::object([("matched", Value::Null), ("timed_out", true.into())])))
+    Ok(result
+        .unwrap_or_else(|| Value::object([("matched", Value::Null), ("timed_out", true.into())])))
 }
 
 /// Types a command into a shell pane and waits for it to finish, using shell
@@ -334,7 +419,11 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
         Some(_) => pane(mux, params)?,
         None => {
             let pane = mux
-                .spawn(SpawnOptions { cols: 120, rows: 40, ..Default::default() })
+                .spawn(SpawnOptions {
+                    cols: 120,
+                    rows: 40,
+                    ..Default::default()
+                })
                 .map_err(|e| RpcError::failed(format!("spawn failed: {e}")))?;
             // Wait for the first prompt so the command isn't typed into shell startup.
             let ready = wait_until(&pane, Duration::from_secs(10), |p| {
@@ -342,7 +431,9 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
             });
             if ready.is_none() {
                 mux.close(pane.id);
-                return Err(RpcError::failed("shell integration did not start (it supports zsh, bash and fish)"));
+                return Err(RpcError::failed(
+                    "shell integration did not start (it supports zsh, bash and fish)",
+                ));
             }
             pane
         }
@@ -356,8 +447,15 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
     let baseline = {
         let term = pane.term.lock().unwrap();
         // Typing into a running program would hand it the command instead.
-        if term.marks().last().is_some_and(|m| m.kind == MarkKind::OutputStart) {
-            return Err(RpcError::failed(format!("pane {} is still running a command", pane.id)));
+        if term
+            .marks()
+            .last()
+            .is_some_and(|m| m.kind == MarkKind::OutputStart)
+        {
+            return Err(RpcError::failed(format!(
+                "pane {} is still running a command",
+                pane.id
+            )));
         }
         finished_commands(&term)
     };

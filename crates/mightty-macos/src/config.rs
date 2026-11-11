@@ -127,7 +127,12 @@ pub struct Fonts {
 
 impl Default for Fonts {
     fn default() -> Self {
-        Self { families: vec!["Menlo".into()], styled: Default::default(), features: Vec::new(), variations: Default::default() }
+        Self {
+            families: vec!["Menlo".into()],
+            styled: Default::default(),
+            features: Vec::new(),
+            variations: Default::default(),
+        }
     }
 }
 
@@ -149,15 +154,28 @@ fn feature(v: &str) -> Result<([u8; 4], u32), String> {
     }
     let v = v.strip_prefix('+').unwrap_or(v);
     match v.split_once('=') {
-        Some((name, value)) => Ok((tag(name.trim())?, value.trim().parse().map_err(|_| "expects a whole number after =")?)),
+        Some((name, value)) => Ok((
+            tag(name.trim())?,
+            value
+                .trim()
+                .parse()
+                .map_err(|_| "expects a whole number after =")?,
+        )),
         None => Ok((tag(v)?, 1)),
     }
 }
 
 /// `font-variation`: `wght=450`.
 fn variation(v: &str) -> Result<([u8; 4], f64), String> {
-    let (name, value) = v.split_once('=').ok_or("expects AXIS=VALUE, such as wght=450")?;
-    let value = value.trim().parse().ok().filter(|v: &f64| v.is_finite()).ok_or("expects a number after =")?;
+    let (name, value) = v
+        .split_once('=')
+        .ok_or("expects AXIS=VALUE, such as wght=450")?;
+    let value = value
+        .trim()
+        .parse()
+        .ok()
+        .filter(|v: &f64| v.is_finite())
+        .ok_or("expects a number after =")?;
     Ok((tag(name.trim())?, value))
 }
 
@@ -199,7 +217,13 @@ impl Default for Behaviour {
             hide_mouse: false,
             scrollbar: true,
             titlebar: Titlebar::Native,
-            bell: Bell { system: true, audio: false, attention: false, title: true, border: false },
+            bell: Bell {
+                system: true,
+                audio: false,
+                attention: false,
+                title: true,
+                border: false,
+            },
             password_mask: true,
             scroll_multiplier: 1.0,
         }
@@ -361,9 +385,16 @@ impl Extent {
         let (number, percent) = match (s.strip_suffix('%'), s.strip_suffix("px")) {
             (Some(n), _) => (n, true),
             (None, Some(n)) => (n, false),
-            _ => return Err(format!("`{s}`: expects a percentage (40%) or points (500px)")),
+            _ => {
+                return Err(format!(
+                    "`{s}`: expects a percentage (40%) or points (500px)"
+                ));
+            }
         };
-        let n: f64 = number.trim().parse().map_err(|_| format!("`{s}`: not a number"))?;
+        let n: f64 = number
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{s}`: not a number"))?;
         match percent {
             true if n > 0.0 && n <= 100.0 => Ok(Self::Percent(n)),
             false if n > 0.0 => Ok(Self::Points(n)),
@@ -518,7 +549,15 @@ pub struct SettingView {
 }
 
 /// Settings given any number of times.
-const MANY: &[&str] = &["keybind", "palette", "font-feature", "font-variation", "font-variation-bold", "font-variation-italic", "font-variation-bold-italic"];
+const MANY: &[&str] = &[
+    "keybind",
+    "palette",
+    "font-feature",
+    "font-variation",
+    "font-variation-bold",
+    "font-variation-italic",
+    "font-variation-bold-italic",
+];
 
 /// The values a setting with a fixed few takes, for completing them;
 /// empty for the rest. `bell-features` takes a comma list of these.
@@ -538,7 +577,16 @@ pub fn choices(name: &str) -> &'static [&'static str] {
         "macos-titlebar-style" => &["native", "transparent", "tabs", "hidden"],
         "scrollbar" => &["system", "never"],
         "bell-features" => &[
-            "system", "audio", "attention", "title", "border", "no-system", "no-audio", "no-attention", "no-title", "no-border",
+            "system",
+            "audio",
+            "attention",
+            "title",
+            "border",
+            "no-system",
+            "no-audio",
+            "no-attention",
+            "no-title",
+            "no-border",
         ],
         _ => match SETTINGS.iter().find(|s| s.name == name) {
             Some(s) if s.value == "BOOL" => &["true", "false"],
@@ -558,7 +606,9 @@ pub fn theme_path(name: &str) -> Option<PathBuf> {
     if own.is_file() {
         return Some(own);
     }
-    bundled_themes().map(|dir| dir.join(name)).filter(|p| p.is_file())
+    bundled_themes()
+        .map(|dir| dir.join(name))
+        .filter(|p| p.is_file())
 }
 
 /// Sets `name` to `value` in the config file at `path`, its comments and
@@ -572,7 +622,10 @@ pub fn write_setting(path: &Path, name: &str, value: Option<&str>) -> std::io::R
     };
     let sets = |line: &str| {
         let line = line.trim_start();
-        !line.starts_with('#') && line.split_once('=').is_some_and(|(key, _)| key.trim() == name)
+        !line.starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == name)
     };
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     match value {
@@ -670,7 +723,14 @@ const SETTINGS: &[Setting] = &[
                     n => format!("{name}={n}"),
                 }
             };
-            (!c.fonts.features.is_empty()).then(|| c.fonts.features.iter().map(show).collect::<Vec<_>>().join(", "))
+            (!c.fonts.features.is_empty()).then(|| {
+                c.fonts
+                    .features
+                    .iter()
+                    .map(show)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
         },
     },
     Setting {
@@ -712,7 +772,11 @@ const SETTINGS: &[Setting] = &[
         color: false,
         set: |c, v| {
             let range = MIN_FONT_SIZE..=MAX_FONT_SIZE;
-            c.font_size = v.parse().ok().filter(|p| range.contains(p)).ok_or(format!("expects {MIN_FONT_SIZE} to {MAX_FONT_SIZE}"))?;
+            c.font_size = v
+                .parse()
+                .ok()
+                .filter(|p| range.contains(p))
+                .ok_or(format!("expects {MIN_FONT_SIZE} to {MAX_FONT_SIZE}"))?;
             Ok(())
         },
         get: |c| Some(c.font_size.to_string()),
@@ -792,14 +856,21 @@ const SETTINGS: &[Setting] = &[
         color: false,
         set: |c, v| {
             let v = v.trim();
-            let (number, unit) = match (v.strip_suffix("ms"), v.strip_suffix('s'), v.strip_suffix('m')) {
+            let (number, unit) = match (
+                v.strip_suffix("ms"),
+                v.strip_suffix('s'),
+                v.strip_suffix('m'),
+            ) {
                 (Some(n), ..) => (n, 0.001),
                 (None, Some(n), _) => (n, 1.0),
                 (None, None, Some(n)) => (n, 60.0),
                 _ if v == "0" => ("0", 1.0),
                 _ => return Err("expects a time: 5s, 500ms or 1m".into()),
             };
-            let n: f64 = number.trim().parse().map_err(|_| "expects a time: 5s, 500ms or 1m")?;
+            let n: f64 = number
+                .trim()
+                .parse()
+                .map_err(|_| "expects a time: 5s, 500ms or 1m")?;
             if !(0.0..=3600.0).contains(&(n * unit)) {
                 return Err("expects a time up to an hour".into());
             }
@@ -842,10 +913,12 @@ const SETTINGS: &[Setting] = &[
             c.quick_size = (deep, along);
             Ok(())
         },
-        get: |c| Some(match c.quick_size {
-            (deep, Some(along)) => format!("{},{}", deep.show(), along.show()),
-            (deep, None) => deep.show(),
-        }),
+        get: |c| {
+            Some(match c.quick_size {
+                (deep, Some(along)) => format!("{},{}", deep.show(), along.show()),
+                (deep, None) => deep.show(),
+            })
+        },
     },
     Setting {
         name: "quick-terminal-autohide",
@@ -925,7 +998,16 @@ const SETTINGS: &[Setting] = &[
             };
             Ok(())
         },
-        get: |c| Some(if c.font_backend == FontBackend::Mightty { "mightty" } else { "coretext" }.into()),
+        get: |c| {
+            Some(
+                if c.font_backend == FontBackend::Mightty {
+                    "mightty"
+                } else {
+                    "coretext"
+                }
+                .into(),
+            )
+        },
     },
     Setting {
         name: "grapheme-width",
@@ -957,7 +1039,16 @@ const SETTINGS: &[Setting] = &[
             };
             Ok(())
         },
-        get: |c| Some(if c.colorspace == Colorspace::DisplayP3 { "display-p3" } else { "srgb" }.into()),
+        get: |c| {
+            Some(
+                if c.colorspace == Colorspace::DisplayP3 {
+                    "display-p3"
+                } else {
+                    "srgb"
+                }
+                .into(),
+            )
+        },
     },
     Setting {
         name: "window-save-state",
@@ -1005,7 +1096,11 @@ const SETTINGS: &[Setting] = &[
             c.background_blur = match v {
                 "true" => 20,
                 "false" => 0,
-                _ => v.parse().ok().filter(|&r| r <= 100).ok_or("expects true, false or a radius from 0 to 100")?,
+                _ => v
+                    .parse()
+                    .ok()
+                    .filter(|&r| r <= 100)
+                    .ok_or("expects true, false or a radius from 0 to 100")?,
             };
             Ok(())
         },
@@ -1183,15 +1278,30 @@ const SETTINGS: &[Setting] = &[
                     "attention" => &mut bell.attention,
                     "title" => &mut bell.title,
                     "border" => &mut bell.border,
-                    _ => return Err(format!("unknown feature `{name}`: system, audio, attention, title or border")),
+                    _ => {
+                        return Err(format!(
+                            "unknown feature `{name}`: system, audio, attention, title or border"
+                        ));
+                    }
                 } = on;
             }
             Ok(())
         },
         get: |c| {
             let b = c.behaviour.bell;
-            let list = [("system", b.system), ("audio", b.audio), ("attention", b.attention), ("title", b.title), ("border", b.border)];
-            Some(list.iter().map(|&(n, on)| if on { n.to_owned() } else { format!("no-{n}") }).collect::<Vec<_>>().join(","))
+            let list = [
+                ("system", b.system),
+                ("audio", b.audio),
+                ("attention", b.attention),
+                ("title", b.title),
+                ("border", b.border),
+            ];
+            Some(
+                list.iter()
+                    .map(|&(n, on)| if on { n.to_owned() } else { format!("no-{n}") })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
         },
     },
     Setting {
@@ -1237,7 +1347,16 @@ const SETTINGS: &[Setting] = &[
             };
             Ok(())
         },
-        get: |c| Some(if c.behaviour.scrollbar { "system" } else { "never" }.into()),
+        get: |c| {
+            Some(
+                if c.behaviour.scrollbar {
+                    "system"
+                } else {
+                    "never"
+                }
+                .into(),
+            )
+        },
     },
     Setting {
         name: "password-mask",
@@ -1257,8 +1376,11 @@ const SETTINGS: &[Setting] = &[
         help: "scroll this many times as far as the wheel or trackpad says (0.01 to 10000)",
         color: false,
         set: |c, v| {
-            c.behaviour.scroll_multiplier =
-                v.parse().ok().filter(|m: &f64| (0.01..=10000.0).contains(m)).ok_or("expects a number from 0.01 to 10000")?;
+            c.behaviour.scroll_multiplier = v
+                .parse()
+                .ok()
+                .filter(|m: &f64| (0.01..=10000.0).contains(m))
+                .ok_or("expects a number from 0.01 to 10000")?;
             Ok(())
         },
         get: |c| Some(c.behaviour.scroll_multiplier.to_string()),
@@ -1280,7 +1402,11 @@ const SETTINGS: &[Setting] = &[
         color: false,
         set: |c, v| {
             c.theme_name = (!v.is_empty()).then(|| v.to_owned());
-            let pick = |side: &str| v.split(',').find_map(|part| part.trim().strip_prefix(side)).map(str::trim);
+            let pick = |side: &str| {
+                v.split(',')
+                    .find_map(|part| part.trim().strip_prefix(side))
+                    .map(str::trim)
+            };
             match (pick("light:"), pick("dark:")) {
                 (Some(light), Some(dark)) => {
                     c.follows_appearance = true;
@@ -1412,7 +1538,10 @@ const SETTINGS: &[Setting] = &[
         color: true,
         set: |c, v| {
             let (index, value) = v.split_once('=').ok_or("expects N=COLOR")?;
-            let index: u8 = index.trim().parse().map_err(|_| "expects an index from 0 to 255")?;
+            let index: u8 = index
+                .trim()
+                .parse()
+                .map_err(|_| "expects an index from 0 to 255")?;
             c.theme.palette[index as usize] = color(value.trim())?;
             Ok(())
         },
@@ -1444,7 +1573,10 @@ const SETTINGS: &[Setting] = &[
 
 /// Flags about config files themselves; read before any file is loaded.
 const FILE_FLAGS: [(&str, &str); 2] = [
-    ("config-file=PATH", "also load this config file, after the default one"),
+    (
+        "config-file=PATH",
+        "also load this config file, after the default one",
+    ),
     ("config-default-files=false", "skip the default config file"),
 ];
 
@@ -1461,22 +1593,33 @@ fn set_variation(c: &mut Config, style: usize, v: &str) -> Result<(), String> {
 }
 
 fn show_variations(list: &[([u8; 4], f64)]) -> Option<String> {
-    let show = |(tag, value): &([u8; 4], f64)| format!("{}={value}", String::from_utf8_lossy(tag).trim_end());
+    let show = |(tag, value): &([u8; 4], f64)| {
+        format!("{}={value}", String::from_utf8_lossy(tag).trim_end())
+    };
     (!list.is_empty()).then(|| list.iter().map(show).collect::<Vec<_>>().join(", "))
 }
 
 /// A number from `min` to 1.
 fn fraction(v: &str, min: f64) -> Result<f64, String> {
-    v.parse().ok().filter(|f: &f64| (min..=1.0).contains(f)).ok_or_else(|| format!("expects a number from {min} to 1"))
+    v.parse()
+        .ok()
+        .filter(|f: &f64| (min..=1.0).contains(f))
+        .ok_or_else(|| format!("expects a number from {min} to 1"))
 }
 
 /// Points of padding, 0 to 200.
 fn padding(v: &str) -> Result<f64, String> {
-    v.parse().ok().filter(|p: &f64| (0.0..=200.0).contains(p)).ok_or_else(|| "expects points from 0 to 200".into())
+    v.parse()
+        .ok()
+        .filter(|p: &f64| (0.0..=200.0).contains(p))
+        .ok_or_else(|| "expects points from 0 to 200".into())
 }
 
 fn cells(v: &str) -> Result<u16, String> {
-    v.parse().ok().filter(|&n| n > 0).ok_or_else(|| "expects a whole number above 0".into())
+    v.parse()
+        .ok()
+        .filter(|&n| n > 0)
+        .ok_or_else(|| "expects a whole number above 0".into())
 }
 
 /// `#rrggbb` or `rrggbb`.
@@ -1507,8 +1650,13 @@ pub fn bundled_themes() -> Option<PathBuf> {
 /// of the same name.
 pub fn theme_names() -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for dir in [config_dir().map(|d| d.join("themes")), bundled_themes()].into_iter().flatten() {
-        let Ok(entries) = fs::read_dir(dir) else { continue };
+    for dir in [config_dir().map(|d| d.join("themes")), bundled_themes()]
+        .into_iter()
+        .flatten()
+    {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.starts_with('.') && entry.path().is_file() && !names.contains(&name) {
@@ -1529,8 +1677,11 @@ fn expand_home(path: &str) -> PathBuf {
 
 /// `$XDG_CONFIG_HOME/mightty`, else `~/.config/mightty`.
 pub fn config_dir() -> Option<PathBuf> {
-    let base = env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()).map(PathBuf::from);
-    base.or_else(|| Some(PathBuf::from(env::var_os("HOME")?).join(".config"))).map(|d| d.join("mightty"))
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    base.or_else(|| Some(PathBuf::from(env::var_os("HOME")?).join(".config")))
+        .map(|d| d.join("mightty"))
 }
 
 impl Config {
@@ -1541,19 +1692,29 @@ impl Config {
         Self::load_from(config_dir().map(|d| d.join("config")), args)
     }
 
-    fn load_from(default_file: Option<PathBuf>, args: &[String]) -> Result<(Self, Vec<String>), String> {
+    fn load_from(
+        default_file: Option<PathBuf>,
+        args: &[String],
+    ) -> Result<(Self, Vec<String>), String> {
         let flags = &args[..args.iter().position(|a| a == "-e").unwrap_or(args.len())];
         let mut files = Vec::new();
         let mut default_files = true;
         for arg in flags {
             if let Some(v) = arg.strip_prefix("--config-default-files=") {
-                default_files = v.parse().map_err(|_| "config-default-files: expects true or false")?;
+                default_files = v
+                    .parse()
+                    .map_err(|_| "config-default-files: expects true or false")?;
             } else if let Some(v) = arg.strip_prefix("--config-file=") {
                 files.push(expand_home(v));
             }
         }
 
-        let mut config = Self { default_file: default_file.clone(), args: args.to_vec(), dark_mode: system_dark(), ..Self::default() };
+        let mut config = Self {
+            default_file: default_file.clone(),
+            args: args.to_vec(),
+            dark_mode: system_dark(),
+            ..Self::default()
+        };
         let mut warnings = Vec::new();
         if default_files && let Some(path) = default_file {
             warnings.extend(config.apply_file(&path, true));
@@ -1574,7 +1735,10 @@ impl Config {
 
     /// The default config file, unless `--config-default-files=false`.
     pub fn file(&self) -> Option<&Path> {
-        let skipped = self.args.iter().any(|a| a == "--config-default-files=false");
+        let skipped = self
+            .args
+            .iter()
+            .any(|a| a == "--config-default-files=false");
         self.default_file.as_deref().filter(|_| !skipped)
     }
 
@@ -1584,10 +1748,16 @@ impl Config {
         // The same file however it's reached (`parts/../config`, links).
         let real = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
         if self.including.contains(&real) {
-            return vec![format!("{}: included again from itself (a config-file loop)", path.display())];
+            return vec![format!(
+                "{}: included again from itself (a config-file loop)",
+                path.display()
+            )];
         }
         if self.including.len() >= MAX_INCLUDE_DEPTH {
-            return vec![format!("{}: config-file nested more than {MAX_INCLUDE_DEPTH} deep", path.display())];
+            return vec![format!(
+                "{}: config-file nested more than {MAX_INCLUDE_DEPTH} deep",
+                path.display()
+            )];
         }
         match fs::read_to_string(path) {
             Ok(text) => {
@@ -1619,8 +1789,13 @@ impl Config {
             let result = match line.split_once('=') {
                 Some((name, value)) if name.trim() == "config-file" && !colors_only => {
                     let value = value.trim();
-                    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
-                    let (optional, value) = value.strip_prefix('?').map_or((false, value), |v| (true, v));
+                    let value = value
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .unwrap_or(value);
+                    let (optional, value) = value
+                        .strip_prefix('?')
+                        .map_or((false, value), |v| (true, v));
                     let path = expand_home(value);
                     let dir = origin.parent().unwrap_or(Path::new(""));
                     includes.push((dir.join(path), optional));
@@ -1628,7 +1803,10 @@ impl Config {
                 }
                 Some((name, value)) => {
                     let value = value.trim();
-                    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+                    let value = value
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .unwrap_or(value);
                     self.set_checked(name.trim(), value, colors_only)
                 }
                 None => Err("expected `name = value`".into()),
@@ -1648,7 +1826,10 @@ impl Config {
             expand_home(name)
         } else {
             // The user's own first, then those bundled.
-            let own = config_dir().ok_or("no config directory (HOME is unset)")?.join("themes").join(name);
+            let own = config_dir()
+                .ok_or("no config directory (HOME is unset)")?
+                .join("themes")
+                .join(name);
             match bundled_themes().map(|dir| dir.join(name)) {
                 Some(bundled) if !own.exists() && bundled.exists() => bundled,
                 _ => own,
@@ -1667,9 +1848,14 @@ impl Config {
     }
 
     fn set_checked(&mut self, name: &str, value: &str, colors_only: bool) -> Result<(), String> {
-        let setting = SETTINGS.iter().find(|s| s.name == name).ok_or_else(|| format!("unknown setting `{name}`"))?;
+        let setting = SETTINGS
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| format!("unknown setting `{name}`"))?;
         if colors_only && !setting.color {
-            return Err(format!("`{name}` isn't a colour setting, so it can't be in a theme"));
+            return Err(format!(
+                "`{name}` isn't a colour setting, so it can't be in a theme"
+            ));
         }
         (setting.set)(self, value).map_err(|e| format!("{name}: {e}"))
     }
@@ -1685,7 +1871,14 @@ impl Config {
                 if program.is_empty() {
                     return Err("-e expects a program".into());
                 }
-                self.command = Some(format!("exec {}", program.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")));
+                self.command = Some(format!(
+                    "exec {}",
+                    program
+                        .iter()
+                        .map(|a| shell_quote(a))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
                 if self.cwd.is_none() {
                     self.cwd = env::current_dir().ok();
                 }
@@ -1694,7 +1887,9 @@ impl Config {
             let (name, value) = arg
                 .strip_prefix("--")
                 .and_then(|a| a.split_once('='))
-                .ok_or_else(|| format!("unexpected argument `{arg}`; settings are written --name=value"))?;
+                .ok_or_else(|| {
+                    format!("unexpected argument `{arg}`; settings are written --name=value")
+                })?;
             if !matches!(name, "config-file" | "config-default-files") {
                 self.set(name, value)?;
             }
@@ -1737,14 +1932,20 @@ impl Config {
             "Settings are read from {file}/config (`name = value` lines),\n\
              then from --name=value flags, which win. [current value]\n\n"
         );
-        let mut flags: Vec<(String, String)> =
-            SETTINGS.iter().map(|s| (format!("--{}={}", s.name, s.value), s.help.to_owned())).collect();
+        let mut flags: Vec<(String, String)> = SETTINGS
+            .iter()
+            .map(|s| (format!("--{}={}", s.name, s.value), s.help.to_owned()))
+            .collect();
         for (s, value) in SETTINGS.iter().zip(&mut flags) {
             if let Some(current) = (s.get)(self) {
                 value.1 += &format!(" [{current}]");
             }
         }
-        flags.extend(FILE_FLAGS.iter().map(|(flag, help)| (format!("--{flag}"), (*help).to_owned())));
+        flags.extend(
+            FILE_FLAGS
+                .iter()
+                .map(|(flag, help)| (format!("--{flag}"), (*help).to_owned())),
+        );
         let width = flags.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
         for (flag, help) in flags {
             out += &format!("  {flag:width$}  {help}\n");
@@ -1755,7 +1956,11 @@ impl Config {
 
 /// `arg` as one word for `sh -c`.
 fn shell_quote(arg: &str) -> String {
-    if !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&b)) {
+    if !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&b))
+    {
         arg.to_owned()
     } else {
         format!("'{}'", arg.replace('\'', "'\\''"))
@@ -1781,10 +1986,26 @@ mod tests {
     #[test]
     fn flags_set_settings() {
         let mut c = Config::default();
-        c.apply_args(&args(&["--window-width=120", "--window-height=40", "--font-family=SF Mono", "--font-size=13.5", "--window-vsync=false"]))
+        c.apply_args(&args(&[
+            "--window-width=120",
+            "--window-height=40",
+            "--font-family=SF Mono",
+            "--font-size=13.5",
+            "--window-vsync=false",
+        ]))
+        .unwrap();
+        assert_eq!(
+            (
+                c.cols,
+                c.rows,
+                c.fonts.families[0].as_str(),
+                c.font_size,
+                c.vsync
+            ),
+            (120, 40, "SF Mono", 13.5, false)
+        );
+        c.apply_args(&args(&["--macos-option-as-alt=left"]))
             .unwrap();
-        assert_eq!((c.cols, c.rows, c.fonts.families[0].as_str(), c.font_size, c.vsync), (120, 40, "SF Mono", 13.5, false));
-        c.apply_args(&args(&["--macos-option-as-alt=left"])).unwrap();
         assert_eq!(c.option_as_alt, Some(OptionAsAlt::Left));
     }
 
@@ -1792,32 +2013,48 @@ mod tests {
     fn confirm_close_values() {
         let mut c = Config::default();
         assert_eq!(c.confirm_close, ConfirmClose::Running);
-        for (value, expected) in [("always", ConfirmClose::Always), ("false", ConfirmClose::Never), ("true", ConfirmClose::Running)] {
-            c.apply_args(&args(&[&format!("--confirm-close-surface={value}")])).unwrap();
+        for (value, expected) in [
+            ("always", ConfirmClose::Always),
+            ("false", ConfirmClose::Never),
+            ("true", ConfirmClose::Running),
+        ] {
+            c.apply_args(&args(&[&format!("--confirm-close-surface={value}")]))
+                .unwrap();
             assert_eq!(c.confirm_close, expected);
         }
-        assert!(c.apply_args(&args(&["--confirm-close-surface=sometimes"])).is_err());
+        assert!(
+            c.apply_args(&args(&["--confirm-close-surface=sometimes"]))
+                .is_err()
+        );
     }
 
     #[test]
     fn save_state_values() {
         let mut c = Config::default();
         assert_eq!(c.save_state, SaveState::Default);
-        c.apply_args(&args(&["--window-save-state=always"])).unwrap();
+        c.apply_args(&args(&["--window-save-state=always"]))
+            .unwrap();
         assert_eq!(c.save_state, SaveState::Always);
-        assert!(c.apply_args(&args(&["--window-save-state=sometimes"])).is_err());
+        assert!(
+            c.apply_args(&args(&["--window-save-state=sometimes"]))
+                .is_err()
+        );
     }
 
     #[test]
     fn option_as_alt_picks_keys() {
         let (left, right) = (0x20 | 1 << 19, 0x40 | 1 << 19);
         let us = || true;
-        assert!(OptionAsAlt::applies(None, left, us) && !OptionAsAlt::applies(None, left, || false));
+        assert!(
+            OptionAsAlt::applies(None, left, us) && !OptionAsAlt::applies(None, left, || false)
+        );
         assert!(OptionAsAlt::applies(Some(OptionAsAlt::Left), left, us));
         assert!(!OptionAsAlt::applies(Some(OptionAsAlt::Left), right, us));
         assert!(OptionAsAlt::applies(Some(OptionAsAlt::Right), right, us));
         assert!(!OptionAsAlt::applies(Some(OptionAsAlt::None), left, us));
-        assert!(OptionAsAlt::applies(Some(OptionAsAlt::Both), right, || false));
+        assert!(OptionAsAlt::applies(Some(OptionAsAlt::Both), right, || {
+            false
+        }));
     }
 
     #[test]
@@ -1837,7 +2074,10 @@ mod tests {
             "--palette=256=#000000",
             "--palette=#000000",
         ] {
-            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+            assert!(
+                Config::default().apply_args(&args(&[bad])).is_err(),
+                "{bad}"
+            );
         }
         assert!(Config::default().apply_args(&args(&["-e"])).is_err());
     }
@@ -1845,8 +2085,18 @@ mod tests {
     #[test]
     fn e_takes_the_rest() {
         let mut c = Config::default();
-        c.apply_args(&args(&["--working-directory=/tmp", "-e", "echo", "it's", "--window-width=5"])).unwrap();
-        assert_eq!(c.command.as_deref(), Some("exec echo 'it'\\''s' --window-width=5"));
+        c.apply_args(&args(&[
+            "--working-directory=/tmp",
+            "-e",
+            "echo",
+            "it's",
+            "--window-width=5",
+        ]))
+        .unwrap();
+        assert_eq!(
+            c.command.as_deref(),
+            Some("exec echo 'it'\\''s' --window-width=5")
+        );
         assert_eq!(c.cwd, Some(PathBuf::from("/tmp")));
         assert_eq!(c.cols, 100);
     }
@@ -1861,9 +2111,16 @@ mod tests {
              palette = 1=#ff0000\nwindow-height = 0\nnonsense\nwindow-width = 91\n",
         )
         .unwrap();
-        let (c, warnings) = Config::load_from(Some(file.clone()), &args(&["--window-width=120"])).unwrap();
-        assert_eq!((c.cols, c.rows, c.fonts.families.join(",")), (120, 30, "Iosevka Term".into()));
-        assert_eq!((c.theme.background, c.theme.palette[1]), ((0x10, 0x10, 0x10), (0xff, 0, 0)));
+        let (c, warnings) =
+            Config::load_from(Some(file.clone()), &args(&["--window-width=120"])).unwrap();
+        assert_eq!(
+            (c.cols, c.rows, c.fonts.families.join(",")),
+            (120, 30, "Iosevka Term".into())
+        );
+        assert_eq!(
+            (c.theme.background, c.theme.palette[1]),
+            ((0x10, 0x10, 0x10), (0xff, 0, 0))
+        );
         assert_eq!(c.term_options().colors.background, (0x10, 0x10, 0x10));
         let at = |line| format!("{}:{line}: ", file.display());
         assert_eq!(warnings.len(), 2, "{warnings:?}");
@@ -1871,7 +2128,9 @@ mod tests {
         assert!(warnings[1].starts_with(&at(8)));
 
         // Skipping the default file, and loading another one.
-        let (c, _) = Config::load_from(Some(file.clone()), &args(&["--config-default-files=false"])).unwrap();
+        let (c, _) =
+            Config::load_from(Some(file.clone()), &args(&["--config-default-files=false"]))
+                .unwrap();
         assert_eq!(c.cols, 100);
         let other = dir.join("other");
         fs::write(&other, "window-width = 70\n").unwrap();
@@ -1888,12 +2147,22 @@ mod tests {
     fn settings_are_written_in_place() {
         let dir = scratch("write");
         let file = dir.join("config");
-        fs::write(&file, "# mine\nfont-size = 13\n# font-size = 9\nkeybind = cmd+t=new_tab\nfont-size=14\n").unwrap();
+        fs::write(
+            &file,
+            "# mine\nfont-size = 13\n# font-size = 9\nkeybind = cmd+t=new_tab\nfont-size=14\n",
+        )
+        .unwrap();
         write_setting(&file, "font-size", Some("15")).unwrap();
         write_setting(&file, "theme", Some("Nord")).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "# mine\nfont-size = 13\n# font-size = 9\nkeybind = cmd+t=new_tab\nfont-size = 15\ntheme = Nord\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "# mine\nfont-size = 13\n# font-size = 9\nkeybind = cmd+t=new_tab\nfont-size = 15\ntheme = Nord\n"
+        );
         write_setting(&file, "font-size", None).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "# mine\n# font-size = 9\nkeybind = cmd+t=new_tab\ntheme = Nord\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "# mine\n# font-size = 9\nkeybind = cmd+t=new_tab\ntheme = Nord\n"
+        );
         assert!(check("font-size", "abc").is_err() && check("font-size", "16").is_ok());
         let _ = fs::remove_file(&file);
     }
@@ -1901,7 +2170,10 @@ mod tests {
     #[test]
     fn behaviour_settings() {
         let mut c = Config::default();
-        assert_eq!((c.behaviour.clipboard_read, c.behaviour.clipboard_write), (Permission::Ask, Permission::Allow));
+        assert_eq!(
+            (c.behaviour.clipboard_read, c.behaviour.clipboard_write),
+            (Permission::Ask, Permission::Allow)
+        );
         c.apply_args(&args(&[
             "--clipboard-read=deny",
             "--clipboard-write=ask",
@@ -1917,11 +2189,42 @@ mod tests {
         let b = c.behaviour;
         assert!(!b.paste_protection && Config::default().behaviour.paste_protection);
         assert!(!b.scrollbar && Config::default().behaviour.scrollbar);
-        assert_eq!((b.titlebar, Config::default().behaviour.titlebar), (Titlebar::Hidden, Titlebar::Native));
-        assert_eq!(b.bell, Bell { system: false, audio: false, attention: false, title: true, border: true });
-        assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
-        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto", "--macos-titlebar-style=chrome", "--bell-features=loud"] {
-            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+        assert_eq!(
+            (b.titlebar, Config::default().behaviour.titlebar),
+            (Titlebar::Hidden, Titlebar::Native)
+        );
+        assert_eq!(
+            b.bell,
+            Bell {
+                system: false,
+                audio: false,
+                attention: false,
+                title: true,
+                border: true
+            }
+        );
+        assert_eq!(
+            (
+                b.clipboard_read,
+                b.clipboard_write,
+                b.copy_on_select,
+                b.hide_mouse,
+                b.scroll_multiplier
+            ),
+            (Permission::Deny, Permission::Ask, true, true, 3.0)
+        );
+        for bad in [
+            "--clipboard-read=sometimes",
+            "--mouse-scroll-multiplier=0",
+            "--copy-on-select=primary",
+            "--scrollbar=auto",
+            "--macos-titlebar-style=chrome",
+            "--bell-features=loud",
+        ] {
+            assert!(
+                Config::default().apply_args(&args(&[bad])).is_err(),
+                "{bad}"
+            );
         }
     }
 
@@ -1931,7 +2234,11 @@ mod tests {
         fs::create_dir_all(dir.join("parts")).unwrap();
         fs::write(dir.join("config"), "config-file = parts/look\nconfig-file = ?parts/missing\nconfig-file = parts/gone\nwindow-width = 90\n").unwrap();
         // Included files are read after the including one, so they win.
-        fs::write(dir.join("parts/look"), "window-width = 70\nconfig-file = ../config\n").unwrap();
+        fs::write(
+            dir.join("parts/look"),
+            "window-width = 70\nconfig-file = ../config\n",
+        )
+        .unwrap();
         let (c, warnings) = Config::load_from(Some(dir.join("config")), &[]).unwrap();
         assert_eq!(c.cols, 70);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
@@ -1947,14 +2254,25 @@ mod tests {
         fs::write(dir.join("night"), "background = #000000\n").unwrap();
         let value = format!("--theme=light:{0}/day, dark:{0}/night", dir.display());
         for (dark, background) in [(false, (255, 255, 255)), (true, (0, 0, 0))] {
-            let mut c = Config { dark_mode: dark, ..Config::default() };
+            let mut c = Config {
+                dark_mode: dark,
+                ..Config::default()
+            };
             c.apply_args(&args(&[&value])).unwrap();
-            assert_eq!((c.theme.background, c.follows_appearance), (background, true));
+            assert_eq!(
+                (c.theme.background, c.follows_appearance),
+                (background, true)
+            );
         }
         let mut c = Config::default();
-        c.apply_args(&args(&[&format!("--theme={}/day", dir.display())])).unwrap();
+        c.apply_args(&args(&[&format!("--theme={}/day", dir.display())]))
+            .unwrap();
         assert!(!c.follows_appearance);
-        assert!(Config::default().apply_args(&args(&["--theme=light:day"])).is_err());
+        assert!(
+            Config::default()
+                .apply_args(&args(&["--theme=light:day"]))
+                .is_err()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1973,16 +2291,32 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(c.fonts.families, ["JetBrains Mono", "Symbols Nerd Font"]);
         assert_eq!(c.fonts.styled, [Some("Iosevka Heavy".into()), None, None]);
-        assert_eq!(c.fonts.features, [(*b"calt", 0), (*b"cv01", 2), (*b"ss01", 1)]);
+        assert_eq!(
+            c.fonts.features,
+            [(*b"calt", 0), (*b"cv01", 2), (*b"ss01", 1)]
+        );
         assert_eq!(c.fonts.variations[0], [(*b"wght", 450.0)]);
         assert_eq!(c.fonts.variations[2], [(*b"slnt", -10.0)]);
         // Flags start a new list of families; an empty one clears it.
-        let (c, _) = Config::load_from(Some(file.clone()), &args(&["--font-family=Menlo"])).unwrap();
+        let (c, _) =
+            Config::load_from(Some(file.clone()), &args(&["--font-family=Menlo"])).unwrap();
         assert_eq!(c.fonts.families, ["Menlo"]);
-        let (c, _) = Config::load_from(Some(file), &args(&["--font-family=", "--font-family=A", "--font-family=B"])).unwrap();
+        let (c, _) = Config::load_from(
+            Some(file),
+            &args(&["--font-family=", "--font-family=A", "--font-family=B"]),
+        )
+        .unwrap();
         assert_eq!(c.fonts.families, ["A", "B"]);
-        for bad in ["--font-feature=toolong", "--font-feature=cv01=x", "--font-variation=wght", "--font-variation=wg!t=1"] {
-            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+        for bad in [
+            "--font-feature=toolong",
+            "--font-feature=cv01=x",
+            "--font-variation=wght",
+            "--font-variation=wg!t=1",
+        ] {
+            assert!(
+                Config::default().apply_args(&args(&[bad])).is_err(),
+                "{bad}"
+            );
         }
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2012,20 +2346,55 @@ mod tests {
         assert_eq!(d.undo_timeout, std::time::Duration::from_millis(250));
         d.apply_args(&args(&["--undo-timeout=0"])).unwrap();
         assert_eq!(d.undo_timeout, std::time::Duration::ZERO);
-        assert_eq!((c.quick_position, c.quick_autohide), (QuickPosition::Bottom, false));
-        assert_eq!(c.quick_size, (Extent::Percent(30.0), Some(Extent::Points(800.0))));
-        assert_eq!((Extent::Percent(30.0).of(1000.0), Extent::Points(800.0).of(600.0)), (300.0, 600.0));
+        assert_eq!(
+            (c.quick_position, c.quick_autohide),
+            (QuickPosition::Bottom, false)
+        );
+        assert_eq!(
+            c.quick_size,
+            (Extent::Percent(30.0), Some(Extent::Points(800.0)))
+        );
+        assert_eq!(
+            (
+                Extent::Percent(30.0).of(1000.0),
+                Extent::Points(800.0).of(600.0)
+            ),
+            (300.0, 600.0)
+        );
         assert_eq!(c.colorspace, Colorspace::DisplayP3);
-        assert_eq!((c.look.background_opacity, c.background_blur, c.look.padding), (0.85, 20, (12.0, 6.0)));
-        assert_eq!((c.look.cursor_style, c.look.cursor_blink), (CursorStyle::Bar, Some(true)));
-        assert_eq!(c.look.cell_adjust, (Adjust::Points(-1.0), Adjust::Percent(10.0)));
+        assert_eq!(
+            (c.look.background_opacity, c.background_blur, c.look.padding),
+            (0.85, 20, (12.0, 6.0))
+        );
+        assert_eq!(
+            (c.look.cursor_style, c.look.cursor_blink),
+            (CursorStyle::Bar, Some(true))
+        );
+        assert_eq!(
+            c.look.cell_adjust,
+            (Adjust::Points(-1.0), Adjust::Percent(10.0))
+        );
         assert_eq!(c.unfocused_split_opacity, 0.5);
         assert_eq!(Adjust::Percent(10.0).apply(30, 2.0), 33);
         assert_eq!(Adjust::Points(-1.0).apply(16, 2.0), 14);
         assert_eq!(Adjust::Points(-50.0).apply(16, 2.0), 1);
         assert_eq!(Config::default().colorspace, Colorspace::Srgb);
-        for bad in ["--background-opacity=1.5", "--undo-timeout=5", "--undo-timeout=2h", "--window-colorspace=p3", "--quick-terminal-position=middle", "--quick-terminal-size=0%", "--quick-terminal-size=40", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
-            assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
+        for bad in [
+            "--background-opacity=1.5",
+            "--undo-timeout=5",
+            "--undo-timeout=2h",
+            "--window-colorspace=p3",
+            "--quick-terminal-position=middle",
+            "--quick-terminal-size=0%",
+            "--quick-terminal-size=40",
+            "--cursor-style=beam",
+            "--adjust-cell-height=-100%",
+            "--unfocused-split-opacity=0.1",
+        ] {
+            assert!(
+                Config::default().apply_args(&args(&[bad])).is_err(),
+                "{bad}"
+            );
         }
     }
 
@@ -2040,7 +2409,8 @@ mod tests {
         let (c, warnings) = c.reload().unwrap();
         assert_eq!((c.font_size, c.cols), (16.0, 120));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        let (c, _) = Config::load_from(Some(file), &args(&["--config-default-files=false"])).unwrap();
+        let (c, _) =
+            Config::load_from(Some(file), &args(&["--config-default-files=false"])).unwrap();
         assert_eq!(c.file(), None);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2065,7 +2435,13 @@ mod tests {
         assert_eq!(c.theme.palette[15], (0xff, 0xff, 0xff));
         assert_eq!(c.theme.cursor, Some((0xc5, 0xc8, 0xc6)));
         assert_eq!(c.theme.selection_foreground, Some((0xc5, 0xc8, 0xc6)));
-        assert_eq!((c.theme.search_background, c.theme.search_selected_background), ((0xf0, 0xc6, 0x74), (0xde, 0x93, 0x5f)));
+        assert_eq!(
+            (
+                c.theme.search_background,
+                c.theme.search_selected_background
+            ),
+            ((0xf0, 0xc6, 0x74), (0xde, 0x93, 0x5f))
+        );
 
         let sneaky = dir.join("sneaky");
         fs::write(&sneaky, "background = #000000\ncommand = rm -rf ~\n").unwrap();
@@ -2073,7 +2449,11 @@ mod tests {
         let err = c.set("theme", sneaky.to_str().unwrap()).unwrap_err();
         assert!(err.contains(":2:") && err.contains("colour"), "{err}");
         assert_eq!(c.command, None);
-        assert!(Config::default().set("theme", "/nonexistent/theme").is_err());
+        assert!(
+            Config::default()
+                .set("theme", "/nonexistent/theme")
+                .is_err()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2083,6 +2463,10 @@ mod tests {
         for s in SETTINGS {
             assert!(help.contains(&format!("--{}=", s.name)), "{}", s.name);
         }
-        assert!(help.contains("--config-file=PATH") && help.contains("[Menlo]") && help.contains("[#1e1e1e]"));
+        assert!(
+            help.contains("--config-file=PATH")
+                && help.contains("[Menlo]")
+                && help.contains("[#1e1e1e]")
+        );
     }
 }

@@ -43,9 +43,8 @@ pub enum PointerShape {
 impl PointerShape {
     fn from_name(name: &[u8]) -> Option<Self> {
         Some(match name {
-            b"" | b"default" | b"left_ptr" | b"arrow" | b"wait" | b"progress" | b"help" | b"move" | b"all-scroll" | b"watch" => {
-                Self::Default
-            }
+            b"" | b"default" | b"left_ptr" | b"arrow" | b"wait" | b"progress" | b"help"
+            | b"move" | b"all-scroll" | b"watch" => Self::Default,
             b"text" | b"xterm" | b"ibeam" => Self::Text,
             b"vertical-text" => Self::VerticalText,
             b"pointer" | b"hand" | b"hand1" | b"hand2" | b"pointing_hand" => Self::Pointer,
@@ -53,8 +52,12 @@ impl PointerShape {
             b"not-allowed" | b"no-drop" | b"forbidden" | b"crossed_circle" => Self::NotAllowed,
             b"grab" | b"openhand" => Self::Grab,
             b"grabbing" | b"closedhand" => Self::Grabbing,
-            b"col-resize" | b"ew-resize" | b"e-resize" | b"w-resize" | b"sb_h_double_arrow" => Self::ColResize,
-            b"row-resize" | b"ns-resize" | b"n-resize" | b"s-resize" | b"sb_v_double_arrow" => Self::RowResize,
+            b"col-resize" | b"ew-resize" | b"e-resize" | b"w-resize" | b"sb_h_double_arrow" => {
+                Self::ColResize
+            }
+            b"row-resize" | b"ns-resize" | b"n-resize" | b"s-resize" | b"sb_v_double_arrow" => {
+                Self::RowResize
+            }
             b"copy" | b"dnd-copy" => Self::Copy,
             b"alias" | b"dnd-link" => Self::Alias,
             b"context-menu" => Self::ContextMenu,
@@ -66,12 +69,15 @@ impl PointerShape {
 impl Term {
     /// The progress bar to show, if any.
     pub fn progress(&self) -> Option<Progress> {
-        self.progress.filter(|(_, at)| at.elapsed() < PROGRESS_TIMEOUT).map(|(progress, _)| progress)
+        self.progress
+            .filter(|(_, at)| at.elapsed() < PROGRESS_TIMEOUT)
+            .map(|(progress, _)| progress)
     }
 
     /// When the progress bar goes for want of updates, to draw it gone.
     pub fn progress_expiry(&self) -> Option<Instant> {
-        self.progress().and(self.progress.map(|(_, at)| at + PROGRESS_TIMEOUT))
+        self.progress()
+            .and(self.progress.map(|(_, at)| at + PROGRESS_TIMEOUT))
     }
 
     /// The pointer's shape over the terminal.
@@ -83,7 +89,13 @@ impl Term {
     /// error, 3 busy for an unknown time, 4 paused. Error and paused keep
     /// the percentage when they're given none.
     pub(crate) fn set_progress(&mut self, params: &[&[u8]]) {
-        let number = |i: usize| -> Option<u8> { std::str::from_utf8(params.get(i)?).ok()?.parse::<u32>().ok().map(|n| n.min(100) as u8) };
+        let number = |i: usize| -> Option<u8> {
+            std::str::from_utf8(params.get(i)?)
+                .ok()?
+                .parse::<u32>()
+                .ok()
+                .map(|n| n.min(100) as u8)
+        };
         let last = match self.progress() {
             Some(Progress::Normal(p) | Progress::Error(p) | Progress::Paused(p)) => p,
             _ => 0,
@@ -108,7 +120,9 @@ impl Term {
     /// OSC 50 ; family: the pane's font, by family name; empty for the
     /// configured one. Queries (`?`) aren't answered.
     pub(crate) fn set_font(&mut self, name: &[u8]) {
-        let Ok(name) = std::str::from_utf8(name) else { return };
+        let Ok(name) = std::str::from_utf8(name) else {
+            return;
+        };
         if name.starts_with('?') || name.len() > 256 || name.chars().any(char::is_control) {
             return;
         }

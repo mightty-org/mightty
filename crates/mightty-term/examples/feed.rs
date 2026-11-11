@@ -22,6 +22,9 @@ fn main() {
             })
             .fold(f64::MAX, f64::min);
         let name = Path::new(&path).file_stem().unwrap().to_string_lossy();
-        println!("{name:14} {:8.1} MiB/s", data.len() as f64 / 1048576.0 / best);
+        println!(
+            "{name:14} {:8.1} MiB/s",
+            data.len() as f64 / 1048576.0 / best
+        );
     }
 }

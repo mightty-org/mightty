@@ -15,7 +15,14 @@ fn manifest_dir() -> PathBuf {
 fn static_lib() -> PathBuf {
     let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("libmightty");
     let status = Command::new(env!("CARGO"))
-        .args(["build", "--quiet", "--lib", "--package", "mightty-ffi", "--target-dir"])
+        .args([
+            "build",
+            "--quiet",
+            "--lib",
+            "--package",
+            "mightty-ffi",
+            "--target-dir",
+        ])
         .arg(&target_dir)
         .status()
         .expect("failed to run cargo");
@@ -56,7 +63,16 @@ fn c_program_against_header() {
 #[test]
 fn header_is_valid_cpp() {
     let status = Command::new(compiler())
-        .args(["-x", "c++", "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-fsyntax-only"])
+        .args([
+            "-x",
+            "c++",
+            "-std=c++11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "-fsyntax-only",
+        ])
         .arg(manifest_dir().join("include/mightty.h"))
         .status()
         .expect("failed to run the C++ compiler");

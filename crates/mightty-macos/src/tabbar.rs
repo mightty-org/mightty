@@ -85,8 +85,21 @@ impl Tab {
     fn fit(&self, width: f64) {
         // SAFETY: main thread; documented signatures.
         unsafe {
-            call!(self.title, c"setFrame:", rect(CLOSE + 8.0, (HEIGHT - 16.0) / 2.0, (width - 2.0 * (CLOSE + 8.0)).max(0.0), 16.0));
-            call!(self.close, c"setFrame:", rect(8.0, (HEIGHT - 17.0) / 2.0, CLOSE, 17.0));
+            call!(
+                self.title,
+                c"setFrame:",
+                rect(
+                    CLOSE + 8.0,
+                    (HEIGHT - 16.0) / 2.0,
+                    (width - 2.0 * (CLOSE + 8.0)).max(0.0),
+                    16.0
+                )
+            );
+            call!(
+                self.close,
+                c"setFrame:",
+                rect(8.0, (HEIGHT - 17.0) / 2.0, CLOSE, 17.0)
+            );
             call!(self.line, c"setFrame:", rect(width - 1.0, 0.0, 1.0, HEIGHT));
         }
     }
@@ -133,7 +146,10 @@ impl State {
     /// pinned to the visible edge it was scrolled past.
     fn selected_x(&self, scrolled: f64) -> f64 {
         let at = self.selected as f64 * self.width;
-        at.clamp(scrolled, (scrolled + self.visible - self.width).max(scrolled))
+        at.clamp(
+            scrolled,
+            (scrolled + self.visible - self.width).max(scrolled),
+        )
     }
 
     /// The tab at `x` in the bar, and how far into it.
@@ -157,13 +173,21 @@ impl State {
         if self.dragging.is_some_and(|d| d.moved) {
             return; // it's where the pointer is
         }
-        let Some(tab) = self.tabs.get(self.selected) else { return };
+        let Some(tab) = self.tabs.get(self.selected) else {
+            return;
+        };
         let x = self.selected_x(self.scrolled());
         // SAFETY: main thread; documented signatures.
         unsafe {
             call!(tab.view, c"setFrameOrigin:", CGPoint { x, y: 0.0 });
             // Above its neighbours (NSWindowAbove, relative to none).
-            call!(self.strip, c"addSubview:positioned:relativeTo:", tab.view, 1isize, NIL);
+            call!(
+                self.strip,
+                c"addSubview:positioned:relativeTo:",
+                tab.view,
+                1isize,
+                NIL
+            );
         }
     }
 
@@ -199,7 +223,11 @@ impl State {
                     call!(layer(content), c"setCornerRadius:", 10.0f64);
                     call!(layer(content), c"setMasksToBounds:", YES);
                     call!(layer(content), c"setBackgroundColor:", cg(background, 1.0));
-                    let strip: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", rect(0.0, size.height - HEIGHT, size.width, HEIGHT));
+                    let strip: Id = msg!(
+                        msg!(class(c"NSView"), c"alloc"),
+                        c"initWithFrame:",
+                        rect(0.0, size.height - HEIGHT, size.width, HEIGHT)
+                    );
                     call!(strip, c"setWantsLayer:", YES);
                     call!(layer(strip), c"setBackgroundColor:", cg(bar, 1.0));
                     call!(content, c"addSubview:", strip);
@@ -210,7 +238,11 @@ impl State {
                     call!(label, c"setFont:", font);
                     call!(label, c"setAlignment:", 1isize); // centred
                     call!(label, c"setTextColor:", ns_color(text, 1.0));
-                    call!(label, c"setFrame:", rect(0.0, (HEIGHT - 16.0) / 2.0, size.width, 16.0));
+                    call!(
+                        label,
+                        c"setFrame:",
+                        rect(0.0, (HEIGHT - 16.0) / 2.0, size.width, 16.0)
+                    );
                     call!(strip, c"addSubview:", label);
                     call!(preview, c"orderFront:", NIL);
                     self.preview = Some(preview);
@@ -219,7 +251,14 @@ impl State {
             };
             // As `app` places the window: its title bar where the pointer is.
             let mouse: CGPoint = msg!(class(c"NSEvent"), c"mouseLocation");
-            call!(preview, c"setFrameOrigin:", CGPoint { x: mouse.x - 60.0, y: mouse.y - size.height + 14.0 });
+            call!(
+                preview,
+                c"setFrameOrigin:",
+                CGPoint {
+                    x: mouse.x - 60.0,
+                    y: mouse.y - size.height + 14.0
+                }
+            );
         }
     }
 
@@ -229,14 +268,23 @@ impl State {
         // SAFETY: main thread; documented signatures.
         unsafe {
             let window: Id = msg!(self.bar, c"window");
-            let visible: Bool = if window.is_null() { NO } else { msg!(window, c"isVisible") };
+            let visible: Bool = if window.is_null() {
+                NO
+            } else {
+                msg!(window, c"isVisible")
+            };
             if visible == NO {
                 return None;
             }
-            let in_window = send_rect_with(self.bar, c"convertRect:toView:", (send_rect(self.bar, c"bounds"), NIL));
+            let in_window = send_rect_with(
+                self.bar,
+                c"convertRect:toView:",
+                (send_rect(self.bar, c"bounds"), NIL),
+            );
             let mut rect = send_rect_with(window, c"convertRectToScreen:", (in_window,));
             let top = send_rect(window, c"frame");
-            rect.size.height = (top.origin.y + top.size.height - rect.origin.y).max(rect.size.height);
+            rect.size.height =
+                (top.origin.y + top.size.height - rect.origin.y).max(rect.size.height);
             Some(rect)
         }
     }
@@ -267,7 +315,11 @@ impl State {
         unsafe {
             let n = self.tabs.len();
             let k = incoming.map_or(0, |i| i.1.len());
-            let width = if k > 0 { (self.visible / (n + k) as f64).max(MIN_TAB) } else { self.width };
+            let width = if k > 0 {
+                (self.visible / (n + k) as f64).max(MIN_TAB)
+            } else {
+                self.width
+            };
             // Stand-ins made again when there's another number of them.
             let mut stand_ins = match self.incoming.take() {
                 Some((_, views)) if views.len() == k => views,
@@ -281,11 +333,16 @@ impl State {
             };
             if let Some((at, titles)) = incoming.filter(|_| k > 0) {
                 for title in titles.iter().skip(stand_ins.len()) {
-                    let view: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", rect(at as f64 * width, 0.0, width, HEIGHT));
+                    let view: Id = msg!(
+                        msg!(class(c"NSView"), c"alloc"),
+                        c"initWithFrame:",
+                        rect(at as f64 * width, 0.0, width, HEIGHT)
+                    );
                     call!(view, c"setWantsLayer:", YES);
                     call!(view, c"setAlphaValue:", 0.8f64);
                     call!(layer(view), c"setBackgroundColor:", cg(self.colors[0], 1.0));
-                    let label: Id = msg!(class(c"NSTextField"), c"labelWithString:", nsstring(title));
+                    let label: Id =
+                        msg!(class(c"NSTextField"), c"labelWithString:", nsstring(title));
                     let font: Id = msg!(class(c"NSFont"), c"systemFontOfSize:", 12.0f64);
                     call!(label, c"setFont:", font);
                     call!(label, c"setAlignment:", 1isize); // centred
@@ -297,19 +354,47 @@ impl State {
                     stand_ins.push((view, label));
                 }
                 for (i, &(view, label)) in stand_ins.iter().enumerate() {
-                    call!(label, c"setFrame:", rect(CLOSE + 8.0, (HEIGHT - 16.0) / 2.0, (width - 2.0 * (CLOSE + 8.0)).max(0.0), 16.0));
+                    call!(
+                        label,
+                        c"setFrame:",
+                        rect(
+                            CLOSE + 8.0,
+                            (HEIGHT - 16.0) / 2.0,
+                            (width - 2.0 * (CLOSE + 8.0)).max(0.0),
+                            16.0
+                        )
+                    );
                     let animator: Id = msg!(view, c"animator");
-                    call!(animator, c"setFrame:", rect((at + i) as f64 * width, 0.0, width, HEIGHT));
+                    call!(
+                        animator,
+                        c"setFrame:",
+                        rect((at + i) as f64 * width, 0.0, width, HEIGHT)
+                    );
                 }
                 self.incoming = Some((at, stand_ins));
             }
             let gap = incoming.filter(|_| k > 0).map(|i| i.0);
-            call!(self.strip, c"setFrameSize:", CGSize { width: width * (n + k) as f64, height: HEIGHT });
+            call!(
+                self.strip,
+                c"setFrameSize:",
+                CGSize {
+                    width: width * (n + k) as f64,
+                    height: HEIGHT
+                }
+            );
             for (j, tab) in self.tabs.iter().enumerate() {
-                let slot = if gap.is_some_and(|at| j >= at) { j + k } else { j };
+                let slot = if gap.is_some_and(|at| j >= at) {
+                    j + k
+                } else {
+                    j
+                };
                 tab.fit(width);
                 let animator: Id = msg!(tab.view, c"animator");
-                call!(animator, c"setFrame:", rect(slot as f64 * width, 0.0, width, HEIGHT));
+                call!(
+                    animator,
+                    c"setFrame:",
+                    rect(slot as f64 * width, 0.0, width, HEIGHT)
+                );
             }
         }
     }
@@ -334,9 +419,19 @@ impl State {
                 let on = i == self.selected;
                 let hovered = self.hovered == Some(i);
                 // Unselected tabs drawn in the bar's shade, so a pinned tab covers them.
-                let background = if on { cg(selected, 1.0) } else if hovered { cg(blend(bar, text, 0.06), 1.0) } else { cg(bar, 1.0) };
+                let background = if on {
+                    cg(selected, 1.0)
+                } else if hovered {
+                    cg(blend(bar, text, 0.06), 1.0)
+                } else {
+                    cg(bar, 1.0)
+                };
                 call!(layer(tab.view), c"setBackgroundColor:", background);
-                call!(tab.title, c"setTextColor:", ns_color(text, if on { 1.0 } else { 0.62 }));
+                call!(
+                    tab.title,
+                    c"setTextColor:",
+                    ns_color(text, if on { 1.0 } else { 0.62 })
+                );
                 call!(tab.close, c"setHidden:", if hovered { NO } else { YES });
                 // None beside the selected tab, nor after the last.
                 let line = on || i + 1 == self.selected || i + 1 == self.tabs.len();
@@ -353,7 +448,14 @@ thread_local! {
 /// `f` on `bar`'s state; not while it's being changed already (AppKit
 /// reporting a scroll as `show` resizes the strip: `show` pins itself).
 fn with_state<R>(bar: Id, f: impl FnOnce(&mut State) -> R) -> Option<R> {
-    STATES.with(|states| states.try_borrow_mut().ok()?.iter_mut().find(|s| s.bar == bar).map(f))
+    STATES.with(|states| {
+        states
+            .try_borrow_mut()
+            .ok()?
+            .iter_mut()
+            .find(|s| s.bar == bar)
+            .map(f)
+    })
 }
 
 /// `a` moved `amount` of the way to `b`.
@@ -365,7 +467,16 @@ fn blend(a: (u8, u8, u8), b: (u8, u8, u8), amount: f64) -> (u8, u8, u8) {
 fn ns_color((r, g, b): (u8, u8, u8), alpha: f64) -> Id {
     let c = |v: u8| v as f64 / 255.0;
     // SAFETY: documented signature.
-    unsafe { msg!(class(c"NSColor"), c"colorWithSRGBRed:green:blue:alpha:", c(r), c(g), c(b), alpha) }
+    unsafe {
+        msg!(
+            class(c"NSColor"),
+            c"colorWithSRGBRed:green:blue:alpha:",
+            c(r),
+            c(g),
+            c(b),
+            alpha
+        )
+    }
 }
 
 fn cg(rgb: (u8, u8, u8), alpha: f64) -> Id {
@@ -379,7 +490,10 @@ fn layer(view: Id) -> Id {
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
-    CGRect { origin: CGPoint { x, y }, size: CGSize { width, height } }
+    CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize { width, height },
+    }
 }
 
 /// Where `event` is along `bar`.
@@ -397,7 +511,12 @@ fn bar_class() -> Id {
     extern "C" fn mouse_down(bar: Id, _: Sel, event: Id) {
         let x = x_in(bar, event);
         // SAFETY: an NSEvent; documented signatures.
-        let (clicks, width): (isize, f64) = unsafe { (msg!(event, c"clickCount"), send_rect(bar, c"bounds").size.width) };
+        let (clicks, width): (isize, f64) = unsafe {
+            (
+                msg!(event, c"clickCount"),
+                send_rect(bar, c"bounds").size.width,
+            )
+        };
         let click = with_state(bar, |s| {
             s.dragging = None;
             if x >= width - PLUS {
@@ -412,7 +531,15 @@ fn bar_class() -> Id {
                     // Selected, and maybe dragged next.
                     // The only tab is the window's handle: it moves the window, as AppKit's does.
                     if s.tabs.len() > 1 {
-                        s.dragging = Some(Dragging { index, grab: within, start: x, moved: false, to: index, off: false, target: None });
+                        s.dragging = Some(Dragging {
+                            index,
+                            grab: within,
+                            start: x,
+                            moved: false,
+                            to: index,
+                            off: false,
+                            target: None,
+                        });
                     }
                     Click::Select(index)
                 }
@@ -466,14 +593,31 @@ fn bar_class() -> Id {
             unsafe {
                 let tab = s.tabs[d.index];
                 call!(tab.view, c"setFrameOrigin:", CGPoint { x: at, y: 0.0 });
-                call!(tab.view, c"setAlphaValue:", if d.off { 0.0f64 } else { 1.0f64 });
-                call!(s.strip, c"addSubview:positioned:relativeTo:", tab.view, 1isize, NIL);
+                call!(
+                    tab.view,
+                    c"setAlphaValue:",
+                    if d.off { 0.0f64 } else { 1.0f64 }
+                );
+                call!(
+                    s.strip,
+                    c"addSubview:positioned:relativeTo:",
+                    tab.view,
+                    1isize,
+                    NIL
+                );
                 // The rest in order without it, a gap where it would go.
                 for (j, other) in s.tabs.iter().enumerate().filter(|&(j, _)| j != d.index) {
                     let k = if j > d.index { j - 1 } else { j };
                     let slot = if k >= d.to && !d.off { k + 1 } else { k };
                     let animator: Id = msg!(other.view, c"animator");
-                    call!(animator, c"setFrameOrigin:", CGPoint { x: slot as f64 * s.width, y: 0.0 });
+                    call!(
+                        animator,
+                        c"setFrameOrigin:",
+                        CGPoint {
+                            x: slot as f64 * s.width,
+                            y: 0.0
+                        }
+                    );
                 }
             }
         });
@@ -482,13 +626,23 @@ fn bar_class() -> Id {
         let Some(Some((index, off, title, window))) = with_state(bar, |s| {
             let d = s.dragging?;
             // SAFETY: main thread; documented signatures.
-            let (title, window): (Id, Id) = unsafe { (msg!(s.tabs[d.index].title, c"stringValue"), msg!(s.bar, c"window")) };
+            let (title, window): (Id, Id) = unsafe {
+                (
+                    msg!(s.tabs[d.index].title, c"stringValue"),
+                    msg!(s.bar, c"window"),
+                )
+            };
             Some((d.index, d.off, title, window))
         }) else {
             return;
         };
         // SAFETY: main thread; documented signatures.
-        let (mouse, title) = unsafe { (msg!(class(c"NSEvent"), c"mouseLocation"), string_from_ns(title)) };
+        let (mouse, title) = unsafe {
+            (
+                msg!(class(c"NSEvent"), c"mouseLocation"),
+                string_from_ns(title),
+            )
+        };
         let target = hover(off.then_some(mouse), window, &[title]);
         with_state(bar, |s| {
             if let Some(d) = &mut s.dragging {
@@ -516,7 +670,10 @@ fn bar_class() -> Id {
         let screen = unsafe {
             let window: Id = msg!(bar, c"window");
             let point: CGPoint = msg!(event, c"locationInWindow");
-            let at = CGRect { origin: point, size: CGSize::default() };
+            let at = CGRect {
+                origin: point,
+                size: CGSize::default(),
+            };
             send_rect_with(window, c"convertRectToScreen:", (at,)).origin
         };
         hover(None, NIL, &[]);
@@ -554,7 +711,8 @@ fn bar_class() -> Id {
         unsafe {
             let hidden: Bool = msg!(bar, c"isHidden");
             let f = send_rect(bar, c"frame");
-            let inside = (f.origin.x..f.origin.x + f.size.width).contains(&point.x) && (f.origin.y..f.origin.y + f.size.height).contains(&point.y);
+            let inside = (f.origin.x..f.origin.x + f.size.width).contains(&point.x)
+                && (f.origin.y..f.origin.y + f.size.height).contains(&point.y);
             if hidden != NO || !inside {
                 return NIL;
             }
@@ -575,10 +733,16 @@ fn bar_class() -> Id {
     /// A right-click on a tab: its menu, as AppKit's tabs have.
     extern "C" fn right_mouse_down(bar: Id, _: Sel, event: Id) {
         let x = x_in(bar, event);
-        let Some(Some((index, _))) = with_state(bar, |s| s.tab_at(x)) else { return };
+        let Some(Some((index, _))) = with_state(bar, |s| s.tab_at(x)) else {
+            return;
+        };
         // SAFETY: main thread; documented signatures; the menu is autoreleased once shown.
         unsafe {
-            let menu: Id = msg!(msg!(class(c"NSMenu"), c"alloc"), c"initWithTitle:", nsstring(""));
+            let menu: Id = msg!(
+                msg!(class(c"NSMenu"), c"alloc"),
+                c"initWithTitle:",
+                nsstring("")
+            );
             for (title, action) in [
                 ("Rename Tab…", c"tabMenuRename:"),
                 ("Move Tab to New Window", c"tabMenuNewWindow:"),
@@ -591,11 +755,23 @@ fn bar_class() -> Id {
                     call!(menu, c"addItem:", separator);
                     continue;
                 }
-                let item: Id = msg!(menu, c"addItemWithTitle:action:keyEquivalent:", nsstring(title), sel(action), nsstring(""));
+                let item: Id = msg!(
+                    menu,
+                    c"addItemWithTitle:action:keyEquivalent:",
+                    nsstring(title),
+                    sel(action),
+                    nsstring("")
+                );
                 call!(item, c"setTarget:", bar);
                 call!(item, c"setTag:", index as isize);
             }
-            call!(class(c"NSMenu"), c"popUpContextMenu:withEvent:forView:", menu, event, bar);
+            call!(
+                class(c"NSMenu"),
+                c"popUpContextMenu:withEvent:forView:",
+                menu,
+                event,
+                bar
+            );
             call!(menu, c"release");
         }
     }
@@ -619,7 +795,13 @@ fn bar_class() -> Id {
         menu_click(bar, item, Click::CloseOthers);
     }
     /// Keys in a title being edited: Return keeps it, Escape doesn't.
-    extern "C" fn edit_command(bar: Id, _: Sel, _control: Id, _text_view: Id, command: Sel) -> Bool {
+    extern "C" fn edit_command(
+        bar: Id,
+        _: Sel,
+        _control: Id,
+        _text_view: Id,
+        command: Sel,
+    ) -> Bool {
         if command == sel(c"insertNewline:") {
             finish_edit(bar, true);
         } else if command == sel(c"cancelOperation:") {
@@ -654,30 +836,47 @@ fn bar_class() -> Id {
         let event = |f: extern "C" fn(Id, Sel, Id)| f as *const c_void;
         // SAFETY: a new subclass, its methods with their signatures.
         unsafe {
-            register_class(c"MighttyTabBar", c"NSView", &[
-                (c"mouseDown:", event(mouse_down), c"v@:@"),
-                (c"mouseDragged:", event(mouse_dragged), c"v@:@"),
-                (c"mouseUp:", event(mouse_up), c"v@:@"),
-                (c"mouseMoved:", event(mouse_moved), c"v@:@"),
-                (c"mouseExited:", event(mouse_exited), c"v@:@"),
-                (c"tabsScrolled:", event(scrolled), c"v@:@"),
-                (c"scrollWheel:", event(scroll_wheel), c"v@:@"),
-                (c"rightMouseDown:", event(right_mouse_down), c"v@:@"),
-                (c"tabMenuRename:", event(menu_rename), c"v@:@"),
-                (c"tabMenuNewWindow:", event(menu_new_window), c"v@:@"),
-                (c"tabMenuClose:", event(menu_close), c"v@:@"),
-                (c"tabMenuCloseOthers:", event(menu_close_others), c"v@:@"),
-                (c"controlTextDidEndEditing:", event(edit_ended), c"v@:@"),
-                (
-                    c"control:textView:doCommandBySelector:",
-                    edit_command as extern "C" fn(Id, Sel, Id, Id, Sel) -> Bool as *const c_void,
-                    c"c@:@@:",
-                ),
-                (c"hitTest:", hit_test as extern "C" fn(Id, Sel, CGPoint) -> Id as *const c_void, c"@@:{CGPoint=dd}"),
-                (c"acceptsFirstMouse:", yes as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void, c"c@:@"),
-                // Clicks reach it under a transparent title bar, not the window's dragging.
-                (c"mouseDownCanMoveWindow", no as extern "C" fn(Id, Sel) -> Bool as *const c_void, c"c@:"),
-            ]) as usize
+            register_class(
+                c"MighttyTabBar",
+                c"NSView",
+                &[
+                    (c"mouseDown:", event(mouse_down), c"v@:@"),
+                    (c"mouseDragged:", event(mouse_dragged), c"v@:@"),
+                    (c"mouseUp:", event(mouse_up), c"v@:@"),
+                    (c"mouseMoved:", event(mouse_moved), c"v@:@"),
+                    (c"mouseExited:", event(mouse_exited), c"v@:@"),
+                    (c"tabsScrolled:", event(scrolled), c"v@:@"),
+                    (c"scrollWheel:", event(scroll_wheel), c"v@:@"),
+                    (c"rightMouseDown:", event(right_mouse_down), c"v@:@"),
+                    (c"tabMenuRename:", event(menu_rename), c"v@:@"),
+                    (c"tabMenuNewWindow:", event(menu_new_window), c"v@:@"),
+                    (c"tabMenuClose:", event(menu_close), c"v@:@"),
+                    (c"tabMenuCloseOthers:", event(menu_close_others), c"v@:@"),
+                    (c"controlTextDidEndEditing:", event(edit_ended), c"v@:@"),
+                    (
+                        c"control:textView:doCommandBySelector:",
+                        edit_command as extern "C" fn(Id, Sel, Id, Id, Sel) -> Bool
+                            as *const c_void,
+                        c"c@:@@:",
+                    ),
+                    (
+                        c"hitTest:",
+                        hit_test as extern "C" fn(Id, Sel, CGPoint) -> Id as *const c_void,
+                        c"@@:{CGPoint=dd}",
+                    ),
+                    (
+                        c"acceptsFirstMouse:",
+                        yes as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void,
+                        c"c@:@",
+                    ),
+                    // Clicks reach it under a transparent title bar, not the window's dragging.
+                    (
+                        c"mouseDownCanMoveWindow",
+                        no as extern "C" fn(Id, Sel) -> Bool as *const c_void,
+                        c"c@:",
+                    ),
+                ],
+            ) as usize
         }
     }) as Id
 }
@@ -692,9 +891,13 @@ pub fn hover(point: Option<CGPoint>, except: Id, titles: &[String]) -> Option<(I
         for s in states.iter_mut() {
             // SAFETY: main thread; documented signature.
             let window: Id = unsafe { msg!(s.bar, c"window") };
-            let over = point.filter(|_| window != except).zip(s.on_screen()).filter(|(p, f)| {
-                (f.origin.x..f.origin.x + f.size.width).contains(&p.x) && (f.origin.y..f.origin.y + f.size.height).contains(&p.y)
-            });
+            let over = point
+                .filter(|_| window != except)
+                .zip(s.on_screen())
+                .filter(|(p, f)| {
+                    (f.origin.x..f.origin.x + f.size.width).contains(&p.x)
+                        && (f.origin.y..f.origin.y + f.size.height).contains(&p.y)
+                });
             match over {
                 Some((p, f)) if found.is_none() => {
                     s.peek(true);
@@ -717,7 +920,9 @@ pub fn hover(point: Option<CGPoint>, except: Id, titles: &[String]) -> Option<(I
 /// Ends the title edit in `bar`: its text for the tab if `keep`.
 fn finish_edit(bar: Id, keep: bool) {
     // Taken first: removing the field ends its editing, which comes back here.
-    let Some(Some((index, field))) = with_state(bar, |s| s.editing.take()) else { return };
+    let Some(Some((index, field))) = with_state(bar, |s| s.editing.take()) else {
+        return;
+    };
     // SAFETY: main thread; the field is ours until removed here.
     let text = unsafe {
         let text = keep.then(|| string_from_ns(msg!(field, c"stringValue")));
@@ -732,7 +937,10 @@ fn finish_edit(bar: Id, keep: bool) {
         }
     });
     if let Some(on_click) = ON_CLICK.get() {
-        on_click(bar, Click::Retitle(index, text.map(|t| t.trim().to_owned())));
+        on_click(
+            bar,
+            Click::Retitle(index, text.map(|t| t.trim().to_owned())),
+        );
     }
 }
 
@@ -752,12 +960,23 @@ impl TabBar {
             call!(bar, c"setWantsLayer:", YES);
             // The pointer's moves while over it, for the close buttons.
             let options = 0x01usize | 0x02 | 0x80 | 0x200; // entered/exited, moved, always active, visible rect
-            let area: Id = msg!(msg!(class(c"NSTrackingArea"), c"alloc"), c"initWithRect:options:owner:userInfo:", CGRect::default(), options, bar, NIL);
+            let area: Id = msg!(
+                msg!(class(c"NSTrackingArea"), c"alloc"),
+                c"initWithRect:options:owner:userInfo:",
+                CGRect::default(),
+                options,
+                bar,
+                NIL
+            );
             call!(bar, c"addTrackingArea:", area);
             call!(area, c"release");
 
             // The tabs scroll as any view does: momentum, and a bounce at the ends.
-            let scroller: Id = msg!(msg!(class(c"NSScrollView"), c"alloc"), c"initWithFrame:", rect(0.0, 0.0, 0.0, HEIGHT));
+            let scroller: Id = msg!(
+                msg!(class(c"NSScrollView"), c"alloc"),
+                c"initWithFrame:",
+                rect(0.0, 0.0, 0.0, HEIGHT)
+            );
             call!(scroller, c"setDrawsBackground:", NO);
             call!(scroller, c"setHasHorizontalScroller:", NO);
             call!(scroller, c"setHasVerticalScroller:", NO);
@@ -765,7 +984,11 @@ impl TabBar {
             call!(scroller, c"setVerticalScrollElasticity:", 1isize); // none
             call!(bar, c"addSubview:", scroller);
             call!(scroller, c"release");
-            let strip: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", rect(0.0, 0.0, 0.0, HEIGHT));
+            let strip: Id = msg!(
+                msg!(class(c"NSView"), c"alloc"),
+                c"initWithFrame:",
+                rect(0.0, 0.0, 0.0, HEIGHT)
+            );
             call!(strip, c"setWantsLayer:", YES);
             call!(scroller, c"setDocumentView:", strip);
             call!(strip, c"release");
@@ -773,9 +996,20 @@ impl TabBar {
             call!(clip, c"setPostsBoundsChangedNotifications:", YES);
             let center: Id = msg!(class(c"NSNotificationCenter"), c"defaultCenter");
             let name = nsstring("NSViewBoundsDidChangeNotification");
-            call!(center, c"addObserver:selector:name:object:", bar, sel(c"tabsScrolled:"), name, clip);
+            call!(
+                center,
+                c"addObserver:selector:name:object:",
+                bar,
+                sel(c"tabsScrolled:"),
+                name,
+                clip
+            );
 
-            let rule: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", rect(0.0, 0.0, bounds.size.width, 1.0));
+            let rule: Id = msg!(
+                msg!(class(c"NSView"), c"alloc"),
+                c"initWithFrame:",
+                rect(0.0, 0.0, bounds.size.width, 1.0)
+            );
             call!(rule, c"setWantsLayer:", YES);
             call!(rule, c"setAutoresizingMask:", 2usize); // full width
             call!(bar, c"addSubview:", rule);
@@ -816,14 +1050,29 @@ impl TabBar {
     /// the window's buttons, when they're over it); in shades of
     /// `background`, text in `foreground`. With `animate`, tabs slide to
     /// their places, as when one comes or goes.
-    pub fn show(&self, titles: &[String], selected: usize, left: f64, background: (u8, u8, u8), foreground: (u8, u8, u8), animate: bool) {
+    pub fn show(
+        &self,
+        titles: &[String],
+        selected: usize,
+        left: f64,
+        background: (u8, u8, u8),
+        foreground: (u8, u8, u8),
+        animate: bool,
+    ) {
         with_state(self.bar, |s| {
             s.peeking = false;
             // SAFETY: main thread; documented signatures; labels autoreleased, held by their tabs.
             unsafe {
-                let dark = 0.2126 * background.0 as f64 + 0.7152 * background.1 as f64 + 0.0722 * background.2 as f64 <= 127.0;
+                let dark = 0.2126 * background.0 as f64
+                    + 0.7152 * background.1 as f64
+                    + 0.0722 * background.2 as f64
+                    <= 127.0;
                 // The bar a shade off the background, darker on a dark theme, as AppKit's.
-                let shade = blend(background, if dark { (0, 0, 0) } else { (255, 255, 255) }, 0.3);
+                let shade = blend(
+                    background,
+                    if dark { (0, 0, 0) } else { (255, 255, 255) },
+                    0.3,
+                );
                 s.colors = [background, shade, foreground];
                 call!(layer(s.bar), c"setBackgroundColor:", cg(shade, 1.0));
                 call!(layer(s.rule), c"setBackgroundColor:", cg(foreground, 0.12));
@@ -834,7 +1083,11 @@ impl TabBar {
                 s.width = (s.visible / titles.len().max(1) as f64).max(MIN_TAB);
                 call!(s.scroller, c"setFrame:", rect(left, 0.0, s.visible, HEIGHT));
                 call!(s.plus, c"setTextColor:", ns_color(foreground, 0.6));
-                call!(s.plus, c"setFrame:", rect(bounds.size.width - PLUS, (HEIGHT - 20.0) / 2.0, PLUS, 20.0));
+                call!(
+                    s.plus,
+                    c"setFrame:",
+                    rect(bounds.size.width - PLUS, (HEIGHT - 20.0) / 2.0, PLUS, 20.0)
+                );
 
                 // Tabs kept as they are, added or dropped at the end, so they can slide.
                 let font: Id = msg!(class(c"NSFont"), c"systemFontOfSize:", 12.0f64);
@@ -846,7 +1099,11 @@ impl TabBar {
                 while s.tabs.len() < titles.len() {
                     // A new tab grows from nothing at the end.
                     let x = s.width * s.tabs.len() as f64;
-                    let view: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", rect(x, 0.0, 0.0, HEIGHT));
+                    let view: Id = msg!(
+                        msg!(class(c"NSView"), c"alloc"),
+                        c"initWithFrame:",
+                        rect(x, 0.0, 0.0, HEIGHT)
+                    );
                     call!(view, c"setWantsLayer:", YES);
                     // Its contents placed here, not stretched as it grows.
                     call!(view, c"setAutoresizesSubviews:", NO);
@@ -859,13 +1116,22 @@ impl TabBar {
                     let close: Id = msg!(class(c"NSTextField"), c"labelWithString:", nsstring("×"));
                     call!(close, c"setFont:", close_font);
                     call!(view, c"addSubview:", close);
-                    let line: Id = msg!(msg!(class(c"NSView"), c"alloc"), c"initWithFrame:", CGRect::default());
+                    let line: Id = msg!(
+                        msg!(class(c"NSView"), c"alloc"),
+                        c"initWithFrame:",
+                        CGRect::default()
+                    );
                     call!(line, c"setWantsLayer:", YES);
                     call!(view, c"addSubview:", line);
                     call!(line, c"release");
                     call!(s.strip, c"addSubview:", view);
                     call!(view, c"release");
-                    s.tabs.push(Tab { view, title, close, line });
+                    s.tabs.push(Tab {
+                        view,
+                        title,
+                        close,
+                        line,
+                    });
                 }
                 s.selected = selected;
                 s.hovered = s.hovered.filter(|&h| h < titles.len());
@@ -878,12 +1144,23 @@ impl TabBar {
                         call!(view, c"setFrame:", frame);
                     }
                 };
-                call!(s.strip, c"setFrameSize:", CGSize { width: s.width * titles.len() as f64, height: HEIGHT });
+                call!(
+                    s.strip,
+                    c"setFrameSize:",
+                    CGSize {
+                        width: s.width * titles.len() as f64,
+                        height: HEIGHT
+                    }
+                );
                 for (i, (tab, title)) in s.tabs.iter().zip(titles).enumerate() {
                     call!(tab.title, c"setStringValue:", nsstring(title));
                     call!(tab.close, c"setTextColor:", ns_color(foreground, 0.6));
                     tab.fit(s.width);
-                    call!(layer(tab.line), c"setBackgroundColor:", cg(foreground, 0.12));
+                    call!(
+                        layer(tab.line),
+                        c"setBackgroundColor:",
+                        cg(foreground, 0.12)
+                    );
                     place(tab.view, rect(i as f64 * s.width, 0.0, s.width, HEIGHT));
                     call!(tab.view, c"setAlphaValue:", 1.0f64);
                 }
@@ -893,10 +1170,20 @@ impl TabBar {
                 let scrolled = s.scrolled();
                 let at = selected as f64 * s.width;
                 let max = (s.width * titles.len() as f64 - s.visible).max(0.0);
-                let to = if at < scrolled { at } else if at + s.width > scrolled + s.visible { at + s.width - s.visible } else { scrolled };
+                let to = if at < scrolled {
+                    at
+                } else if at + s.width > scrolled + s.visible {
+                    at + s.width - s.visible
+                } else {
+                    scrolled
+                };
                 let to = to.clamp(0.0, max);
                 if to != scrolled {
-                    call!(animator(s.clip), c"setBoundsOrigin:", CGPoint { x: to, y: 0.0 });
+                    call!(
+                        animator(s.clip),
+                        c"setBoundsOrigin:",
+                        CGPoint { x: to, y: 0.0 }
+                    );
                     call!(s.scroller, c"reflectScrolledClipView:", s.clip);
                 }
                 s.pin();
@@ -907,7 +1194,9 @@ impl TabBar {
     /// Edits tab `index`'s title in place, starting from `text`, selected.
     pub fn edit(&self, index: usize, text: &str) {
         with_state(self.bar, |s| {
-            let Some(tab) = s.tabs.get(index).copied() else { return };
+            let Some(tab) = s.tabs.get(index).copied() else {
+                return;
+            };
             if s.editing.is_some() {
                 return;
             }
@@ -916,9 +1205,17 @@ impl TabBar {
             unsafe {
                 // The system's rounded text field across the tab, even margins, centred.
                 let width = send_rect(tab.view, c"frame").size.width;
-                let field: Id = msg!(msg!(class(c"NSTextField"), c"alloc"), c"initWithFrame:", rect(6.0, (HEIGHT - 20.0) / 2.0, (width - 12.0).max(40.0), 20.0));
+                let field: Id = msg!(
+                    msg!(class(c"NSTextField"), c"alloc"),
+                    c"initWithFrame:",
+                    rect(6.0, (HEIGHT - 20.0) / 2.0, (width - 12.0).max(40.0), 20.0)
+                );
                 call!(field, c"setStringValue:", nsstring(text));
-                call!(field, c"setPlaceholderString:", nsstring("The program's title"));
+                call!(
+                    field,
+                    c"setPlaceholderString:",
+                    nsstring("The program's title")
+                );
                 let font: Id = msg!(class(c"NSFont"), c"systemFontOfSize:", 12.0f64);
                 call!(field, c"setFont:", font);
                 call!(field, c"setAlignment:", 1isize); // centred
@@ -928,9 +1225,17 @@ impl TabBar {
                 call!(cell, c"setUsesSingleLineMode:", YES);
                 call!(cell, c"setScrollable:", YES);
                 // Dark on a dark terminal, light on a light one, whatever the system's.
-                let dark = 0.2126 * background.0 as f64 + 0.7152 * background.1 as f64 + 0.0722 * background.2 as f64 <= 127.0;
-                let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
-                let appearance: Id = msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name));
+                let dark = 0.2126 * background.0 as f64
+                    + 0.7152 * background.1 as f64
+                    + 0.0722 * background.2 as f64
+                    <= 127.0;
+                let name = if dark {
+                    "NSAppearanceNameDarkAqua"
+                } else {
+                    "NSAppearanceNameAqua"
+                };
+                let appearance: Id =
+                    msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name));
                 call!(field, c"setAppearance:", appearance);
                 call!(field, c"setDelegate:", self.bar);
                 call!(tab.title, c"setHidden:", YES);

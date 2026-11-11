@@ -19,7 +19,12 @@ pub struct Colors {
 
 impl Default for Colors {
     fn default() -> Self {
-        Self { palette: std::array::from_fn(|i| default_palette(i as u8)), foreground: DEFAULT_FG, background: DEFAULT_BG, cursor: None }
+        Self {
+            palette: std::array::from_fn(|i| default_palette(i as u8)),
+            foreground: DEFAULT_FG,
+            background: DEFAULT_BG,
+            cursor: None,
+        }
     }
 }
 
@@ -37,7 +42,11 @@ pub fn default_palette(i: u8) -> Rgb {
         }
         16..=231 => {
             let i = i - 16;
-            (LEVELS[(i / 36) as usize], LEVELS[(i / 6 % 6) as usize], LEVELS[(i % 6) as usize])
+            (
+                LEVELS[(i / 36) as usize],
+                LEVELS[(i / 6 % 6) as usize],
+                LEVELS[(i % 6) as usize],
+            )
         }
         _ => {
             let v = 8 + 10 * (i - 232);
@@ -111,7 +120,10 @@ impl Term {
     fn set_or_report(&mut self, prefix: &str, index: usize, spec: &[u8], terminator: &[u8]) {
         if spec == b"?" {
             let (r, g, b) = self.color(index);
-            self.respond(format!("\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}").as_bytes());
+            self.respond(
+                format!("\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}")
+                    .as_bytes(),
+            );
             self.respond(terminator);
         } else if let Some(rgb) = parse_color(spec) {
             self.set_colors[index] = Some(rgb);
@@ -121,7 +133,9 @@ impl Term {
     /// OSC 4 ; index ; spec [; index ; spec …].
     pub(crate) fn osc_palette(&mut self, pairs: &[&[u8]], terminator: &[u8]) {
         for pair in pairs.chunks_exact(2) {
-            let Some(i) = number(pair[0]).filter(|&i| i < 256) else { continue };
+            let Some(i) = number(pair[0]).filter(|&i| i < 256) else {
+                continue;
+            };
             self.set_or_report(&format!("4;{i}"), i, pair[1], terminator);
         }
     }
@@ -139,7 +153,11 @@ impl Term {
         if indices.iter().all(|i| i.is_empty()) {
             self.set_colors[..256].fill(None);
         }
-        for i in indices.iter().filter_map(|i| number(i)).filter(|&i| i < 256) {
+        for i in indices
+            .iter()
+            .filter_map(|i| number(i))
+            .filter(|&i| i < 256)
+        {
             self.set_colors[i] = None;
         }
     }
@@ -176,7 +194,16 @@ mod tests {
         assert_eq!(parse_color(b"#f80"), Some((0xf0, 0x80, 0)));
         assert_eq!(parse_color(b"#fff888000"), Some((255, 0x88, 0)));
         assert_eq!(parse_color(b"#ffff88880000"), Some((255, 0x88, 0)));
-        for bad in [&b"rgb:ff/80"[..], b"rgb:ff/80/00/00", b"rgb:fffff/0/0", b"rgb:gg/0/0", b"#ff80", b"#", b"red", b""] {
+        for bad in [
+            &b"rgb:ff/80"[..],
+            b"rgb:ff/80/00/00",
+            b"rgb:fffff/0/0",
+            b"rgb:gg/0/0",
+            b"#ff80",
+            b"#",
+            b"red",
+            b"",
+        ] {
             assert_eq!(parse_color(bad), None, "{}", String::from_utf8_lossy(bad));
         }
     }

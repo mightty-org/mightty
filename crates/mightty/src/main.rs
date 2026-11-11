@@ -29,7 +29,10 @@ Add mightty to an agent, e.g. Claude Code:  claude mcp add mightty -- mightty mc
 
 fn main() -> ExitCode {
     // Older macOS passes a process serial number to apps opened from Finder.
-    let args: Vec<String> = env::args().skip(1).filter(|a| !a.starts_with("-psn_")).collect();
+    let args: Vec<String> = env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("-psn_"))
+        .collect();
     let result = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("ctl") => ctl::main(&args[1..]).map_err(io::Error::other),
@@ -49,7 +52,13 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            mightty_mcp::serve(mightty_mcp::Backend::connect(), panes, io::stdin().lock(), io::stdout().lock()).map(|()| ExitCode::SUCCESS)
+            mightty_mcp::serve(
+                mightty_mcp::Backend::connect(),
+                panes,
+                io::stdin().lock(),
+                io::stdout().lock(),
+            )
+            .map(|()| ExitCode::SUCCESS)
         }
         Some("--version" | "-V") => {
             println!("mightty {}", env!("CARGO_PKG_VERSION"));
@@ -96,10 +105,20 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
     while i < args.len() {
         match args[i].as_str() {
             "--cols" | "--rows" => {
-                let value = args.get(i + 1).and_then(|v| v.parse().ok()).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, format!("{} expects a number", args[i]))
-                })?;
-                if args[i] == "--cols" { cols = value } else { rows = value }
+                let value = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("{} expects a number", args[i]),
+                        )
+                    })?;
+                if args[i] == "--cols" {
+                    cols = value
+                } else {
+                    rows = value
+                }
                 i += 2;
             }
             "--screen" => {
@@ -120,7 +139,14 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
 
     let mut cmd = Command::new(program);
     cmd.args(program_args);
-    let mut pty = Pty::spawn(cmd, WindowSize { cols, rows, ..Default::default() })?;
+    let mut pty = Pty::spawn(
+        cmd,
+        WindowSize {
+            cols,
+            rows,
+            ..Default::default()
+        },
+    )?;
     let mut term = Term::new(cols.into(), rows.into());
     let mut reader = pty.reader()?;
     let mut writer = pty.writer()?;
@@ -142,7 +168,11 @@ fn run(args: &[String]) -> io::Result<ExitCode> {
     }
     let status = pty.wait()?;
 
-    let text = if screen_only { term.screen_text() } else { term.history_text() };
+    let text = if screen_only {
+        term.screen_text()
+    } else {
+        term.history_text()
+    };
     println!("{text}");
     Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
 }

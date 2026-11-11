@@ -12,7 +12,15 @@ fn main() {
         let mut cmd = Command::new("cat");
         cmd.arg(&file);
         let start = Instant::now();
-        let mut pty = Pty::spawn(cmd, WindowSize { cols: 120, rows: 40, ..Default::default() }).unwrap();
+        let mut pty = Pty::spawn(
+            cmd,
+            WindowSize {
+                cols: 120,
+                rows: 40,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut reader = pty.reader().unwrap();
         let mut buf = vec![0; 64 * 1024];
         let (mut reads, mut max) = (0u64, 0usize);
@@ -28,6 +36,10 @@ fn main() {
         }
         let _ = pty.wait();
         let secs = start.elapsed().as_secs_f64();
-        println!("pause {pause_us:>3}us: {:6.0} MiB/s, {reads:>6} reads, avg {:>5} B, max {max} B", mib / secs, (mib * 1048576.0 / reads as f64) as u64);
+        println!(
+            "pause {pause_us:>3}us: {:6.0} MiB/s, {reads:>6} reads, avg {:>5} B, max {max} B",
+            mib / secs,
+            (mib * 1048576.0 / reads as f64) as u64
+        );
     }
 }

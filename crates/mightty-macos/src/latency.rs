@@ -48,17 +48,36 @@ unsafe extern "C" fn presented(_: *const Block, drawable: Id) {
     // SAFETY: `drawable` is the MTLDrawable this handler was added to.
     let shown: f64 = unsafe { msg!(drawable, c"presentedTime") };
     if let Some((key, frame)) = WATCHED.lock().unwrap().take() {
-        let on_screen = if shown > 0.0 { (shown - key) * 1e3 } else { f64::NAN };
-        RESULTS.lock().unwrap().push(((frame - key) * 1e3, on_screen));
+        let on_screen = if shown > 0.0 {
+            (shown - key) * 1e3
+        } else {
+            f64::NAN
+        };
+        RESULTS
+            .lock()
+            .unwrap()
+            .push(((frame - key) * 1e3, on_screen));
     }
 }
 
 /// Starts the probe on `window` if `MIGHTTY_KEY_LATENCY` is set.
 pub fn start(window: Id) {
-    let Some(out) = std::env::var_os("MIGHTTY_KEY_LATENCY") else { return };
+    let Some(out) = std::env::var_os("MIGHTTY_KEY_LATENCY") else {
+        return;
+    };
     // SAFETY: plain C call.
     let rng = unsafe { CACurrentMediaTime() }.to_bits() | 1;
-    PROBE.with(|p| *p.borrow_mut() = Some(Probe { out: out.into(), window, sent: None, ready: false, typed: 0, lost: 0, rng }));
+    PROBE.with(|p| {
+        *p.borrow_mut() = Some(Probe {
+            out: out.into(),
+            window,
+            sent: None,
+            ready: false,
+            typed: 0,
+            lost: 0,
+            rng,
+        })
+    });
     run_on_main_after(std::time::Duration::from_millis(500), tick);
 }
 
@@ -81,7 +100,9 @@ pub fn frame(window: Id, snapshot: &Snapshot) -> Option<&'static Block> {
 extern "C" fn tick(_: *mut c_void) {
     let done = PROBE.with(|p| {
         let mut p = p.borrow_mut();
-        let Some(probe) = p.as_mut() else { return false };
+        let Some(probe) = p.as_mut() else {
+            return false;
+        };
         // SAFETY: plain C call.
         let now = unsafe { CACurrentMediaTime() };
         if probe.sent.is_some_and(|(_, at)| now - at > TIMEOUT) {
@@ -104,12 +125,14 @@ extern "C" fn tick(_: *mut c_void) {
         finish();
     } else {
         // 30–80 ms apart, so keys land at every phase of the display refresh.
-        let jitter = PROBE.with(|p| p.borrow_mut().as_mut().map_or(0, |p| {
-            p.rng ^= p.rng << 13;
-            p.rng ^= p.rng >> 7;
-            p.rng ^= p.rng << 17;
-            p.rng % 50
-        }));
+        let jitter = PROBE.with(|p| {
+            p.borrow_mut().as_mut().map_or(0, |p| {
+                p.rng ^= p.rng << 13;
+                p.rng ^= p.rng >> 7;
+                p.rng ^= p.rng << 17;
+                p.rng % 50
+            })
+        });
         run_on_main_after(std::time::Duration::from_millis(30 + jitter), tick);
     }
 }
@@ -139,21 +162,52 @@ unsafe fn post_key(window: Id, key: char) {
 }
 
 fn finish() {
-    let Some(probe) = PROBE.with(|p| p.borrow_mut().take()) else { return };
+    let Some(probe) = PROBE.with(|p| p.borrow_mut().take()) else {
+        return;
+    };
     let results = std::mem::take(&mut *RESULTS.lock().unwrap());
-    let text: String = results.iter().map(|(frame, screen)| format!("{frame:.3}\t{screen:.3}\n")).collect();
+    let text: String = results
+        .iter()
+        .map(|(frame, screen)| format!("{frame:.3}\t{screen:.3}\n"))
+        .collect();
     if let Err(e) = fs::write(&probe.out, format!("frame_ms\tscreen_ms\n{text}")) {
         eprintln!("mightty: {}: {e}", probe.out.display());
     }
     let summary = |mut v: Vec<f64>| {
         v.sort_by(f64::total_cmp);
-        let at = |q: f64| v.get(((v.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(f64::NAN);
-        format!("median {:.2} ms, p95 {:.2} ms, max {:.2} ms", at(0.5), at(0.95), at(1.0))
+        let at = |q: f64| {
+            v.get(((v.len() as f64 - 1.0) * q).round() as usize)
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
+        format!(
+            "median {:.2} ms, p95 {:.2} ms, max {:.2} ms",
+            at(0.5),
+            at(0.95),
+            at(1.0)
+        )
     };
     let dropped = results.iter().filter(|r| r.1.is_nan()).count();
-    eprintln!("mightty: {} keys, {} lost, {} frames dropped", results.len(), probe.lost, dropped);
-    eprintln!("  to frame:  {}", summary(results.iter().map(|r| r.0).collect()));
-    eprintln!("  to screen: {}", summary(results.iter().map(|r| r.1).filter(|v| !v.is_nan()).collect()));
+    eprintln!(
+        "mightty: {} keys, {} lost, {} frames dropped",
+        results.len(),
+        probe.lost,
+        dropped
+    );
+    eprintln!(
+        "  to frame:  {}",
+        summary(results.iter().map(|r| r.0).collect())
+    );
+    eprintln!(
+        "  to screen: {}",
+        summary(
+            results
+                .iter()
+                .map(|r| r.1)
+                .filter(|v| !v.is_nan())
+                .collect()
+        )
+    );
     // SAFETY: main thread; documented signature.
     unsafe {
         let app: Id = msg!(class(c"NSApplication"), c"sharedApplication");

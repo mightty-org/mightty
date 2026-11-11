@@ -9,7 +9,11 @@ pub fn draw(c: char, width: u32, height: u32, stroke: u32) -> Option<Vec<u8>> {
     if !(0x2500..=0x259F).contains(&cp) || width == 0 || height == 0 {
         return None;
     }
-    let mut canvas = Canvas { w: width as i32, h: height as i32, data: vec![0; (width * height) as usize] };
+    let mut canvas = Canvas {
+        w: width as i32,
+        h: height as i32,
+        data: vec![0; (width * height) as usize],
+    };
     let light = stroke.max(1) as i32;
     match cp {
         0x2500..=0x257F => draw_box(&mut canvas, cp, light),
@@ -37,7 +41,11 @@ impl Canvas {
 
     /// `rect` with main/cross axes swapped when `vertical`.
     fn axis_rect(&mut self, vertical: bool, m0: i32, m1: i32, c0: i32, c1: i32) {
-        if vertical { self.rect(c0, m0, c1, m1, 255) } else { self.rect(m0, c0, m1, c1, 255) }
+        if vertical {
+            self.rect(c0, m0, c1, m1, 255)
+        } else {
+            self.rect(m0, c0, m1, c1, 255)
+        }
     }
 
     /// Anti-aliased shape: `f` maps a pixel centre to coverage in 0..=1.
@@ -78,11 +86,23 @@ fn draw_box(canvas: &mut Canvas, cp: u32, light: i32) {
         // (vertical, weight, dash count)
         0x2504..=0x250B => {
             let i = cp - 0x2504;
-            dashes(canvas, i % 4 >= 2, if i.is_multiple_of(2) { 1 } else { 2 }, if i < 4 { 3 } else { 4 }, light);
+            dashes(
+                canvas,
+                i % 4 >= 2,
+                if i.is_multiple_of(2) { 1 } else { 2 },
+                if i < 4 { 3 } else { 4 },
+                light,
+            );
         }
         0x254C..=0x254F => {
             let i = cp - 0x254C;
-            dashes(canvas, i >= 2, if i.is_multiple_of(2) { 1 } else { 2 }, 2, light);
+            dashes(
+                canvas,
+                i >= 2,
+                if i.is_multiple_of(2) { 1 } else { 2 },
+                2,
+                light,
+            );
         }
         0x256D..=0x2570 => arc(canvas, cp, light),
         _ => diagonals(canvas, cp, light),
@@ -92,7 +112,15 @@ fn draw_box(canvas: &mut Canvas, cp: u32, light: i32) {
 /// Draws the two half-lines along one axis. `before`/`after` are the weights
 /// toward the start/end of the axis (left/right, or up/down when
 /// `vertical`); `neg`/`pos` are the perpendicular weights (up/down, or left/right).
-fn segments(canvas: &mut Canvas, vertical: bool, before: u8, after: u8, neg: u8, pos: u8, light: i32) {
+fn segments(
+    canvas: &mut Canvas,
+    vertical: bool,
+    before: u8,
+    after: u8,
+    neg: u8,
+    pos: u8,
+    light: i32,
+) {
     let (len, cm, cc) = if vertical {
         (canvas.h, canvas.h / 2, canvas.w / 2)
     } else {
@@ -102,8 +130,16 @@ fn segments(canvas: &mut Canvas, vertical: bool, before: u8, after: u8, neg: u8,
     let thick = |w: u8| if w == 2 { 2 * l } else { l };
     let single = |w: u8| w == 1 || w == 2;
     // Where perpendicular strokes sit on this axis, so ours can meet them.
-    let lo = [neg, pos].into_iter().filter(|&w| single(w)).map(|w| cm - thick(w) / 2).min();
-    let hi = [neg, pos].into_iter().filter(|&w| single(w)).map(|w| cm - thick(w) / 2 + thick(w)).max();
+    let lo = [neg, pos]
+        .into_iter()
+        .filter(|&w| single(w))
+        .map(|w| cm - thick(w) / 2)
+        .min();
+    let hi = [neg, pos]
+        .into_iter()
+        .filter(|&w| single(w))
+        .map(|w| cm - thick(w) / 2 + thick(w))
+        .max();
     let perp_double = neg == 3 || pos == 3;
     // Main-axis start of the near and far strokes of a perpendicular double line.
     let near = cm - l - l / 2;
@@ -116,10 +152,18 @@ fn segments(canvas: &mut Canvas, vertical: bool, before: u8, after: u8, neg: u8,
                 let t = thick(weight);
                 let c0 = cc - t / 2;
                 if toward_end {
-                    let start = if perp_double { far } else { lo.unwrap_or(cm - t / 2) };
+                    let start = if perp_double {
+                        far
+                    } else {
+                        lo.unwrap_or(cm - t / 2)
+                    };
                     canvas.axis_rect(vertical, start, len, c0, c0 + t);
                 } else {
-                    let end = if perp_double { near + l } else { hi.unwrap_or(cm - t / 2 + t) };
+                    let end = if perp_double {
+                        near + l
+                    } else {
+                        hi.unwrap_or(cm - t / 2 + t)
+                    };
                     canvas.axis_rect(vertical, 0, end, c0, c0 + t);
                 }
             }
@@ -154,7 +198,11 @@ fn segments(canvas: &mut Canvas, vertical: bool, before: u8, after: u8, neg: u8,
 }
 
 fn dashes(canvas: &mut Canvas, vertical: bool, weight: u8, count: i32, light: i32) {
-    let (len, cc) = if vertical { (canvas.h, canvas.w / 2) } else { (canvas.w, canvas.h / 2) };
+    let (len, cc) = if vertical {
+        (canvas.h, canvas.w / 2)
+    } else {
+        (canvas.w, canvas.h / 2)
+    };
     let t = if weight == 2 { 2 * light } else { light };
     let segment = len as f32 / count as f32;
     let gap = (segment / 4.0).max(1.0);
@@ -233,7 +281,12 @@ fn draw_block(canvas: &mut Canvas, cp: u32) {
             const QUADRANTS: [u8; 10] = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14];
             let bits = QUADRANTS[(cp - 0x2596) as usize];
             let (mx, my) = (w / 2, h / 2);
-            for (bit, x0, y0, x1, y1) in [(1, 0, 0, mx, my), (2, mx, 0, w, my), (4, 0, my, mx, h), (8, mx, my, w, h)] {
+            for (bit, x0, y0, x1, y1) in [
+                (1, 0, 0, mx, my),
+                (2, mx, 0, w, my),
+                (4, 0, my, mx, h),
+                (8, mx, my, w, h),
+            ] {
                 if bits & bit != 0 {
                     canvas.rect(x0, y0, x1, y1, 255);
                 }
@@ -290,7 +343,10 @@ mod tests {
     fn double_lines_have_a_gap() {
         let m = mask('═');
         let column: Vec<u8> = (0..H).map(|y| at(&m, 0, y)).collect();
-        let runs = column.windows(2).filter(|w| w[0] == 0 && w[1] == 255).count();
+        let runs = column
+            .windows(2)
+            .filter(|w| w[0] == 0 && w[1] == 255)
+            .count();
         assert_eq!(runs, 2, "two separate strokes: {column:?}");
     }
 

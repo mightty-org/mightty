@@ -63,7 +63,13 @@ fn sgr_colors() {
     assert_eq!(cells[0].fg, Color::Indexed(1));
     assert_eq!(cells[1].fg, Color::Rgb(1, 2, 3));
     assert_eq!(cells[2].bg, Color::Indexed(200));
-    assert_eq!(cells[3], StyledCell { c: 'd', ..StyledCell::BLANK });
+    assert_eq!(
+        cells[3],
+        StyledCell {
+            c: 'd',
+            ..StyledCell::BLANK
+        }
+    );
     assert_eq!(t.lines()[0].cells[3].style(), StyleId::DEFAULT);
 }
 
@@ -104,18 +110,29 @@ fn query_responses() {
 
 #[test]
 fn osc_title_cwd_and_marks() {
-    let t = term(20, 3, "\x1b]0;my;title\x07\x1b]7;file://host/tmp/a%20b\x1b\\");
+    let t = term(
+        20,
+        3,
+        "\x1b]0;my;title\x07\x1b]7;file://host/tmp/a%20b\x1b\\",
+    );
     assert_eq!(t.title(), "my;title");
     assert_eq!(t.cwd(), Some("/tmp/a b"));
     assert_eq!(t.cwd_host(), "host");
-    let t = term(20, 3, "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;2\x07");
+    let t = term(
+        20,
+        3,
+        "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;2\x07",
+    );
     let kinds: Vec<_> = t.marks().iter().map(|m| (m.kind, m.line)).collect();
-    assert_eq!(kinds, [
-        (MarkKind::PromptStart, 0),
-        (MarkKind::CommandStart, 0),
-        (MarkKind::OutputStart, 1),
-        (MarkKind::CommandEnd { exit_code: Some(2) }, 2),
-    ]);
+    assert_eq!(
+        kinds,
+        [
+            (MarkKind::PromptStart, 0),
+            (MarkKind::CommandStart, 0),
+            (MarkKind::OutputStart, 1),
+            (MarkKind::CommandEnd { exit_code: Some(2) }, 2),
+        ]
+    );
 }
 
 #[test]
@@ -210,12 +227,23 @@ fn command_blocks_from_shell_integration() {
     assert_eq!(blocks[1].end_line, None);
     assert_eq!(t.block_output(&blocks[1]), "zzz");
 
-    let started = |c: &str| CommandEvent::Started { command: Some(c.into()) };
-    let finished = CommandEvent::Finished { command: Some("echo hi; false".into()), exit_code: Some(1) };
-    assert_eq!(t.take_command_events(), [started("echo hi; false"), finished, started("sleep 9")]);
+    let started = |c: &str| CommandEvent::Started {
+        command: Some(c.into()),
+    };
+    let finished = CommandEvent::Finished {
+        command: Some("echo hi; false".into()),
+        exit_code: Some(1),
+    };
+    assert_eq!(
+        t.take_command_events(),
+        [started("echo hi; false"), finished, started("sleep 9")]
+    );
     // An empty command line (prompt, then the next prompt) is no command.
     t.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;D\x07\x1b]133;A\x07$ ");
-    let finished = CommandEvent::Finished { command: Some("sleep 9".into()), exit_code: Some(0) };
+    let finished = CommandEvent::Finished {
+        command: Some("sleep 9".into()),
+        exit_code: Some(0),
+    };
     assert_eq!(t.take_command_events(), [finished]);
 }
 
@@ -235,7 +263,9 @@ fn shell_command_history_is_bounded() {
 fn marks_without_the_nonce_are_ignored() {
     let mut t = Term::new(40, 10);
     t.set_mark_nonce("k3y");
-    t.feed(b"\x1b]133;A;nonce=k3y\x07$ make\r\n\x1b]633;E;make;nonce=k3y\x07\x1b]133;C;nonce=k3y\x07");
+    t.feed(
+        b"\x1b]133;A;nonce=k3y\x07$ make\r\n\x1b]633;E;make;nonce=k3y\x07\x1b]133;C;nonce=k3y\x07",
+    );
     // A program's output pretending the command finished.
     t.feed(b"\x1b]133;D;0\x07\x1b]133;D;0;nonce=guess\x07\x1b]633;E;rm\x07\x1b]133;C\x07");
     let blocks = t.command_blocks();
@@ -246,7 +276,10 @@ fn marks_without_the_nonce_are_ignored() {
     t.feed(b"\x1bc\x1b]133;D;0\x07"); // RIS keeps the nonce
     t.feed(b"\x1b]133;D;2;nonce=k3y\x07");
     assert_eq!(t.marks().len(), 1);
-    assert_eq!(t.marks()[0].kind, MarkKind::CommandEnd { exit_code: Some(2) });
+    assert_eq!(
+        t.marks()[0].kind,
+        MarkKind::CommandEnd { exit_code: Some(2) }
+    );
 }
 
 #[test]
@@ -264,7 +297,10 @@ fn output_cant_choose_the_directory_or_inject_escapes() {
     t.feed("\x1b]2;a\u{9b}31mb\u{202e}c\x07".as_bytes());
     assert_eq!(t.title(), "a\u{FFFD}31mb\u{FFFD}c");
     t.feed(b"\x1b]633;E;rm\\x1b]0\\x3bpwn\\x07;nonce=k3y\x07\x1b]133;C;nonce=k3y\x07");
-    assert_eq!(t.command_blocks().last().unwrap().command.as_deref(), Some("rm\u{FFFD}]0;pwn\u{FFFD}"));
+    assert_eq!(
+        t.command_blocks().last().unwrap().command.as_deref(),
+        Some("rm\u{FFFD}]0;pwn\u{FFFD}")
+    );
     t.feed(format!("\x1b]2;{}\x07", "x".repeat(5000)).as_bytes());
     assert_eq!(t.title().chars().count(), 1024);
 }
@@ -272,23 +308,48 @@ fn output_cant_choose_the_directory_or_inject_escapes() {
 #[test]
 fn hidden_text_isnt_copied() {
     let t = term(40, 2, "pip install foo\x1b[8m;curl x|sh\x1b[28m!");
-    assert_eq!(t.text_range((0, 0), (0, 39)).trim_end(), format!("pip install foo{}!", " ".repeat(";curl x|sh".len())));
+    assert_eq!(
+        t.text_range((0, 0), (0, 39)).trim_end(),
+        format!("pip install foo{}!", " ".repeat(";curl x|sh".len()))
+    );
 }
 
 #[test]
 fn options_set_scrollback_and_reported_colors() {
-    let colors = Colors { foreground: (1, 2, 3), background: (0xaa, 0xbb, 0xcc), ..Colors::default() };
-    let options = TermOptions { scrollback_lines: 2, colors, ..TermOptions::default() };
+    let colors = Colors {
+        foreground: (1, 2, 3),
+        background: (0xaa, 0xbb, 0xcc),
+        ..Colors::default()
+    };
+    let options = TermOptions {
+        scrollback_lines: 2,
+        colors,
+        ..TermOptions::default()
+    };
     let mut t = Term::with_options(5, 1, &options);
     t.feed(b"a\r\nb\r\nc\r\nd\x1bc\x1b]10;?\x07\x1b]11;?\x1b\\");
     assert_eq!(t.scrollback().len(), 2);
-    assert_eq!(t.take_responses(), b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\");
+    assert_eq!(
+        t.take_responses(),
+        b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\"
+    );
 }
 
 #[test]
 fn programs_set_and_reset_colors() {
-    let colors = Colors { foreground: (1, 2, 3), background: (4, 5, 6), ..Colors::default() };
-    let mut t = Term::with_options(5, 1, &TermOptions { colors, ..TermOptions::default() });
+    let colors = Colors {
+        foreground: (1, 2, 3),
+        background: (4, 5, 6),
+        ..Colors::default()
+    };
+    let mut t = Term::with_options(
+        5,
+        1,
+        &TermOptions {
+            colors,
+            ..TermOptions::default()
+        },
+    );
     // The palette: several entries at once, asked about in between.
     t.feed(b"\x1b]4;1;rgb:ff/00/00;2;?;300;#fff\x1b\\");
     assert_eq!(t.take_responses(), b"\x1b]4;2;rgb:9898/c3c3/7979\x1b\\");
@@ -296,7 +357,14 @@ fn programs_set_and_reset_colors() {
     // Foreground, then the next ones: background and cursor.
     t.feed(b"\x1b]10;#102030;#405060;rgb:7/8/9\x07\x1b]12;?\x07");
     let c = t.colors();
-    assert_eq!((c.foreground, c.background, c.cursor), ((0x10, 0x20, 0x30), (0x40, 0x50, 0x60), Some((0x77, 0x88, 0x99))));
+    assert_eq!(
+        (c.foreground, c.background, c.cursor),
+        (
+            (0x10, 0x20, 0x30),
+            (0x40, 0x50, 0x60),
+            Some((0x77, 0x88, 0x99))
+        )
+    );
     assert_eq!(t.take_responses(), b"\x1b]12;rgb:7777/8888/9999\x07");
     // A reload keeps what programs set.
     t.set_options(&TermOptions::default());
@@ -304,14 +372,23 @@ fn programs_set_and_reset_colors() {
     // Resets: one, then all.
     t.feed(b"\x1b]4;3;#010101\x07\x1b]104;1\x07\x1b]110\x07\x1b]112\x07");
     let c = t.colors();
-    assert_eq!((c.palette[1], c.palette[3], c.foreground, c.cursor), (default_palette(1), (1, 1, 1), DEFAULT_FG, None));
+    assert_eq!(
+        (c.palette[1], c.palette[3], c.foreground, c.cursor),
+        (default_palette(1), (1, 1, 1), DEFAULT_FG, None)
+    );
     // The cursor following the text reports the foreground.
     t.feed(b"\x1b]12;?\x07");
     assert_eq!(t.take_responses(), b"\x1b]12;rgb:d8d8/d8d8/d8d8\x07");
     t.feed(b"\x1b]104\x07");
     assert_eq!(t.colors().palette[3], default_palette(3));
     // RIS forgets them, and keeps the theme's.
-    t.set_options(&TermOptions { colors: Colors { background: (9, 9, 9), ..Colors::default() }, ..TermOptions::default() });
+    t.set_options(&TermOptions {
+        colors: Colors {
+            background: (9, 9, 9),
+            ..Colors::default()
+        },
+        ..TermOptions::default()
+    });
     t.feed(b"\x1b]11;#000000\x07\x1bc");
     assert_eq!(t.colors().background, (9, 9, 9));
 }
@@ -320,7 +397,10 @@ fn programs_set_and_reset_colors() {
 fn xtversion() {
     let mut t = Term::new(5, 1);
     t.feed(b"\x1b[>q");
-    assert_eq!(t.take_responses(), format!("\x1bP>|mightty {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes());
+    assert_eq!(
+        t.take_responses(),
+        format!("\x1bP>|mightty {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes()
+    );
 }
 
 #[test]
@@ -331,7 +411,12 @@ fn osc52_clipboard_requests() {
     t.feed(b"\x1b]52;c;not base64!\x07"); // ignored
     assert_eq!(
         t.take_clipboard_requests(),
-        [ClipboardRequest::Write("héllo ✓".into()), ClipboardRequest::Read { bell_terminated: false }]
+        [
+            ClipboardRequest::Write("héllo ✓".into()),
+            ClipboardRequest::Read {
+                bell_terminated: false
+            }
+        ]
     );
     assert!(t.take_clipboard_requests().is_empty());
     assert_eq!(clipboard_reply("hi", true), b"\x1b]52;c;aGk=\x07");
@@ -359,14 +444,32 @@ fn clear_above_cursor_keeps_the_prompt_line() {
 
 #[test]
 fn set_options_changes_a_running_terminal() {
-    let mut t = Term::with_options(5, 1, &TermOptions { scrollback_lines: 10, ..TermOptions::default() });
+    let mut t = Term::with_options(
+        5,
+        1,
+        &TermOptions {
+            scrollback_lines: 10,
+            ..TermOptions::default()
+        },
+    );
     t.feed(b"a\r\nb\r\nc\r\nd");
     assert_eq!(t.scrollback().len(), 3);
-    let colors = Colors { foreground: (1, 2, 3), background: (4, 5, 6), ..Colors::default() };
-    t.set_options(&TermOptions { scrollback_lines: 1, colors, ..TermOptions::default() });
+    let colors = Colors {
+        foreground: (1, 2, 3),
+        background: (4, 5, 6),
+        ..Colors::default()
+    };
+    t.set_options(&TermOptions {
+        scrollback_lines: 1,
+        colors,
+        ..TermOptions::default()
+    });
     assert_eq!(t.scrollback().len(), 1);
     t.feed(b"\x1b]10;?\x07\x1b]11;?\x07");
-    assert_eq!(t.take_responses(), b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:0404/0505/0606\x07");
+    assert_eq!(
+        t.take_responses(),
+        b"\x1b]10;rgb:0101/0202/0303\x07\x1b]11;rgb:0404/0505/0606\x07"
+    );
 }
 
 #[test]
@@ -395,7 +498,12 @@ fn bulk_text_matches_char_by_char() {
             t.scrollback()
                 .iter()
                 .chain(t.lines())
-                .map(|row| ((0..7).map(|c| t.resolve(*row.cell(c))).collect(), row.wrapped))
+                .map(|row| {
+                    (
+                        (0..7).map(|c| t.resolve(*row.cell(c))).collect(),
+                        row.wrapped,
+                    )
+                })
                 .collect()
         };
         assert_eq!(rows(&bulk), rows(&slow), "{input:?}");
@@ -431,11 +539,23 @@ fn style_table_stays_near_live_styles() {
     // A fresh colour per line: one live style per line kept.
     let mut t = Term::with_scrollback(10, 2, 5000);
     for i in 0..60_000u32 {
-        t.feed(format!("\x1b[38;2;{};{};{}mx\r\n", (i >> 16) as u8, (i >> 8) as u8, i as u8).as_bytes());
+        t.feed(
+            format!(
+                "\x1b[38;2;{};{};{}mx\r\n",
+                (i >> 16) as u8,
+                (i >> 8) as u8,
+                i as u8
+            )
+            .as_bytes(),
+        );
     }
     // Collected at 2x the ~5000 live styles, with room reserved exactly; a
     // table left to double as it grows would reach 16384.
-    assert!(t.styles().capacity() <= 5003 * 2 + 64, "{}", t.styles().capacity());
+    assert!(
+        t.styles().capacity() <= 5003 * 2 + 64,
+        "{}",
+        t.styles().capacity()
+    );
     let last = t.resolve(t.scrollback()[4999].cells[0]).fg;
     assert_eq!(last, Color::Rgb(0, 234, 94)); // line 59998
 }
@@ -451,22 +571,35 @@ fn reset_keeps_scrollback_styles() {
 fn erase_keeps_background_only() {
     let t = term(4, 1, "\x1b[1;31;44m\x1b[K");
     let cell = t.resolve(*t.lines()[0].cell(2));
-    assert_eq!((cell.fg, cell.bg, cell.flags), (Color::Default, Color::Indexed(4), Flags::empty()));
+    assert_eq!(
+        (cell.fg, cell.bg, cell.flags),
+        (Color::Default, Color::Indexed(4), Flags::empty())
+    );
 }
 
 #[test]
 fn combining_marks_join_the_previous_cell() {
     // Decomposed é, a Thai syllable with marks above and below, and a mark
     // arriving in its own write.
-    let mut t = term(20, 2, "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}");
-    assert_eq!(t.screen_text(), "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}");
+    let mut t = term(
+        20,
+        2,
+        "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}",
+    );
+    assert_eq!(
+        t.screen_text(),
+        "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}"
+    );
     assert_eq!(t.cursor(), (0, 7));
     let cell = t.lines()[0].cells[0];
     assert!(cell.flags().contains(Flags::GRAPHEME));
     assert_eq!(t.cell_text(cell), Some("e\u{301}"));
     assert_eq!(t.resolve(cell).c, 'e');
     t.feed("\u{308}".as_bytes());
-    assert_eq!(t.screen_text(), "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}\u{308}");
+    assert_eq!(
+        t.screen_text(),
+        "e\u{301}x \u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}\u{308}"
+    );
     // At the right margin, before the wrap.
     let t = term(3, 2, "abc\u{301}d");
     assert_eq!(t.screen_text(), "abc\u{301}d");
@@ -503,7 +636,9 @@ fn vs16_makes_emoji_wide() {
     assert_eq!(t.screen_text(), format!("{heart}|{keycap}|\u{2764}|"));
     let cells = &t.lines()[0].cells;
     assert_eq!(t.cell_text(cells[0]), Some(heart));
-    assert!(cells[0].flags().contains(Flags::WIDE) && cells[1].flags().contains(Flags::WIDE_SPACER));
+    assert!(
+        cells[0].flags().contains(Flags::WIDE) && cells[1].flags().contains(Flags::WIDE_SPACER)
+    );
     assert_eq!(t.cell_text(cells[3]), Some(keycap));
     assert!(cells[3].flags().contains(Flags::WIDE));
     // Without VS16 the heart stays narrow.
@@ -519,7 +654,10 @@ fn vs16_makes_emoji_wide() {
     let t = term(10, 1, &format!("\x1b[?2027l{heart}|"));
     assert_eq!(t.cursor(), (0, 2));
     // grapheme-width = legacy: reset from the start, after RIS too, until set.
-    let legacy = TermOptions { wide_emoji: false, ..TermOptions::default() };
+    let legacy = TermOptions {
+        wide_emoji: false,
+        ..TermOptions::default()
+    };
     let mut t = Term::with_options(10, 1, &legacy);
     t.feed(format!("{heart}|\x1bc{heart}|").as_bytes());
     assert_eq!(t.cursor(), (0, 2));
@@ -533,10 +671,20 @@ fn vs16_makes_emoji_wide() {
 
 #[test]
 fn mode_reports() {
-    let mut t = term(10, 2, "\x1b[?2027$p\x1b[?2004h\x1b[?2004$p\x1b[?25l\x1b[?25$p\x1b[4$p\x1b[?9999$p\x1b[?1049h\x1b[?1049$p");
-    assert_eq!(t.take_responses(), b"\x1b[?2027;1$y\x1b[?2004;1$y\x1b[?25;2$y\x1b[4;2$y\x1b[?9999;0$y\x1b[?1049;1$y");
+    let mut t = term(
+        10,
+        2,
+        "\x1b[?2027$p\x1b[?2004h\x1b[?2004$p\x1b[?25l\x1b[?25$p\x1b[4$p\x1b[?9999$p\x1b[?1049h\x1b[?1049$p",
+    );
+    assert_eq!(
+        t.take_responses(),
+        b"\x1b[?2027;1$y\x1b[?2004;1$y\x1b[?25;2$y\x1b[4;2$y\x1b[?9999;0$y\x1b[?1049;1$y"
+    );
     t.feed(b"\x1b[?2027l\x1b[?2027$p\x1b[?1002h\x1b[?1000$p\x1b[?1002$p");
-    assert_eq!(t.take_responses(), b"\x1b[?2027;2$y\x1b[?1000;2$y\x1b[?1002;1$y");
+    assert_eq!(
+        t.take_responses(),
+        b"\x1b[?2027;2$y\x1b[?1000;2$y\x1b[?1002;1$y"
+    );
 }
 
 #[test]
@@ -546,7 +694,9 @@ fn flags_pair_regional_indicators() {
     assert_eq!(t.screen_text(), format!("{vn}{vn}\u{1F1FA}x"));
     let cells = &t.lines()[0].cells;
     assert_eq!(t.cell_text(cells[0]), Some(vn));
-    assert!(cells[0].flags().contains(Flags::WIDE) && cells[1].flags().contains(Flags::WIDE_SPACER));
+    assert!(
+        cells[0].flags().contains(Flags::WIDE) && cells[1].flags().contains(Flags::WIDE_SPACER)
+    );
     assert_eq!(t.cell_text(cells[2]), Some(vn));
     // A lone indicator is narrow; the cursor moves as apps expect (1 + 1 per letter).
     assert_eq!(t.cursor(), (0, 6));
@@ -580,16 +730,32 @@ fn clusters_are_capped() {
     // A flood of marks stops growing the cell at the cap.
     let t = term(10, 1, &format!("e{}x", "\u{301}".repeat(100_000)));
     let text = t.screen_text();
-    assert!(text.len() <= MAX_CLUSTER_BYTES + 1 && text.starts_with("e\u{301}") && text.ends_with('x'), "{}", text.len());
+    assert!(
+        text.len() <= MAX_CLUSTER_BYTES + 1 && text.starts_with("e\u{301}") && text.ends_with('x'),
+        "{}",
+        text.len()
+    );
     assert_eq!(t.cursor(), (0, 2));
 }
 
 #[test]
 fn search_finds_matches_across_scrollback_and_wraps() {
     // Lines 0-1 end up in scrollback; "needle" on line 2 soft-wraps onto line 3.
-    let t = term(10, 3, "a needle\r\nold\r\nxxxxxxneedle Needle\r\n\u{6f22}needle");
+    let t = term(
+        10,
+        3,
+        "a needle\r\nold\r\nxxxxxxneedle Needle\r\n\u{6f22}needle",
+    );
     let found = t.search("needle");
-    assert_eq!(found, vec![((0, 2), (0, 7)), ((2, 6), (3, 1)), ((3, 3), (3, 8)), ((4, 2), (4, 7))]);
+    assert_eq!(
+        found,
+        vec![
+            ((0, 2), (0, 7)),
+            ((2, 6), (3, 1)),
+            ((3, 3), (3, 8)),
+            ((4, 2), (4, 7))
+        ]
+    );
     // A capital makes the search case-sensitive.
     assert_eq!(t.search("Needle"), vec![((3, 3), (3, 8))]);
     assert!(t.search("").is_empty() && t.search("absent").is_empty());
@@ -614,7 +780,11 @@ fn search_from_covers_new_output() {
 
 #[test]
 fn osc8_links_cells_and_survives_sgr() {
-    let t = term(40, 2, "a \x1b]8;;https://example.com/x;y\x07li\x1b[1;31mnk\x1b[0m!\x1b]8;;\x07 b");
+    let t = term(
+        40,
+        2,
+        "a \x1b]8;;https://example.com/x;y\x07li\x1b[1;31mnk\x1b[0m!\x1b]8;;\x07 b",
+    );
     let id = t.link_at(0, 2).expect("linked");
     assert_eq!(t.link(id), Some("https://example.com/x;y"));
     // SGR changes and resets in the middle don't end the link.
@@ -623,7 +793,11 @@ fn osc8_links_cells_and_survives_sgr() {
     assert_eq!(t.link_at(0, 0), None);
     assert_eq!(t.link_at(0, 8), None);
     // Same id and target: one link, even split across lines; other ids differ.
-    let t = term(40, 3, "\x1b]8;id=a;https://x\x1b\\one\x1b]8;;\x1b\\\r\n\x1b]8;id=a;https://x\x1b\\two\x1b]8;id=b;https://x\x1b\\3");
+    let t = term(
+        40,
+        3,
+        "\x1b]8;id=a;https://x\x1b\\one\x1b]8;;\x1b\\\r\n\x1b]8;id=a;https://x\x1b\\two\x1b]8;id=b;https://x\x1b\\3",
+    );
     assert_eq!(t.link_at(0, 0), t.link_at(1, 0));
     assert_ne!(t.link_at(1, 0), t.link_at(1, 3));
     // Too long a target is ignored.
@@ -643,7 +817,11 @@ fn link_ids_are_reclaimed() {
 
 #[test]
 fn urls_are_found_in_plain_text() {
-    let t = term(40, 4, "see (https://example.com/a_(b)).\r\nmail me: mailto:me@x.org, ok\r\nxxxxxxxxxxxxhttps://wrap.example/long/path");
+    let t = term(
+        40,
+        4,
+        "see (https://example.com/a_(b)).\r\nmail me: mailto:me@x.org, ok\r\nxxxxxxxxxxxxhttps://wrap.example/long/path",
+    );
     let (range, url) = t.url_at(0, 10).unwrap();
     assert_eq!(url, "https://example.com/a_(b)");
     assert_eq!(range, ((0, 5), (0, 29)));
@@ -672,18 +850,34 @@ fn full_link_table_stays_consistent() {
 
 #[test]
 fn notifications_and_bells() {
-    let mut t = term(20, 3, "\x1b]9;Build done; 3 warnings\x07\x07\x1b]777;notify;Claude;Waiting for you\x1b\\");
+    let mut t = term(
+        20,
+        3,
+        "\x1b]9;Build done; 3 warnings\x07\x07\x1b]777;notify;Claude;Waiting for you\x1b\\",
+    );
     let n = t.take_notifications();
     assert_eq!(n.len(), 2);
-    assert_eq!((n[0].title.as_str(), n[0].body.as_str()), ("", "Build done; 3 warnings"));
-    assert_eq!((n[1].title.as_str(), n[1].body.as_str()), ("Claude", "Waiting for you"));
+    assert_eq!(
+        (n[0].title.as_str(), n[0].body.as_str()),
+        ("", "Build done; 3 warnings")
+    );
+    assert_eq!(
+        (n[1].title.as_str(), n[1].body.as_str()),
+        ("Claude", "Waiting for you")
+    );
     assert!(t.take_notifications().is_empty());
     // The OSC's terminating BEL isn't a bell; the lone one is.
     assert_eq!(t.bells(), 1);
     assert!(t.take_bell());
     // ConEmu progress (OSC 9;4) isn't a notification; control characters are dropped.
     t.feed("\x1b]9;4;1;50\x07\x1b]9;a\u{85}b\x07".as_bytes());
-    assert_eq!(t.take_notifications().iter().map(|n| n.body.as_str()).collect::<Vec<_>>(), ["ab"]);
+    assert_eq!(
+        t.take_notifications()
+            .iter()
+            .map(|n| n.body.as_str())
+            .collect::<Vec<_>>(),
+        ["ab"]
+    );
 }
 
 #[test]
@@ -753,20 +947,32 @@ fn underline_styles_and_colours() {
     let mut t = Term::new(20, 2);
     t.feed(b"\x1b[4:3;58:2::255:0:0ma\x1b[58;5;4mb\x1b[59mc\x1b[21md\x1b[4:0me\x1b[4;4:9mf\x1b[24mg\x1b[4:5mh\x1b[0mi");
     let cells: Vec<_> = (0..9).map(|c| t.resolve(t.lines()[0].cells[c])).collect();
-    let shape: Vec<_> = cells.iter().map(|c| (c.flags.contains(Flags::UNDERLINE), c.underline, c.underline_color)).collect();
+    let shape: Vec<_> = cells
+        .iter()
+        .map(|c| {
+            (
+                c.flags.contains(Flags::UNDERLINE),
+                c.underline,
+                c.underline_color,
+            )
+        })
+        .collect();
     use Underline::*;
-    assert_eq!(shape, [
-        (true, Curly, Color::Rgb(255, 0, 0)),
-        (true, Curly, Color::Indexed(4)),
-        (true, Curly, Color::Default),
-        (true, Double, Color::Default),
-        (false, Single, Color::Default),
-        // An unknown style keeps what was set.
-        (true, Single, Color::Default),
-        (false, Single, Color::Default),
-        (true, Dashed, Color::Default),
-        (false, Single, Color::Default),
-    ]);
+    assert_eq!(
+        shape,
+        [
+            (true, Curly, Color::Rgb(255, 0, 0)),
+            (true, Curly, Color::Indexed(4)),
+            (true, Curly, Color::Default),
+            (true, Double, Color::Default),
+            (false, Single, Color::Default),
+            // An unknown style keeps what was set.
+            (true, Single, Color::Default),
+            (false, Single, Color::Default),
+            (true, Dashed, Color::Default),
+            (false, Single, Color::Default),
+        ]
+    );
     // Off again, a cell is as blank as one never styled; the style
     // bits don't show in a cell's flags.
     assert_eq!(cells[1].flags.bits() & 0xF000, 0);

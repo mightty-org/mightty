@@ -156,7 +156,12 @@ impl Action {
             _ => Err(format!("`{name}`: expects left, right, up or down")),
         };
         let points = |arg: Option<&str>| {
-            arg.map_or(Ok(1.0), |a| a.parse().ok().filter(|p: &f64| p.is_finite() && *p > 0.0).ok_or(format!("`{name}`: expects a number of points")))
+            arg.map_or(Ok(1.0), |a| {
+                a.parse()
+                    .ok()
+                    .filter(|p: &f64| p.is_finite() && *p > 0.0)
+                    .ok_or(format!("`{name}`: expects a number of points"))
+            })
         };
         let bare = |action: Self| match arg {
             None => Ok(action),
@@ -186,11 +191,19 @@ impl Action {
                     Some((dir, amount)) => (dir, Some(amount)),
                     None => (arg, None),
                 };
-                Ok(Self::ResizeSplit(direction(dir)?, amount.map_or(Ok(10.0), |a| points(Some(a)))?))
+                Ok(Self::ResizeSplit(
+                    direction(dir)?,
+                    amount.map_or(Ok(10.0), |a| points(Some(a)))?,
+                ))
             }
             ("toggle_split_zoom", _) => bare(Self::ToggleSplitZoom),
             ("equalize_splits", _) => bare(Self::EqualizeSplits),
-            ("goto_tab", Some(n)) => n.parse().ok().filter(|&n| n > 0).map(Self::GotoTab).ok_or("`goto_tab`: expects a tab number from 1".into()),
+            ("goto_tab", Some(n)) => n
+                .parse()
+                .ok()
+                .filter(|&n| n > 0)
+                .map(Self::GotoTab)
+                .ok_or("`goto_tab`: expects a tab number from 1".into()),
             ("previous_tab", _) => bare(Self::PreviousTab),
             ("next_tab", _) => bare(Self::NextTab),
             ("last_tab", _) => bare(Self::LastTab),
@@ -241,7 +254,9 @@ fn unescape(text: &str) -> Result<Vec<u8>, String> {
             Some('\\') => out.push(b'\\'),
             Some('x') => {
                 let hex: String = chars.by_ref().take(2).collect();
-                let byte = (hex.len() == 2).then(|| u8::from_str_radix(&hex, 16).ok()).flatten();
+                let byte = (hex.len() == 2)
+                    .then(|| u8::from_str_radix(&hex, 16).ok())
+                    .flatten();
                 out.push(byte.ok_or("`\\x` expects two hex digits")?);
             }
             _ => return Err("unknown escape; use \\n, \\r, \\t, \\e, \\\\ or \\xHH".into()),
@@ -283,12 +298,20 @@ impl Trigger {
                 "ctrl" | "control" => CTRL,
                 "alt" | "opt" | "option" => ALT,
                 "shift" => SHIFT,
-                _ => return Err(format!("unknown modifier `{m}`; use cmd, ctrl, alt or shift")),
+                _ => {
+                    return Err(format!(
+                        "unknown modifier `{m}`; use cmd, ctrl, alt or shift"
+                    ));
+                }
             };
         }
         let key = if let Some(&(_, key)) = NAMES.iter().find(|(name, _)| *name == key) {
             key
-        } else if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse().ok()).filter(|n| (1..=12).contains(n)) {
+        } else if let Some(n) = key
+            .strip_prefix('f')
+            .and_then(|n| n.parse().ok())
+            .filter(|n| (1..=12).contains(n))
+        {
             Key::Named(Named::F(n))
         } else {
             let mut chars = key.chars();
@@ -332,10 +355,16 @@ impl Trigger {
             111 => Named::F(12),
             _ => {
                 let c = unmodified.chars().next()?;
-                return Some(Self { mods, key: Key::Char(c.to_lowercase().next().unwrap_or(c)) });
+                return Some(Self {
+                    mods,
+                    key: Key::Char(c.to_lowercase().next().unwrap_or(c)),
+                });
             }
         };
-        Some(Self { mods, key: Key::Named(named) })
+        Some(Self {
+            mods,
+            key: Key::Named(named),
+        })
     }
 
     /// The menu item key equivalent: its string and modifier bits.
@@ -368,47 +397,107 @@ impl Trigger {
 /// it takes one), and what it does: for `mightty config --export` and so
 /// the docs.
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("new_window", "A new window, its shell where the current one is"),
+    (
+        "new_window",
+        "A new window, its shell where the current one is",
+    ),
     ("new_tab", "A new tab, its shell where the current one is"),
-    ("new_split:right", "Splits the pane, the new one to the right"),
+    (
+        "new_split:right",
+        "Splits the pane, the new one to the right",
+    ),
     ("new_split:down", "Splits the pane, the new one below"),
-    ("close_surface", "Closes the pane, or its tab or window with its last pane"),
+    (
+        "close_surface",
+        "Closes the pane, or its tab or window with its last pane",
+    ),
     ("close_window", "Closes the window"),
     ("minimize_window", "Minimizes the window"),
     ("quit", "Quits Mightty"),
     ("copy_to_clipboard", "Copies the selection"),
-    ("paste_from_clipboard", "Pastes, asking first when it could run commands"),
+    (
+        "paste_from_clipboard",
+        "Pastes, asking first when it could run commands",
+    ),
     ("start_search", "Finds text in the pane and its history"),
     ("navigate_search:next", "The next match (or previous)"),
     ("goto_split:next", "The next pane (or previous)"),
-    ("goto_split:left", "The pane to the left (or right, up, down)"),
-    ("resize_split:left,10", "Moves the nearest divider, in points"),
-    ("toggle_split_zoom", "The pane alone fills the window, or not"),
-    ("equalize_splits", "Shares the window evenly between its panes"),
+    (
+        "goto_split:left",
+        "The pane to the left (or right, up, down)",
+    ),
+    (
+        "resize_split:left,10",
+        "Moves the nearest divider, in points",
+    ),
+    (
+        "toggle_split_zoom",
+        "The pane alone fills the window, or not",
+    ),
+    (
+        "equalize_splits",
+        "Shares the window evenly between its panes",
+    ),
     ("goto_tab:1", "Tab N, from 1"),
     ("previous_tab", "The tab to the left"),
     ("next_tab", "The tab to the right"),
     ("last_tab", "The last tab"),
-    ("move_tab_to_new_window", "The tab out into a window of its own"),
+    (
+        "move_tab_to_new_window",
+        "The tab out into a window of its own",
+    ),
     ("close_other_tabs", "Closes the window's other tabs"),
-    ("undo", "Brings back the last tab, pane or window closed, still running, within undo-timeout"),
-    ("reopen_closed", "Reopens the last tab, pane or window closed, running still or with new shells"),
-    ("prompt_surface_title", "A title for the pane, shown in its tab and window"),
-    ("jump_to_attention", "The pane that has waited longest for you"),
-    ("toggle_command_palette", "Every action by name, filtered as you type"),
-    ("toggle_quick_terminal", "A terminal that drops from the top of the screen, over any app"),
-    ("toggle_secure_input", "Secure Keyboard Entry: other apps can't read what you type"),
+    (
+        "undo",
+        "Brings back the last tab, pane or window closed, still running, within undo-timeout",
+    ),
+    (
+        "reopen_closed",
+        "Reopens the last tab, pane or window closed, running still or with new shells",
+    ),
+    (
+        "prompt_surface_title",
+        "A title for the pane, shown in its tab and window",
+    ),
+    (
+        "jump_to_attention",
+        "The pane that has waited longest for you",
+    ),
+    (
+        "toggle_command_palette",
+        "Every action by name, filtered as you type",
+    ),
+    (
+        "toggle_quick_terminal",
+        "A terminal that drops from the top of the screen, over any app",
+    ),
+    (
+        "toggle_secure_input",
+        "Secure Keyboard Entry: other apps can't read what you type",
+    ),
     ("open_settings", "The settings, in a window of their own"),
-    ("open_config", "The config file in your $EDITOR, in a new tab"),
+    (
+        "open_config",
+        "The config file in your $EDITOR, in a new tab",
+    ),
     ("reload_config", "Applies the config file now"),
-    ("increase_font_size:1", "A bigger font in the pane, by points (or smaller)"),
+    (
+        "increase_font_size:1",
+        "A bigger font in the pane, by points (or smaller)",
+    ),
     ("reset_font_size", "The pane's font back to font-size"),
-    ("clear_screen", "Clears history and the screen above the prompt"),
+    (
+        "clear_screen",
+        "Clears history and the screen above the prompt",
+    ),
     ("scroll_to_top", "To the top of the history"),
     ("scroll_to_bottom", "Back to the prompt"),
     ("scroll_page_up", "A page up the history"),
     ("scroll_page_down", "A page down the history"),
-    ("text:hello\\n", "Sends text to the program (\\n, \\r, \\t, \\e, \\xHH)"),
+    (
+        "text:hello\\n",
+        "Sends text to the program (\\n, \\r, \\t, \\e, \\xHH)",
+    ),
     ("csi:2J", "Sends ESC [ and the text"),
     ("esc:d", "Sends ESC and the text"),
     ("ignore", "The key does nothing, not even reach the program"),
@@ -470,11 +559,20 @@ impl Default for Bindings {
             ("cmd+page_up", ScrollPageUp),
             ("cmd+page_down", ScrollPageDown),
         ];
-        let tabs: Vec<(String, Action)> = (1..=8).map(|n| (format!("cmd+{n}"), GotoTab(n))).collect();
-        let mut bindings: Vec<(Trigger, Action)> =
-            list.drain(..).map(|(t, a)| (Trigger::parse(t).expect("a valid default trigger"), a)).collect();
-        bindings.extend(tabs.into_iter().map(|(t, a)| (Trigger::parse(&t).expect("a valid default trigger"), a)));
-        Self { keys: bindings, global: Vec::new() }
+        let tabs: Vec<(String, Action)> =
+            (1..=8).map(|n| (format!("cmd+{n}"), GotoTab(n))).collect();
+        let mut bindings: Vec<(Trigger, Action)> = list
+            .drain(..)
+            .map(|(t, a)| (Trigger::parse(t).expect("a valid default trigger"), a))
+            .collect();
+        bindings.extend(
+            tabs.into_iter()
+                .map(|(t, a)| (Trigger::parse(&t).expect("a valid default trigger"), a)),
+        );
+        Self {
+            keys: bindings,
+            global: Vec::new(),
+        }
     }
 }
 
@@ -513,7 +611,10 @@ impl Bindings {
     }
 
     pub fn find(&self, trigger: Trigger) -> Option<&Action> {
-        self.keys.iter().find(|(t, _)| *t == trigger).map(|(_, a)| a)
+        self.keys
+            .iter()
+            .find(|(t, _)| *t == trigger)
+            .map(|(_, a)| a)
     }
 
     /// The first trigger bound to `action`, for its menu item.
@@ -532,12 +633,36 @@ mod tests {
 
     #[test]
     fn triggers() {
-        assert_eq!(trigger("cmd+shift+d"), Trigger { mods: CMD | SHIFT, key: Key::Char('d') });
-        assert_eq!(trigger("ctrl+alt+page_up"), Trigger { mods: CTRL | ALT, key: Key::Named(Named::PageUp) });
-        assert_eq!(trigger("cmd++"), Trigger { mods: CMD, key: Key::Char('+') });
+        assert_eq!(
+            trigger("cmd+shift+d"),
+            Trigger {
+                mods: CMD | SHIFT,
+                key: Key::Char('d')
+            }
+        );
+        assert_eq!(
+            trigger("ctrl+alt+page_up"),
+            Trigger {
+                mods: CTRL | ALT,
+                key: Key::Named(Named::PageUp)
+            }
+        );
+        assert_eq!(
+            trigger("cmd++"),
+            Trigger {
+                mods: CMD,
+                key: Key::Char('+')
+            }
+        );
         assert_eq!(trigger("cmd+plus"), trigger("cmd++"));
         assert_eq!(trigger("super+T"), trigger("cmd+t"));
-        assert_eq!(trigger("f5"), Trigger { mods: 0, key: Key::Named(Named::F(5)) });
+        assert_eq!(
+            trigger("f5"),
+            Trigger {
+                mods: 0,
+                key: Key::Named(Named::F(5))
+            }
+        );
         assert!(Trigger::parse("hyper+t").is_err());
         assert!(Trigger::parse("cmd+tee").is_err());
     }
@@ -545,22 +670,58 @@ mod tests {
     #[test]
     fn events_match_triggers() {
         assert_eq!(Trigger::from_event(17, "t", CMD), Some(trigger("cmd+t")));
-        assert_eq!(Trigger::from_event(33, "[", CMD | SHIFT), Some(trigger("cmd+shift+[")));
-        assert_eq!(Trigger::from_event(116, "\u{F72C}", CMD), Some(trigger("cmd+page_up")));
-        assert_eq!(Trigger::from_event(36, "\r", CMD | SHIFT), Some(trigger("cmd+shift+enter")));
+        assert_eq!(
+            Trigger::from_event(33, "[", CMD | SHIFT),
+            Some(trigger("cmd+shift+["))
+        );
+        assert_eq!(
+            Trigger::from_event(116, "\u{F72C}", CMD),
+            Some(trigger("cmd+page_up"))
+        );
+        assert_eq!(
+            Trigger::from_event(36, "\r", CMD | SHIFT),
+            Some(trigger("cmd+shift+enter"))
+        );
     }
 
     #[test]
     fn actions() {
-        assert_eq!(Action::parse("new_split:down"), Ok(Action::NewSplit(Direction::Down)));
-        assert_eq!(Action::parse("resize_split:up,25"), Ok(Action::ResizeSplit(Direction::Up, 25.0)));
-        assert_eq!(Action::parse("resize_split:left"), Ok(Action::ResizeSplit(Direction::Left, 10.0)));
-        assert_eq!(Action::parse("decrease_font_size:2"), Ok(Action::ChangeFontSize(-2.0)));
-        assert_eq!(Action::parse("increase_font_size"), Ok(Action::ChangeFontSize(1.0)));
+        assert_eq!(
+            Action::parse("new_split:down"),
+            Ok(Action::NewSplit(Direction::Down))
+        );
+        assert_eq!(
+            Action::parse("resize_split:up,25"),
+            Ok(Action::ResizeSplit(Direction::Up, 25.0))
+        );
+        assert_eq!(
+            Action::parse("resize_split:left"),
+            Ok(Action::ResizeSplit(Direction::Left, 10.0))
+        );
+        assert_eq!(
+            Action::parse("decrease_font_size:2"),
+            Ok(Action::ChangeFontSize(-2.0))
+        );
+        assert_eq!(
+            Action::parse("increase_font_size"),
+            Ok(Action::ChangeFontSize(1.0))
+        );
         assert_eq!(Action::parse("goto_tab:3"), Ok(Action::GotoTab(3)));
-        assert_eq!(Action::parse(r"text:\x1b[A\n"), Ok(Action::Text(b"\x1b[A\n".to_vec())));
-        assert_eq!(Action::parse("csi:2J"), Ok(Action::Text(b"\x1b[2J".to_vec())));
-        for bad in ["new_split:left", "goto_tab:0", "new_tab:now", "text:\\q", "fly"] {
+        assert_eq!(
+            Action::parse(r"text:\x1b[A\n"),
+            Ok(Action::Text(b"\x1b[A\n".to_vec()))
+        );
+        assert_eq!(
+            Action::parse("csi:2J"),
+            Ok(Action::Text(b"\x1b[2J".to_vec()))
+        );
+        for bad in [
+            "new_split:left",
+            "goto_tab:0",
+            "new_tab:now",
+            "text:\\q",
+            "fly",
+        ] {
             assert!(Action::parse(bad).is_err(), "{bad}");
         }
     }
@@ -582,8 +743,12 @@ mod tests {
         assert!(b.apply("cmd+t").is_err());
         assert!(b.apply("cmd+t=fly").is_err());
         // Global keys are kept apart: they act from any app.
-        b.apply("global:ctrl+grave_accent=toggle_quick_terminal").unwrap();
-        assert_eq!(b.global(), [(trigger("ctrl+grave_accent"), Action::ToggleQuickTerminal)]);
+        b.apply("global:ctrl+grave_accent=toggle_quick_terminal")
+            .unwrap();
+        assert_eq!(
+            b.global(),
+            [(trigger("ctrl+grave_accent"), Action::ToggleQuickTerminal)]
+        );
         assert_eq!(b.global()[0].0.to_string(), "ctrl+grave_accent");
         assert_eq!(trigger("cmd+shift+f5").to_string(), "cmd+shift+f5");
         assert_eq!(b.find(trigger("ctrl+grave_accent")), None);
@@ -599,5 +764,4 @@ mod tests {
             assert!(Action::parse(name).is_ok(), "{name}");
         }
     }
-
 }

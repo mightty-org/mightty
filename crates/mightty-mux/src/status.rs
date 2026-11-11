@@ -12,7 +12,18 @@ use mightty_term::Notification;
 
 /// Programs treated as AI agents, by command name.
 pub const AGENTS: &[&str] = &[
-    "claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "copilot", "crush", "qwen", "droid",
+    "claude",
+    "codex",
+    "gemini",
+    "aider",
+    "opencode",
+    "amp",
+    "goose",
+    "cursor-agent",
+    "copilot",
+    "crush",
+    "qwen",
+    "droid",
 ];
 
 /// Output this recent means an agent is working.
@@ -100,12 +111,24 @@ pub(crate) struct Activity {
 
 impl Activity {
     pub(crate) fn new() -> Self {
-        Self { last_output: None, busy_since: None, status: Status::Idle, bells: 0, attention: None }
+        Self {
+            last_output: None,
+            busy_since: None,
+            status: Status::Idle,
+            bells: 0,
+            attention: None,
+        }
     }
 
     /// Output arrived at `now`, the terminal having rung `bells` bells so
     /// far and asked for `notifications`. Returns whether attention changed.
-    pub(crate) fn output(&mut self, now: Instant, bells: u64, mut notifications: Vec<Notification>, focused: bool) -> bool {
+    pub(crate) fn output(
+        &mut self,
+        now: Instant,
+        bells: u64,
+        mut notifications: Vec<Notification>,
+        focused: bool,
+    ) -> bool {
         if self.last_output.is_none_or(|at| now - at > QUIET) {
             self.busy_since = Some(now);
         }
@@ -124,7 +147,14 @@ impl Activity {
     /// Re-derives the status at `now`: whether the process has `exited`,
     /// a command is `running`, and it's an `agent`. Returns whether the
     /// status or attention changed.
-    pub(crate) fn update(&mut self, now: Instant, exited: bool, running: bool, agent: bool, focused: bool) -> bool {
+    pub(crate) fn update(
+        &mut self,
+        now: Instant,
+        exited: bool,
+        running: bool,
+        agent: bool,
+        focused: bool,
+    ) -> bool {
         let recent = self.last_output.is_some_and(|at| now - at < QUIET);
         let status = match (exited, agent && running, running) {
             (true, ..) => Status::Exited,
@@ -176,7 +206,9 @@ const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3"];
 pub fn is_agent(command_line: Option<&str>, foreground: Option<&Foreground>) -> bool {
     let base = |w: &str| w.rsplit('/').next().unwrap_or(w).to_owned();
     // The program: past `VAR=value` assignments, without its directory.
-    let program = command_line.and_then(|c| c.split_whitespace().find(|w| !w.contains('='))).map(base);
+    let program = command_line
+        .and_then(|c| c.split_whitespace().find(|w| !w.contains('=')))
+        .map(base);
     // A symlinked binary can be named after its version: its arguments say what it was run as.
     let run_as = foreground.and_then(|f| f.args.first()).map(|a| base(a));
     let script = foreground
@@ -184,7 +216,10 @@ pub fn is_agent(command_line: Option<&str>, foreground: Option<&Foreground>) -> 
         .and_then(|f| f.args.get(1))
         .map(|a| base(a).split('.').next().unwrap_or_default().to_owned());
     let name = foreground.map(|f| f.name.clone());
-    [program, run_as, script, name].into_iter().flatten().any(|n| AGENTS.contains(&n.as_str()))
+    [program, run_as, script, name]
+        .into_iter()
+        .flatten()
+        .any(|n| AGENTS.contains(&n.as_str()))
 }
 
 #[cfg(test)]
@@ -196,7 +231,10 @@ mod tests {
     }
 
     fn process(name: &str, args: &[&str]) -> Foreground {
-        Foreground { name: name.into(), args: args.iter().map(|a| a.to_string()).collect() }
+        Foreground {
+            name: name.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -205,11 +243,29 @@ mod tests {
         assert!(is_agent(Some("FOO=1 ~/.local/bin/codex"), None));
         assert!(is_agent(None, Some(&process("gemini", &[]))));
         // Claude Code's binary is named after its version, behind a `claude` symlink.
-        assert!(is_agent(Some("zsh"), Some(&process("2.1.316", &["claude", "--resume"]))));
+        assert!(is_agent(
+            Some("zsh"),
+            Some(&process("2.1.316", &["claude", "--resume"]))
+        ));
         // Installed with npm: node running the agent's script.
-        assert!(is_agent(None, Some(&process("node", &["node", "/usr/local/lib/node_modules/@openai/codex/bin/codex.js"]))));
-        assert!(!is_agent(None, Some(&process("node", &["node", "server.js"]))));
-        assert!(!is_agent(Some("vim claude.md"), Some(&process("vim", &["vim", "claude.md"]))));
+        assert!(is_agent(
+            None,
+            Some(&process(
+                "node",
+                &[
+                    "node",
+                    "/usr/local/lib/node_modules/@openai/codex/bin/codex.js"
+                ]
+            ))
+        ));
+        assert!(!is_agent(
+            None,
+            Some(&process("node", &["node", "server.js"]))
+        ));
+        assert!(!is_agent(
+            Some("vim claude.md"),
+            Some(&process("vim", &["vim", "claude.md"]))
+        ));
         assert!(!is_agent(None, None));
     }
 
@@ -226,7 +282,10 @@ mod tests {
         assert!(a.attention.is_none());
         assert!(a.update(at(t, 6000), false, true, true, false));
         assert_eq!(a.status, Status::Waiting);
-        assert_eq!(a.attention.as_ref().map(|a| a.reason.clone()), Some(Reason::Waiting));
+        assert_eq!(
+            a.attention.as_ref().map(|a| a.reason.clone()),
+            Some(Reason::Waiting)
+        );
         assert!(a.clear());
         assert!(!a.clear());
     }
@@ -264,10 +323,16 @@ mod tests {
         assert_eq!(a.attention.as_ref().map(|a| a.reason.name()), Some("bell"));
         let since = a.attention.as_ref().unwrap().since;
         // A later notification takes over the reason, keeping its place in the queue.
-        let note = Notification { title: "Build".into(), body: "done".into() };
+        let note = Notification {
+            title: "Build".into(),
+            body: "done".into(),
+        };
         assert!(a.output(at(t, 100), 1, vec![note], false));
         let attention = a.attention.clone().unwrap();
-        assert_eq!((attention.reason.message(), attention.since), ("Build: done".to_owned(), since));
+        assert_eq!(
+            (attention.reason.message(), attention.since),
+            ("Build: done".to_owned(), since)
+        );
         // Not while the user is looking.
         let mut a = Activity::new();
         assert!(!a.output(at(t, 0), 1, Vec::new(), true));

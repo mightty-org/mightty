@@ -3,13 +3,13 @@
 //! The socket lives in a per-user directory with mode 0700, so only the
 //! user who started mightty can connect.
 
+use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, DirBuilder};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -24,7 +24,13 @@ unsafe extern "C" {
     #[cfg(target_os = "macos")]
     fn getpeereid(fd: i32, uid: *mut u32, gid: *mut u32) -> i32;
     #[cfg(target_os = "linux")]
-    fn getsockopt(fd: i32, level: i32, name: i32, value: *mut std::ffi::c_void, len: *mut u32) -> i32;
+    fn getsockopt(
+        fd: i32,
+        level: i32,
+        name: i32,
+        value: *mut std::ffi::c_void,
+        len: *mut u32,
+    ) -> i32;
 }
 
 /// The user on the other end of `stream`.
@@ -45,13 +51,23 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     let mut cred = [0u32; 3];
     let mut len = size_of_val(&cred) as u32;
     // SAFETY: a valid socket; `cred` is writable for `len` bytes.
-    let ok = unsafe { getsockopt(stream.as_raw_fd(), SOL_SOCKET, SO_PEERCRED, cred.as_mut_ptr().cast(), &mut len) } == 0;
+    let ok = unsafe {
+        getsockopt(
+            stream.as_raw_fd(),
+            SOL_SOCKET,
+            SO_PEERCRED,
+            cred.as_mut_ptr().cast(),
+            &mut len,
+        )
+    } == 0;
     ok.then_some(cred[1])
 }
 
 /// Per-user directory for sockets and shell-integration files.
 pub fn runtime_dir() -> PathBuf {
-    let base = env::var_os("XDG_RUNTIME_DIR").or_else(|| env::var_os("TMPDIR")).unwrap_or_else(|| "/tmp".into());
+    let base = env::var_os("XDG_RUNTIME_DIR")
+        .or_else(|| env::var_os("TMPDIR"))
+        .unwrap_or_else(|| "/tmp".into());
     // SAFETY: getuid cannot fail.
     PathBuf::from(base).join(format!("mightty-{}", unsafe { getuid() }))
 }
@@ -73,7 +89,10 @@ fn ensure_private(dir: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(dir)?;
     // SAFETY: getuid cannot fail.
     if !meta.is_dir() || meta.uid() != unsafe { getuid() } {
-        let message = format!("{} is not a directory owned by you; refusing to use it", dir.display());
+        let message = format!(
+            "{} is not a directory owned by you; refusing to use it",
+            dir.display()
+        );
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
     if meta.mode() & 0o077 != 0 {
@@ -89,29 +108,34 @@ pub fn listen(mux: Arc<Mux>) -> io::Result<PathBuf> {
     let _ = fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     let _ = mux.socket.set(path.clone());
-    thread::Builder::new().name("control-socket".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
-            // The directory keeps others out already; this holds even if
-            // its permissions are loosened.
-            // SAFETY: getuid cannot fail.
-            if peer_uid(&stream) != Some(unsafe { getuid() }) {
-                continue;
+    thread::Builder::new()
+        .name("control-socket".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                // The directory keeps others out already; this holds even if
+                // its permissions are loosened.
+                // SAFETY: getuid cannot fail.
+                if peer_uid(&stream) != Some(unsafe { getuid() }) {
+                    continue;
+                }
+                // Past the limit, connections are closed at once.
+                if CLIENTS.fetch_add(1, Ordering::Relaxed) >= MAX_CLIENTS {
+                    CLIENTS.fetch_sub(1, Ordering::Relaxed);
+                    continue;
+                }
+                let mux = mux.clone();
+                let spawned =
+                    thread::Builder::new()
+                        .name("control-client".into())
+                        .spawn(move || {
+                            serve(&mux, stream);
+                            CLIENTS.fetch_sub(1, Ordering::Relaxed);
+                        });
+                if spawned.is_err() {
+                    CLIENTS.fetch_sub(1, Ordering::Relaxed);
+                }
             }
-            // Past the limit, connections are closed at once.
-            if CLIENTS.fetch_add(1, Ordering::Relaxed) >= MAX_CLIENTS {
-                CLIENTS.fetch_sub(1, Ordering::Relaxed);
-                continue;
-            }
-            let mux = mux.clone();
-            let spawned = thread::Builder::new().name("control-client".into()).spawn(move || {
-                serve(&mux, stream);
-                CLIENTS.fetch_sub(1, Ordering::Relaxed);
-            });
-            if spawned.is_err() {
-                CLIENTS.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    })?;
+        })?;
     Ok(path)
 }
 
@@ -129,18 +153,22 @@ const OUTBOX: usize = 1024;
 /// Replies and events go out through one writer thread, so a slow client
 /// holds up neither its own requests nor the panes emitting events.
 fn serve(mux: &Arc<Mux>, stream: UnixStream) {
-    let Ok(read_half) = stream.try_clone() else { return };
+    let Ok(read_half) = stream.try_clone() else {
+        return;
+    };
     let connection = CONNECTIONS.fetch_add(1, Ordering::Relaxed);
     let (to, outbox) = mpsc::sync_channel::<Value>(OUTBOX);
     let mut writer = stream;
-    let sent = thread::Builder::new().name("control-writer".into()).spawn(move || {
-        for message in outbox {
-            if writeln!(writer, "{message}").is_err() {
-                let _ = writer.shutdown(std::net::Shutdown::Both);
-                return;
+    let sent = thread::Builder::new()
+        .name("control-writer".into())
+        .spawn(move || {
+            for message in outbox {
+                if writeln!(writer, "{message}").is_err() {
+                    let _ = writer.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
             }
-        }
-    });
+        });
     if sent.is_err() {
         return;
     }
@@ -148,7 +176,11 @@ fn serve(mux: &Arc<Mux>, stream: UnixStream) {
     let mut buf = Vec::new();
     loop {
         buf.clear();
-        match reader.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf) {
+        match reader
+            .by_ref()
+            .take(MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut buf)
+        {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
@@ -177,11 +209,21 @@ fn serve(mux: &Arc<Mux>, stream: UnixStream) {
 fn respond(mux: &Arc<Mux>, line: &str, connection: u64, to: &SyncSender<Value>) -> Option<Value> {
     let request = match json::parse(line) {
         Ok(request) => request,
-        Err(e) => return Some(error_reply(Value::Null, -32700, &format!("parse error: {e}"))),
+        Err(e) => {
+            return Some(error_reply(
+                Value::Null,
+                -32700,
+                &format!("parse error: {e}"),
+            ));
+        }
     };
     let id = request.get("id").cloned();
     let Some(method) = request["method"].as_str() else {
-        return Some(error_reply(id.unwrap_or_default(), -32600, "invalid request"));
+        return Some(error_reply(
+            id.unwrap_or_default(),
+            -32600,
+            "invalid request",
+        ));
     };
     let params = &request["params"];
     let result = match method {
@@ -200,16 +242,37 @@ fn respond(mux: &Arc<Mux>, line: &str, connection: u64, to: &SyncSender<Value>) 
 }
 
 /// `events`: names, `prefix.*` or `*`; all of them when missing.
-fn subscribe(mux: &Mux, connection: u64, to: &SyncSender<Value>, params: &Value) -> Result<Value, RpcError> {
+fn subscribe(
+    mux: &Mux,
+    connection: u64,
+    to: &SyncSender<Value>,
+    params: &Value,
+) -> Result<Value, RpcError> {
     let patterns = match params.get("events") {
         None | Some(Value::Null) => vec!["*".to_owned()],
         Some(events) => events
             .as_array()
-            .and_then(|events| events.iter().map(|e| e.as_str().map(str::to_owned)).collect())
-            .ok_or_else(|| RpcError { code: -32602, message: "`events` must be an array of event names".into() })?,
+            .and_then(|events| {
+                events
+                    .iter()
+                    .map(|e| e.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "`events` must be an array of event names".into(),
+            })?,
     };
-    mux.events().subscribe(connection, patterns, to.clone()).map_err(|message| RpcError { code: -32602, message })?;
-    Ok(Value::object([("events", Value::Array(EVENTS.iter().map(|&e| e.into()).collect()))]))
+    mux.events()
+        .subscribe(connection, patterns, to.clone())
+        .map_err(|message| RpcError {
+            code: -32602,
+            message,
+        })?;
+    Ok(Value::object([(
+        "events",
+        Value::Array(EVENTS.iter().map(|&e| e.into()).collect()),
+    )]))
 }
 
 fn error_reply(id: Value, code: i64, message: &str) -> Value {
@@ -255,7 +318,12 @@ impl Client {
     }
 
     fn from_stream(writer: UnixStream) -> io::Result<Self> {
-        Ok(Self { reader: BufReader::new(writer.try_clone()?), writer, next_id: 1, events: VecDeque::new() })
+        Ok(Self {
+            reader: BufReader::new(writer.try_clone()?),
+            writer,
+            next_id: 1,
+            events: VecDeque::new(),
+        })
     }
 
     /// `$MIGHTTY_SOCKET` if set (inside a mightty pane), otherwise the most
@@ -280,7 +348,10 @@ impl Client {
                 Err(_) => {}
             }
         }
-        Err(io::Error::new(io::ErrorKind::NotFound, "no running mightty found"))
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no running mightty found",
+        ))
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
@@ -302,7 +373,12 @@ impl Client {
             self.events.push_back(message);
         };
         match reply.get("error") {
-            Some(error) => Err(CallError::Rpc(error["message"].as_str().unwrap_or("unknown error").to_owned())),
+            Some(error) => Err(CallError::Rpc(
+                error["message"]
+                    .as_str()
+                    .unwrap_or("unknown error")
+                    .to_owned(),
+            )),
             None => Ok(reply["result"].clone()),
         }
     }
@@ -313,13 +389,23 @@ impl Client {
             Some(event) => event,
             None => self.read()?,
         };
-        Ok((event["method"].as_str().unwrap_or_default().to_owned(), event["params"].clone()))
+        Ok((
+            event["method"].as_str().unwrap_or_default().to_owned(),
+            event["params"].clone(),
+        ))
     }
 
     fn read(&mut self) -> Result<Value, CallError> {
         let mut line = String::new();
-        if self.reader.read_line(&mut line).map_err(|e| CallError::Disconnected(e.to_string()))? == 0 {
-            return Err(CallError::Disconnected("mightty closed the connection".into()));
+        if self
+            .reader
+            .read_line(&mut line)
+            .map_err(|e| CallError::Disconnected(e.to_string()))?
+            == 0
+        {
+            return Err(CallError::Disconnected(
+                "mightty closed the connection".into(),
+            ));
         }
         json::parse(&line).map_err(|e| CallError::Rpc(format!("invalid message: {e}")))
     }
@@ -335,18 +421,26 @@ mod tests {
     fn events_reach_subscribers() {
         let mux = Mux::new(Arc::new(Headless));
         let (ours, theirs) = UnixStream::pair().unwrap();
-        ours.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         let served = mux.clone();
         thread::spawn(move || serve(&served, theirs));
         let mut client = Client::from_stream(ours).unwrap();
 
         let unknown = Value::object([("events", vec!["pane.nope".into()].into())]);
-        assert!(matches!(client.call("events.subscribe", unknown), Err(CallError::Rpc(m)) if m.contains("pane.nope")));
+        assert!(
+            matches!(client.call("events.subscribe", unknown), Err(CallError::Rpc(m)) if m.contains("pane.nope"))
+        );
         let events = Value::object([("events", vec!["pane.*".into()].into())]);
         client.call("events.subscribe", events).unwrap();
 
         let command = r"printf '\033]2;hello\007'; exit 3";
-        let pane = mux.spawn(SpawnOptions { command: Some(command.into()), ..Default::default() }).unwrap();
+        let pane = mux
+            .spawn(SpawnOptions {
+                command: Some(command.into()),
+                ..Default::default()
+            })
+            .unwrap();
         let mut seen = Vec::new();
         loop {
             let (event, params) = client.next_event().unwrap();
@@ -365,7 +459,14 @@ mod tests {
         seen.retain(|e| e != "pane.status" && e != "pane.cwd");
         assert_eq!(seen, ["pane.opened", "pane.title", "pane.exited"]);
         // Replies still come while events do.
-        assert_eq!(client.call("pane.list", Value::Null).unwrap().as_array().map(<[_]>::len), Some(1));
+        assert_eq!(
+            client
+                .call("pane.list", Value::Null)
+                .unwrap()
+                .as_array()
+                .map(<[_]>::len),
+            Some(1)
+        );
 
         // Closing the connection unsubscribes it.
         assert!(mux.events().active());
@@ -395,7 +496,10 @@ mod tests {
 
         let link = base.join("link");
         std::os::unix::fs::symlink(&fresh, &link).unwrap();
-        assert_eq!(ensure_private(&link).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            ensure_private(&link).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         let file = base.join("file");
         fs::write(&file, "").unwrap();
         assert!(ensure_private(&file).is_err());
@@ -414,7 +518,8 @@ mod tests {
     fn long_requests_close_the_connection() {
         let mux = Mux::new(Arc::new(Headless));
         let (ours, theirs) = UnixStream::pair().unwrap();
-        ours.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         thread::spawn(move || serve(&mux, theirs));
         let mut writer = ours.try_clone().unwrap();
         // Unread past the limit, as a request would be that never ends.

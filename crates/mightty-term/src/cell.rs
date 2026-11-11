@@ -118,7 +118,10 @@ impl Style {
 
     /// Blank cells erased under this style keep only its background (BCE).
     pub fn erased(self) -> Self {
-        Self { bg: self.bg, ..Self::default() }
+        Self {
+            bg: self.bg,
+            ..Self::default()
+        }
     }
 
     /// Whether [`key`](Self::key) tells this style from every other.
@@ -138,7 +141,10 @@ impl Style {
             }
         }
         let underline = ((self.flags.0 & UNDERLINE_BITS) >> UNDERLINE_SHIFT) as u64;
-        let key = color(self.fg) | color(self.bg) << 26 | (self.flags.bits() as u64 & 0xff) << 52 | underline << 60;
+        let key = color(self.fg)
+            | color(self.bg) << 26
+            | (self.flags.bits() as u64 & 0xff) << 52
+            | underline << 60;
         if self.key_is_exact() {
             return key;
         }
@@ -159,7 +165,8 @@ impl StyleId {
 /// Layout flags packed into a cell's top bits, above the style id.
 const LAYOUT_SHIFT: u32 = 28;
 const STYLE_MASK: u32 = (1 << LAYOUT_SHIFT) - 1;
-const LAYOUT_FLAGS: u16 = Flags::WIDE.0 | Flags::WIDE_SPACER.0 | Flags::WRAP_SPACER.0 | Flags::GRAPHEME.0;
+const LAYOUT_FLAGS: u16 =
+    Flags::WIDE.0 | Flags::WIDE_SPACER.0 | Flags::WRAP_SPACER.0 | Flags::GRAPHEME.0;
 
 /// One screen cell: 8 bytes, a character and a packed `(layout flags, style id)`.
 /// Colours and attributes are looked up with [`Term::style`](crate::Term::style),
@@ -178,7 +185,10 @@ impl Cell {
     #[inline]
     pub const fn new(c: char, style: StyleId, flags: Flags) -> Self {
         let layout = ((flags.0 & LAYOUT_FLAGS) >> 8) as u32;
-        Cell { c, packed: layout << LAYOUT_SHIFT | style.0 }
+        Cell {
+            c,
+            packed: layout << LAYOUT_SHIFT | style.0,
+        }
     }
 
     #[inline]
@@ -205,7 +215,13 @@ impl Default for Cell {
 
 impl std::fmt::Debug for Cell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cell({:?}, {:?}, {:?})", self.c, self.style(), self.flags())
+        write!(
+            f,
+            "Cell({:?}, {:?}, {:?})",
+            self.c,
+            self.style(),
+            self.flags()
+        )
     }
 }
 
@@ -247,7 +263,10 @@ pub struct Row {
 
 impl Row {
     pub fn new(cols: usize, blank: Cell) -> Self {
-        Self { cells: vec![blank; cols], wrapped: false }
+        Self {
+            cells: vec![blank; cols],
+            wrapped: false,
+        }
     }
 
     /// The cell at `col`, blank past the row's end.

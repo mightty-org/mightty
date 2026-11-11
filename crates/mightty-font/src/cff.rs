@@ -39,7 +39,12 @@ impl Index {
         }
         let offsets = at + 3;
         let data = offsets + (count + 1) * offset_size - 1;
-        let index = Index { count, offsets, offset_size, data };
+        let index = Index {
+            count,
+            offsets,
+            offset_size,
+            data,
+        };
         let end = data + index.offset(b, count)?;
         b.slice(at, end - at)?;
         Some((index, end))
@@ -171,13 +176,19 @@ impl Cff {
         if lookup(&top, 1206).is_some_and(|t| t != [2.0]) {
             return Err(Error::Unsupported("CFF charstrings other than Type 2"));
         }
-        let char_strings = lookup(&top, 17).and_then(|v| offset(*v.first()?)).ok_or_else(damaged)?;
+        let char_strings = lookup(&top, 17)
+            .and_then(|v| offset(*v.first()?))
+            .ok_or_else(damaged)?;
         let (char_strings, _) = Index::parse(b, char_strings).ok_or_else(damaged)?;
         let (mut local_subrs, mut cid) = (None, None);
         if lookup(&top, 1230).is_some() {
             // CID-keyed: an array of font DICTs, each with a private DICT.
-            let array = lookup(&top, 1236).and_then(|v| offset(*v.first()?)).ok_or_else(damaged)?;
-            let select = lookup(&top, 1237).and_then(|v| offset(*v.first()?)).ok_or_else(damaged)?;
+            let array = lookup(&top, 1236)
+                .and_then(|v| offset(*v.first()?))
+                .ok_or_else(damaged)?;
+            let select = lookup(&top, 1237)
+                .and_then(|v| offset(*v.first()?))
+                .ok_or_else(damaged)?;
             let (array, _) = Index::parse(b, array).ok_or_else(damaged)?;
             let subrs = (0..array.count)
                 .map(|i| {
@@ -189,7 +200,14 @@ impl Cff {
         } else if let Some(private) = lookup(&top, 18) {
             local_subrs = private_subrs(b, private);
         }
-        Ok(Cff { table, length, char_strings, global_subrs, local_subrs, cid })
+        Ok(Cff {
+            table,
+            length,
+            char_strings,
+            global_subrs,
+            local_subrs,
+            cid,
+        })
     }
 
     pub(crate) fn glyph_count(&self) -> usize {
@@ -205,20 +223,32 @@ impl Cff {
                 (0..ranges).find_map(|i| {
                     let range = select + 3 + 3 * i;
                     let (first, next) = (b.u16(range)?, b.u16(range + 3)?);
-                    (first..next).contains(&glyph).then(|| b.u8(range + 2).map(usize::from))?
+                    (first..next)
+                        .contains(&glyph)
+                        .then(|| b.u8(range + 2).map(usize::from))?
                 })
             }
             _ => None,
         }
     }
 
-    pub(crate) fn outline(&self, file: Bytes<'_>, glyph: u16, out: &mut Vec<Segment>) -> Result<(), Error> {
+    pub(crate) fn outline(
+        &self,
+        file: Bytes<'_>,
+        glyph: u16,
+        out: &mut Vec<Segment>,
+    ) -> Result<(), Error> {
         let damaged = || Error::Damaged("CFF charstring");
         let b = file.slice(self.table, self.length).ok_or_else(damaged)?;
-        let program = self.char_strings.get(b, glyph as usize).ok_or(Error::Damaged("glyph index past the end"))?;
+        let program = self
+            .char_strings
+            .get(b, glyph as usize)
+            .ok_or(Error::Damaged("glyph index past the end"))?;
         let local = match &self.cid {
             Some((select, subrs)) => {
-                let fd = self.font_dict(b, *select, glyph).ok_or(Error::Damaged("CFF FDSelect"))?;
+                let fd = self
+                    .font_dict(b, *select, glyph)
+                    .ok_or(Error::Damaged("CFF FDSelect"))?;
                 *subrs.get(fd).ok_or(Error::Damaged("CFF FDSelect"))?
             }
             None => self.local_subrs,
@@ -280,20 +310,35 @@ impl<'a> Run<'a, '_> {
 
     fn move_to(&mut self, dx: f32, dy: f32) {
         self.close();
-        self.pen = Point { x: self.pen.x + dx, y: self.pen.y + dy };
+        self.pen = Point {
+            x: self.pen.x + dx,
+            y: self.pen.y + dy,
+        };
         self.out.push(Segment::MoveTo(self.pen));
         self.open = true;
     }
 
     fn line_to(&mut self, dx: f32, dy: f32) {
-        self.pen = Point { x: self.pen.x + dx, y: self.pen.y + dy };
+        self.pen = Point {
+            x: self.pen.x + dx,
+            y: self.pen.y + dy,
+        };
         self.out.push(Segment::LineTo(self.pen));
     }
 
     fn curve_to(&mut self, d: [f32; 6]) {
-        let c1 = Point { x: self.pen.x + d[0], y: self.pen.y + d[1] };
-        let c2 = Point { x: c1.x + d[2], y: c1.y + d[3] };
-        self.pen = Point { x: c2.x + d[4], y: c2.y + d[5] };
+        let c1 = Point {
+            x: self.pen.x + d[0],
+            y: self.pen.y + d[1],
+        };
+        let c2 = Point {
+            x: c1.x + d[2],
+            y: c1.y + d[3],
+        };
+        self.pen = Point {
+            x: c2.x + d[4],
+            y: c2.y + d[5],
+        };
         self.out.push(Segment::CubicTo(c1, c2, self.pen));
     }
 
@@ -357,7 +402,9 @@ impl<'a> Run<'a, '_> {
                 21 => {
                     self.stack = s;
                     self.width(true);
-                    let &[dx, dy] = &self.stack[..] else { return None };
+                    let &[dx, dy] = &self.stack[..] else {
+                        return None;
+                    };
                     self.stack.clear();
                     self.move_to(dx, dy);
                 }
@@ -366,7 +413,11 @@ impl<'a> Run<'a, '_> {
                     self.width(false);
                     let &[d] = &self.stack[..] else { return None };
                     self.stack.clear();
-                    if b0 == 22 { self.move_to(d, 0.0) } else { self.move_to(0.0, d) }
+                    if b0 == 22 {
+                        self.move_to(d, 0.0)
+                    } else {
+                        self.move_to(0.0, d)
+                    }
                 }
                 5 => {
                     self.need_open()?;
@@ -382,7 +433,11 @@ impl<'a> Run<'a, '_> {
                     self.need_open()?;
                     let mut horizontal = b0 == 6;
                     for &d in &s {
-                        if horizontal { self.line_to(d, 0.0) } else { self.line_to(0.0, d) }
+                        if horizontal {
+                            self.line_to(d, 0.0)
+                        } else {
+                            self.line_to(0.0, d)
+                        }
                         horizontal = !horizontal;
                     }
                 }
@@ -422,7 +477,11 @@ impl<'a> Run<'a, '_> {
                 // the first perhaps leaning by a leading argument.
                 26 | 27 => {
                     self.need_open()?;
-                    let (mut lean, rest) = if n % 4 == 1 { (s[0], &s[1..]) } else { (0.0, &s[..]) };
+                    let (mut lean, rest) = if n % 4 == 1 {
+                        (s[0], &s[1..])
+                    } else {
+                        (0.0, &s[..])
+                    };
                     if rest.is_empty() || !rest.len().is_multiple_of(4) {
                         return None;
                     }
@@ -526,9 +585,28 @@ impl<'a> Run<'a, '_> {
             // the other returns to the start.
             (37, 11) => {
                 self.curve_to([s[0], s[1], s[2], s[3], s[4], s[5]]);
-                let (c1, c2) = (Point { x: self.pen.x + s[6], y: self.pen.y + s[7] }, Point { x: self.pen.x + s[6] + s[8], y: self.pen.y + s[7] + s[9] });
+                let (c1, c2) = (
+                    Point {
+                        x: self.pen.x + s[6],
+                        y: self.pen.y + s[7],
+                    },
+                    Point {
+                        x: self.pen.x + s[6] + s[8],
+                        y: self.pen.y + s[7] + s[9],
+                    },
+                );
                 let (dx, dy) = (c2.x - start.x, c2.y - start.y);
-                let end = if dx.abs() > dy.abs() { Point { x: c2.x + s[10], y: start.y } } else { Point { x: start.x, y: c2.y + s[10] } };
+                let end = if dx.abs() > dy.abs() {
+                    Point {
+                        x: c2.x + s[10],
+                        y: start.y,
+                    }
+                } else {
+                    Point {
+                        x: start.x,
+                        y: c2.y + s[10],
+                    }
+                };
                 self.pen = end;
                 self.out.push(Segment::CubicTo(c1, c2, end));
             }

@@ -19,7 +19,12 @@ struct Winsize {
 
 impl From<WindowSize> for Winsize {
     fn from(s: WindowSize) -> Self {
-        Self { ws_row: s.rows, ws_col: s.cols, ws_xpixel: s.pixel_width, ws_ypixel: s.pixel_height }
+        Self {
+            ws_row: s.rows,
+            ws_col: s.cols,
+            ws_xpixel: s.pixel_width,
+            ws_ypixel: s.pixel_height,
+        }
     }
 }
 
@@ -66,7 +71,14 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 unsafe extern "C" {
     // libproc, in libSystem.
     fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -> c_int;
-    fn sysctl(name: *mut c_int, len: u32, old: *mut c_void, old_len: *mut usize, new: *mut c_void, new_len: usize) -> c_int;
+    fn sysctl(
+        name: *mut c_int,
+        len: u32,
+        old: *mut c_void,
+        old_len: *mut usize,
+        new: *mut c_void,
+        new_len: usize,
+    ) -> c_int;
 }
 
 /// `tcflag_t`.
@@ -123,7 +135,8 @@ impl Pty {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: openpty succeeded, so both descriptors are open and owned by us.
-        let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         set_cloexec(&master)?;
         set_cloexec(&slave)?;
 
@@ -157,7 +170,10 @@ impl Pty {
         let child = cmd.spawn()?;
         // Close our copies of the slave so reads on the master end when the child exits.
         drop(cmd);
-        Ok(Self { master: File::from(master), child })
+        Ok(Self {
+            master: File::from(master),
+            child,
+        })
     }
 
     pub fn resize(&self, size: WindowSize) -> io::Result<()> {
@@ -227,7 +243,10 @@ impl Pty {
         if group <= 0 {
             return None;
         }
-        Some(Foreground { name: process_name(group)?, args: process_args(group).unwrap_or_default() })
+        Some(Foreground {
+            name: process_name(group)?,
+            args: process_args(group).unwrap_or_default(),
+        })
     }
 }
 
@@ -250,19 +269,44 @@ fn process_args(pid: c_int) -> Option<Vec<String>> {
     let mut buf = vec![0u8; 16 * 1024];
     let mut len = buf.len();
     // SAFETY: `buf` is writable for `len` bytes.
-    if unsafe { sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut len, ptr::null_mut(), 0) } != 0 {
+    if unsafe {
+        sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
         return None;
     }
     // argc, the executable's path, padding, then the arguments, each NUL-terminated.
     let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
-    let mut fields = buf[4..len.min(buf.len())].split(|&b| b == 0).filter(|f| !f.is_empty()).skip(1);
-    Some(fields.by_ref().take(argc.min(ARGS)).map(|f| String::from_utf8_lossy(f).into_owned()).collect())
+    let mut fields = buf[4..len.min(buf.len())]
+        .split(|&b| b == 0)
+        .filter(|f| !f.is_empty())
+        .skip(1);
+    Some(
+        fields
+            .by_ref()
+            .take(argc.min(ARGS))
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "linux")]
 fn process_args(pid: c_int) -> Option<Vec<String>> {
     let line = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    Some(line.split(|&b| b == 0).filter(|f| !f.is_empty()).take(ARGS).map(|f| String::from_utf8_lossy(f).into_owned()).collect())
+    Some(
+        line.split(|&b| b == 0)
+            .filter(|f| !f.is_empty())
+            .take(ARGS)
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -296,7 +340,15 @@ mod tests {
     fn foreground_process_is_named() {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "exec sleep 5"]);
-        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        let mut pty = Pty::spawn(
+            cmd,
+            WindowSize {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut found = None;
         for _ in 0..100 {
             found = pty.foreground();
@@ -306,7 +358,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let found = found.unwrap();
-        assert_eq!((found.name.as_str(), found.args.as_slice()), ("sleep", &["sleep".to_owned(), "5".to_owned()][..]));
+        assert_eq!(
+            (found.name.as_str(), found.args.as_slice()),
+            ("sleep", &["sleep".to_owned(), "5".to_owned()][..])
+        );
         pty.kill().unwrap();
     }
 
@@ -314,7 +369,15 @@ mod tests {
     fn password_prompts_hide_input() {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "sleep 0.3; stty -echo; exec sleep 5"]);
-        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        let mut pty = Pty::spawn(
+            cmd,
+            WindowSize {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(!pty.hides_input());
         let hidden = (0..200).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -328,7 +391,15 @@ mod tests {
     fn child_sees_a_tty_with_our_size() {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "stty size; tty -s && echo tty"]);
-        let mut pty = Pty::spawn(cmd, WindowSize { cols: 77, rows: 13, ..Default::default() }).unwrap();
+        let mut pty = Pty::spawn(
+            cmd,
+            WindowSize {
+                cols: 77,
+                rows: 13,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut out = Vec::new();
         let mut reader = pty.reader().unwrap();
         let mut buf = [0; 1024];
@@ -350,7 +421,15 @@ mod tests {
         cmd.args(["-c", "trap - USR2; kill -USR2 $$; sleep 5"]);
         // SAFETY: ignored as the app does; restored below.
         let before = unsafe { signal(31, 1) };
-        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        let mut pty = Pty::spawn(
+            cmd,
+            WindowSize {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         // SAFETY: as above.
         unsafe { signal(31, before) };
         // Killed by its own SIGUSR2, not still sleeping.
@@ -359,7 +438,15 @@ mod tests {
 
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "sleep 5"]);
-        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        let mut pty = Pty::spawn(
+            cmd,
+            WindowSize {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let start = std::time::Instant::now();
         pty.hangup().unwrap();
         assert!(pty.wait().unwrap().code().is_none());

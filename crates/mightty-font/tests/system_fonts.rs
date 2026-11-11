@@ -8,36 +8,72 @@ fn load(path: &str) -> Option<FontData> {
 
 #[test]
 fn menlo_collection() {
-    let Some(data) = load("/System/Library/Fonts/Menlo.ttc") else { return };
+    let Some(data) = load("/System/Library/Fonts/Menlo.ttc") else {
+        return;
+    };
     let count = Face::count(&data);
     assert!(count >= 4, "{count}");
-    let names: Vec<String> = (0..count).map(|i| Face::parse(data.clone(), i).unwrap().postscript_name().unwrap()).collect();
-    for name in ["Menlo-Regular", "Menlo-Bold", "Menlo-Italic", "Menlo-BoldItalic"] {
+    let names: Vec<String> = (0..count)
+        .map(|i| {
+            Face::parse(data.clone(), i)
+                .unwrap()
+                .postscript_name()
+                .unwrap()
+        })
+        .collect();
+    for name in [
+        "Menlo-Regular",
+        "Menlo-Bold",
+        "Menlo-Italic",
+        "Menlo-BoldItalic",
+    ] {
         assert!(names.iter().any(|n| n == name), "{names:?}");
     }
-    let face = Face::parse(data.clone(), names.iter().position(|n| n == "Menlo-Regular").unwrap() as u32).unwrap();
+    let face = Face::parse(
+        data.clone(),
+        names.iter().position(|n| n == "Menlo-Regular").unwrap() as u32,
+    )
+    .unwrap();
     let m = face.metrics();
-    assert!(m.units_per_em >= 1000 && m.ascender > 0 && m.descender < 0, "{m:?}");
+    assert!(
+        m.units_per_em >= 1000 && m.ascender > 0 && m.descender < 0,
+        "{m:?}"
+    );
     // Monospaced: every character advances alike.
     let advance = |c| face.advance(face.glyph(c).unwrap());
     assert!(advance('M') > 0.0);
-    assert!(['i', 'W', '0', '{', 'é', '─'].iter().all(|&c| advance(c) == advance('M')));
+    assert!(
+        ['i', 'W', '0', '{', 'é', '─']
+            .iter()
+            .all(|&c| advance(c) == advance('M'))
+    );
     // Not in Menlo: left to fallback fonts.
     assert_eq!(face.glyph('一'), None);
     assert_eq!(face.glyph('😀'), None);
     // Curves, closed contours; the space has none.
     let o = face.outline(face.glyph('o').unwrap()).unwrap();
     assert!(o.iter().any(|s| matches!(s, Segment::QuadTo(..))));
-    assert_eq!(o.iter().filter(|s| matches!(s, Segment::MoveTo(_))).count(), 2);
+    assert_eq!(
+        o.iter().filter(|s| matches!(s, Segment::MoveTo(_))).count(),
+        2
+    );
     assert!(face.outline(face.glyph(' ').unwrap()).unwrap().is_empty());
     // 'é' is a composite (e + accent) in many fonts: either way it has more contours than 'e'.
-    let contours = |c| face.outline(face.glyph(c).unwrap()).unwrap().iter().filter(|s| matches!(s, Segment::MoveTo(_))).count();
+    let contours = |c| {
+        face.outline(face.glyph(c).unwrap())
+            .unwrap()
+            .iter()
+            .filter(|s| matches!(s, Segment::MoveTo(_)))
+            .count()
+    };
     assert!(contours('é') > contours('e'));
 }
 
 #[test]
 fn rasterized_h_has_two_stems_and_a_bar() {
-    let Some(data) = load("/System/Library/Fonts/Monaco.ttf") else { return };
+    let Some(data) = load("/System/Library/Fonts/Monaco.ttf") else {
+        return;
+    };
     let face = Face::parse(data, 0).unwrap();
     let m = face.metrics();
     let size = 40.0;
@@ -45,7 +81,14 @@ fn rasterized_h_has_two_stems_and_a_bar() {
     let width = (face.advance(face.glyph('H').unwrap()) * scale).ceil() as usize;
     let baseline = (m.ascender as f32 * scale).round();
     let height = (baseline - m.descender as f32 * scale).ceil() as usize;
-    let pixels = rasterize(&face.outline(face.glyph('H').unwrap()).unwrap(), scale, 0.0, baseline, width, height);
+    let pixels = rasterize(
+        &face.outline(face.glyph('H').unwrap()).unwrap(),
+        scale,
+        0.0,
+        baseline,
+        width,
+        height,
+    );
     let at = |x: usize, y: usize| pixels[y * width + x];
     // A row through the upper half: dark, light, dark.
     let row: Vec<u8> = (0..width).map(|x| at(x, height / 4)).collect();
@@ -53,7 +96,8 @@ fn rasterized_h_has_two_stems_and_a_bar() {
     let runs = dark.windows(2).filter(|w| w[0] != w[1]).count();
     assert_eq!(runs, 4, "{row:?}");
     // The bar: a dark row near the middle, all the way across the stems.
-    let middle = (height / 4..height * 3 / 4).any(|y| (width / 4..width * 3 / 4).all(|x| at(x, y) > 200));
+    let middle =
+        (height / 4..height * 3 / 4).any(|y| (width / 4..width * 3 / 4).all(|x| at(x, y) > 200));
     assert!(middle);
     // Nothing above the cap height (lower than the ascender) or below the baseline.
     let below = baseline as usize + 1;
@@ -67,7 +111,10 @@ fn cff_fonts() {
         let face = Face::parse(data, 0).unwrap();
         let o = face.outline(face.glyph('o').unwrap()).unwrap();
         assert!(o.iter().any(|s| matches!(s, Segment::CubicTo(..))));
-        assert_eq!(o.iter().filter(|s| matches!(s, Segment::MoveTo(_))).count(), 2);
+        assert_eq!(
+            o.iter().filter(|s| matches!(s, Segment::MoveTo(_))).count(),
+            2
+        );
         assert!(face.advance(face.glyph('W').unwrap()) > face.advance(face.glyph('i').unwrap()));
         assert!(face.outline(face.glyph(' ').unwrap()).unwrap().is_empty());
     }
@@ -75,7 +122,10 @@ fn cff_fonts() {
     if let Some(data) = load("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc") {
         let face = Face::parse(data, 0).unwrap();
         for c in ['A', 'あ', '字', '漢'] {
-            assert!(face.outline(face.glyph(c).unwrap()).unwrap().len() > 8, "{c}");
+            assert!(
+                face.outline(face.glyph(c).unwrap()).unwrap().len() > 8,
+                "{c}"
+            );
         }
     }
 }
@@ -89,14 +139,24 @@ fn variable_fonts() {
         let wght = *face.axes().iter().find(|a| &a.tag == b"wght").unwrap();
         let (e, m) = (face.glyph('e').unwrap(), face.glyph('M').unwrap());
         let light = face.outline(e).unwrap();
-        let ink = |o: &[Segment]| rasterize(o, 0.02, 0.0, 40.0, 40, 50).iter().map(|&v| v as u32).sum::<u32>();
+        let ink = |o: &[Segment]| {
+            rasterize(o, 0.02, 0.0, 40.0, 40, 50)
+                .iter()
+                .map(|&v| v as u32)
+                .sum::<u32>()
+        };
         face.set_variations(&[(*b"wght", wght.default)]);
         assert_eq!(face.outline(e).unwrap(), light);
         face.set_variations(&[(*b"wght", wght.max)]);
         let heavy = face.outline(e).unwrap();
         // Points move; none are added.
         assert_eq!(heavy.len(), light.len());
-        assert!(ink(&heavy) > ink(&light) * 3 / 2, "{} {}", ink(&heavy), ink(&light));
+        assert!(
+            ink(&heavy) > ink(&light) * 3 / 2,
+            "{} {}",
+            ink(&heavy),
+            ink(&light)
+        );
         // Monospaced at every weight (HVAR).
         assert_eq!(face.advance(e), face.advance(m));
         // Past the end of the axis is the end.
@@ -126,7 +186,9 @@ fn variable_fonts() {
 /// parsers). Each copy must be an error or a glyph, never a panic or a hang.
 fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)], rounds: usize) {
     let exercise = |bytes: Vec<u8>| {
-        let Ok(mut face) = Face::parse(FontData::from(bytes), 0) else { return };
+        let Ok(mut face) = Face::parse(FontData::from(bytes), 0) else {
+            return;
+        };
         face.set_variations(variations);
         let _ = face.postscript_name();
         let _ = face.metrics();
@@ -148,11 +210,19 @@ fn fuzz(data: &[u8], tables: &[&[u8; 4]], variations: &[([u8; 4], f32)], rounds:
         exercise(data[..len].to_vec());
     }
     // Where to overwrite: the named tables, from the table directory.
-    let be = |at: usize, n: usize| data[at..at + n].iter().fold(0usize, |v, &b| (v << 8) | b as usize);
+    let be = |at: usize, n: usize| {
+        data[at..at + n]
+            .iter()
+            .fold(0usize, |v, &b| (v << 8) | b as usize)
+    };
     let ranges: Vec<(usize, usize)> = if tables.is_empty() {
         vec![(0, data.len())]
     } else {
-        (0..be(4, 2)).map(|i| 12 + 16 * i).filter(|&r| tables.iter().any(|t| &data[r..r + 4] == *t)).map(|r| (be(r + 8, 4), be(r + 12, 4))).collect()
+        (0..be(4, 2))
+            .map(|i| 12 + 16 * i)
+            .filter(|&r| tables.iter().any(|t| &data[r..r + 4] == *t))
+            .map(|r| (be(r + 8, 4), be(r + 12, 4)))
+            .collect()
     };
     assert!(!ranges.is_empty());
     // A small deterministic generator, so failures repeat.
@@ -182,7 +252,12 @@ fn damaged_files_dont_panic() {
         fuzz(&data, &[b"CFF "], &[], 2000);
     }
     if let Some(data) = load("/System/Library/Fonts/SFNSMono.ttf") {
-        fuzz(&data, &[b"fvar", b"gvar", b"HVAR", b"MVAR"], &[(*b"wght", 700.0)], 2000);
+        fuzz(
+            &data,
+            &[b"fvar", b"gvar", b"HVAR", b"MVAR"],
+            &[(*b"wght", 700.0)],
+            2000,
+        );
     }
     // Substitution and positioning: a coding font's ligatures and anchors
     // (fewer rounds: each copy works out its 460 lookups afresh).
@@ -211,10 +286,27 @@ fn font_with(glyphs: &[Vec<u8>], cff: Option<Vec<u8>>, extra: Vec<(&[u8; 4], Vec
     // cmap: one format 4 subtable mapping nothing but the final 0xFFFF segment.
     let mut cmap = [be16(0), be16(1), be16(3), be16(1)].concat();
     cmap.extend(12u32.to_be_bytes());
-    cmap.extend([be16(4), be16(24), be16(0), be16(2), be16(2), be16(0), be16(0)].concat());
+    cmap.extend(
+        [
+            be16(4),
+            be16(24),
+            be16(0),
+            be16(2),
+            be16(2),
+            be16(0),
+            be16(0),
+        ]
+        .concat(),
+    );
     cmap.extend([be16(0xFFFF), be16(0), be16(0xFFFF), be16(1), be16(0)].concat());
     let hmtx = [be16(500), be16(0)].concat();
-    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"cmap", cmap), (b"head", head), (b"hhea", hhea), (b"hmtx", hmtx), (b"maxp", maxp)];
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
+        (b"cmap", cmap),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", hmtx),
+        (b"maxp", maxp),
+    ];
     tables.extend(extra);
     let version = match cff {
         Some(cff) => {
@@ -231,12 +323,24 @@ fn font_with(glyphs: &[Vec<u8>], cff: Option<Vec<u8>>, extra: Vec<(&[u8; 4], Vec
             0x0001_0000
         }
     };
-    let mut out = [version.to_be_bytes().to_vec(), be16(tables.len() as u16).to_vec(), vec![0; 6]].concat();
+    let mut out = [
+        version.to_be_bytes().to_vec(),
+        be16(tables.len() as u16).to_vec(),
+        vec![0; 6],
+    ]
+    .concat();
     let mut offset = 12 + 16 * tables.len();
     let mut body: Vec<u8> = Vec::new();
     for (tag, data) in &tables {
         out.extend(*tag);
-        out.extend([0u32.to_be_bytes(), (offset as u32).to_be_bytes(), (data.len() as u32).to_be_bytes()].concat());
+        out.extend(
+            [
+                0u32.to_be_bytes(),
+                (offset as u32).to_be_bytes(),
+                (data.len() as u32).to_be_bytes(),
+            ]
+            .concat(),
+        );
         body.extend(data);
         offset += data.len();
     }
@@ -246,15 +350,25 @@ fn font_with(glyphs: &[Vec<u8>], cff: Option<Vec<u8>>, extra: Vec<(&[u8; 4], Vec
 
 /// A 100-unit square.
 fn square_glyph() -> Vec<u8> {
-    let mut g = [1i16, 0, 0, 100, 100, 3, 0].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+    let mut g = [1i16, 0, 0, 100, 100, 3, 0]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect::<Vec<u8>>();
     g.extend([1u8; 4]); // on-curve points, word deltas
-    g.extend([0i16, 100, 0, -100, 0, 0, 100, 0].iter().flat_map(|v| v.to_be_bytes()));
+    g.extend(
+        [0i16, 100, 0, -100, 0, 0, 100, 0]
+            .iter()
+            .flat_map(|v| v.to_be_bytes()),
+    );
     g
 }
 
 /// `copies` references to glyph `of`, all at the origin.
 fn composite_glyph(of: u16, copies: usize) -> Vec<u8> {
-    let mut g = [-1i16, 0, 0, 100, 100].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+    let mut g = [-1i16, 0, 0, 100, 100]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect::<Vec<u8>>();
     for i in 0..copies {
         let flags: u16 = if i + 1 < copies { 0x0022 } else { 0x0002 }; // MORE, ARGS_ARE_XY
         g.extend(flags.to_be_bytes());
@@ -266,8 +380,18 @@ fn composite_glyph(of: u16, copies: usize) -> Vec<u8> {
 
 #[test]
 fn composites_are_expanded() {
-    let face = Face::parse(FontData::from(font(&[square_glyph(), composite_glyph(1, 2)], None)), 0).unwrap();
-    let moves = |g| face.outline(g).unwrap().iter().filter(|s| matches!(s, Segment::MoveTo(_))).count();
+    let face = Face::parse(
+        FontData::from(font(&[square_glyph(), composite_glyph(1, 2)], None)),
+        0,
+    )
+    .unwrap();
+    let moves = |g| {
+        face.outline(g)
+            .unwrap()
+            .iter()
+            .filter(|s| matches!(s, Segment::MoveTo(_)))
+            .count()
+    };
     assert_eq!((moves(1), moves(2)), (1, 2));
 }
 
@@ -313,17 +437,46 @@ fn cff(program: &[u8], subrs: &[Vec<u8>]) -> Vec<u8> {
     let mut top = vec![29];
     top.extend((char_strings as u32).to_be_bytes());
     top.push(17);
-    [vec![1, 0, 4, 4], names, index(&[top]), strings, globals, index(&[vec![14], program.to_vec()])].concat()
+    [
+        vec![1, 0, 4, 4],
+        names,
+        index(&[top]),
+        strings,
+        globals,
+        index(&[vec![14], program.to_vec()]),
+    ]
+    .concat()
 }
 
 #[test]
 fn cff_charstrings_run() {
     // 100 100 rmoveto, 300 0 rlineto, 0 300 rlineto, endchar: a triangle.
-    let program = [139 + 100, 139 + 100, 21, 247, 300u16.wrapping_sub(108) as u8, 139, 5, 139, 247, 300u16.wrapping_sub(108) as u8, 5, 14];
+    let program = [
+        139 + 100,
+        139 + 100,
+        21,
+        247,
+        300u16.wrapping_sub(108) as u8,
+        139,
+        5,
+        139,
+        247,
+        300u16.wrapping_sub(108) as u8,
+        5,
+        14,
+    ];
     let face = Face::parse(FontData::from(font(&[], Some(cff(&program, &[])))), 0).unwrap();
     let o = face.outline(1).unwrap();
     let p = |x, y| mightty_font::Point { x, y };
-    assert_eq!(o, [Segment::MoveTo(p(100.0, 100.0)), Segment::LineTo(p(400.0, 100.0)), Segment::LineTo(p(400.0, 400.0)), Segment::Close]);
+    assert_eq!(
+        o,
+        [
+            Segment::MoveTo(p(100.0, 100.0)),
+            Segment::LineTo(p(400.0, 100.0)),
+            Segment::LineTo(p(400.0, 400.0)),
+            Segment::Close
+        ]
+    );
 }
 
 /// Subroutines calling each other ten times at each of ten levels would
@@ -333,7 +486,9 @@ fn charstring_bombs_are_refused() {
     // Subroutine k calls k + 1 ten times; the last draws a line. Numbers
     // are stored minus 107 and pushed as one byte (n + 139).
     let call = |k: i32| [(k - 107 + 139) as u8, 29];
-    let mut subrs: Vec<Vec<u8>> = (0..9).map(|k| [call(k + 1).repeat(10), vec![11]].concat()).collect();
+    let mut subrs: Vec<Vec<u8>> = (0..9)
+        .map(|k| [call(k + 1).repeat(10), vec![11]].concat())
+        .collect();
     subrs.push(vec![140, 140, 5, 11]);
     let program = [[139, 139, 21].as_slice(), &call(0), &[14]].concat();
     let face = Face::parse(FontData::from(font(&[], Some(cff(&program, &subrs)))), 0).unwrap();
@@ -344,7 +499,9 @@ fn charstring_bombs_are_refused() {
 
 /// A PNG of `width`×`height` pixels all `rgba`, stored without compression.
 fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
-    let chunk = |kind: &[u8; 4], body: &[u8]| [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat();
+    let chunk = |kind: &[u8; 4], body: &[u8]| {
+        [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat()
+    };
     let mut ihdr = [width.to_be_bytes(), height.to_be_bytes()].concat();
     ihdr.extend([8, 6, 0, 0, 0]);
     let mut rows = Vec::new();
@@ -357,22 +514,54 @@ fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
     z.extend((!(rows.len() as u16)).to_le_bytes());
     z.extend(&rows);
     z.extend([0; 4]);
-    [vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'], chunk(b"IHDR", &ihdr), chunk(b"IDAT", &z), chunk(b"IEND", &[])].concat()
+    [
+        vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'],
+        chunk(b"IHDR", &ihdr),
+        chunk(b"IDAT", &z),
+        chunk(b"IEND", &[]),
+    ]
+    .concat()
 }
 
 /// Glyphs 1 and 2 as images in an sbix strike at 20 ppem: a red 4×2 image
 /// whose bottom left is at (1, 3), and a 'dupe' of it.
 fn sbix_font() -> Vec<u8> {
-    let image = [&1i16.to_be_bytes()[..], &3i16.to_be_bytes(), b"png ", &png(4, 2, [255, 0, 0, 255])].concat();
-    let dupe = [&0i16.to_be_bytes()[..], &0i16.to_be_bytes(), b"dupe", &1u16.to_be_bytes()].concat();
+    let image = [
+        &1i16.to_be_bytes()[..],
+        &3i16.to_be_bytes(),
+        b"png ",
+        &png(4, 2, [255, 0, 0, 255]),
+    ]
+    .concat();
+    let dupe = [
+        &0i16.to_be_bytes()[..],
+        &0i16.to_be_bytes(),
+        b"dupe",
+        &1u16.to_be_bytes(),
+    ]
+    .concat();
     // Strike: ppem, ppi, offsets for glyphs 0..=2 and the end.
     let start = 4 + 4 * 4;
-    let offsets = [start, start, start + image.len(), start + image.len() + dupe.len()];
+    let offsets = [
+        start,
+        start,
+        start + image.len(),
+        start + image.len() + dupe.len(),
+    ];
     let mut strike = [20u16.to_be_bytes(), 72u16.to_be_bytes()].concat();
-    offsets.iter().for_each(|&o| strike.extend((o as u32).to_be_bytes()));
+    offsets
+        .iter()
+        .for_each(|&o| strike.extend((o as u32).to_be_bytes()));
     strike.extend(&image);
     strike.extend(&dupe);
-    let sbix = [&1u16.to_be_bytes()[..], &1u16.to_be_bytes(), &1u32.to_be_bytes(), &12u32.to_be_bytes(), &strike].concat();
+    let sbix = [
+        &1u16.to_be_bytes()[..],
+        &1u16.to_be_bytes(),
+        &1u32.to_be_bytes(),
+        &12u32.to_be_bytes(),
+        &strike,
+    ]
+    .concat();
     font_with(&[vec![], vec![]], None, vec![(b"sbix", sbix)])
 }
 
@@ -401,19 +590,31 @@ fn cbdt_font() -> Vec<u8> {
     cblc.extend([0, 1, 0, 17]); // index format 1, image format 17
     cblc.extend(4u32.to_be_bytes()); // images start after CBDT's header
     cblc.extend([0u32.to_be_bytes(), (end - 4).to_be_bytes()].concat());
-    font_with(&[vec![], vec![]], None, vec![(b"CBLC", cblc), (b"CBDT", cbdt)])
+    font_with(
+        &[vec![], vec![]],
+        None,
+        vec![(b"CBLC", cblc), (b"CBDT", cbdt)],
+    )
 }
 
 /// Glyph 2 as COLR layers of glyph 1 (a 100-unit square): palette entry 0
 /// (blue, half transparent), then the text's colour.
 fn colr_font() -> Vec<u8> {
-    let colr = [0u16.to_be_bytes(), 1u16.to_be_bytes()].concat().into_iter()
-        .chain(14u32.to_be_bytes()).chain(20u32.to_be_bytes()).chain(2u16.to_be_bytes())
+    let colr = [0u16.to_be_bytes(), 1u16.to_be_bytes()]
+        .concat()
+        .into_iter()
+        .chain(14u32.to_be_bytes())
+        .chain(20u32.to_be_bytes())
+        .chain(2u16.to_be_bytes())
         .chain([0, 2, 0, 0, 0, 2]) // base glyph 2: layers 0, 1
         .chain([0, 1, 0, 0, 0, 1, 0xFF, 0xFF])
         .collect();
     let cpal = [0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 14, 0, 0, 255, 0, 0, 128].to_vec();
-    font_with(&[square_glyph(), composite_glyph(1, 1)], None, vec![(b"COLR", colr), (b"CPAL", cpal)])
+    font_with(
+        &[square_glyph(), composite_glyph(1, 1)],
+        None,
+        vec![(b"COLR", colr), (b"CPAL", cpal)],
+    )
 }
 
 #[test]
@@ -422,8 +623,19 @@ fn colour_glyphs() {
     // and drawn 1/8 em lower, as Apple's renderer does.
     let face = Face::parse(FontData::from(sbix_font()), 0).unwrap();
     for g in [1, 2] {
-        let Some(ColorGlyph::Bitmap { image, ppem, left, top }) = face.color_glyph(g, 20.0) else { panic!("glyph {g}") };
-        assert_eq!((image.width, image.height, ppem, left, top), (4, 2, 20.0, 1.0, 3.0 + 2.0 - 2.5));
+        let Some(ColorGlyph::Bitmap {
+            image,
+            ppem,
+            left,
+            top,
+        }) = face.color_glyph(g, 20.0)
+        else {
+            panic!("glyph {g}")
+        };
+        assert_eq!(
+            (image.width, image.height, ppem, left, top),
+            (4, 2, 20.0, 1.0, 3.0 + 2.0 - 2.5)
+        );
     }
     // At 40 pixels, twice the size: 8×4 red, from x 2 and y 20 - 5.
     let tile = draw_color(&face, 1, 40.0, 0.0, 20.0, 12, 24).unwrap();
@@ -432,13 +644,27 @@ fn colour_glyphs() {
 
     // CBDT: bearings from the small metrics.
     let face = Face::parse(FontData::from(cbdt_font()), 0).unwrap();
-    let Some(ColorGlyph::Bitmap { image, left, top, .. }) = face.color_glyph(1, 20.0) else { panic!() };
-    assert_eq!((image.pixels[..4].to_vec(), left, top), (vec![0, 255, 0, 255], 2.0, 15.0));
+    let Some(ColorGlyph::Bitmap {
+        image, left, top, ..
+    }) = face.color_glyph(1, 20.0)
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (image.pixels[..4].to_vec(), left, top),
+        (vec![0, 255, 0, 255], 2.0, 15.0)
+    );
     assert!(face.outline(1).unwrap().is_empty());
 
     // COLR: a half-transparent blue square, then the text's colour (white) over it.
     let face = Face::parse(FontData::from(colr_font()), 0).unwrap();
-    assert_eq!(face.color_glyph(2, 20.0), Some(ColorGlyph::Layers(vec![(1, Some([0, 0, 255, 128])), (1, None)])));
+    assert_eq!(
+        face.color_glyph(2, 20.0),
+        Some(ColorGlyph::Layers(vec![
+            (1, Some([0, 0, 255, 128])),
+            (1, None)
+        ]))
+    );
     assert_eq!(face.color_glyph(1, 20.0), None);
     let tile = draw_color(&face, 2, 100.0, 0.0, 10.0, 10, 10).unwrap();
     assert_eq!(&tile[..4], [255, 255, 255, 255]);
@@ -451,7 +677,9 @@ fn damaged_colour_fonts_dont_panic() {
             for v in [0, 1, 0x7f, 0x80, 0xfe, 0xff] {
                 let mut d = bytes.clone();
                 d[i] = v;
-                let Ok(face) = Face::parse(FontData::from(d), 0) else { continue };
+                let Ok(face) = Face::parse(FontData::from(d), 0) else {
+                    continue;
+                };
                 for g in 0..3 {
                     let _ = face.color_glyph(g, 20.0);
                     let _ = draw_color(&face, g, 30.0, 0.0, 20.0, 16, 24);
@@ -465,10 +693,14 @@ fn damaged_colour_fonts_dont_panic() {
 /// through a mapping.
 #[test]
 fn apple_color_emoji() {
-    let Some(data) = load("/System/Library/Fonts/Apple Color Emoji.ttc") else { return };
+    let Some(data) = load("/System/Library/Fonts/Apple Color Emoji.ttc") else {
+        return;
+    };
     let face = Face::parse(data, 0).unwrap();
     let g = face.glyph('😀').unwrap();
-    let Some(ColorGlyph::Bitmap { image, ppem, .. }) = face.color_glyph(g, 33.0) else { panic!() };
+    let Some(ColorGlyph::Bitmap { image, ppem, .. }) = face.color_glyph(g, 33.0) else {
+        panic!()
+    };
     assert_eq!((image.width, image.height, ppem), (40, 40, 40.0));
     // Every strike's image for a sample of glyphs decodes.
     for g in (1..face.glyph_count()).step_by(97) {
@@ -491,18 +723,30 @@ fn user_font(file: &str) -> Option<FontData> {
 #[test]
 fn ligature_fonts() {
     for file in ["JetBrainsMono-Regular.ttf", "FiraCode-Regular.ttf"] {
-        let Some(data) = user_font(file) else { continue };
+        let Some(data) = user_font(file) else {
+            continue;
+        };
         let face = Face::parse(data, 0).unwrap();
         let shape = |text: &str| {
             let chars: Vec<char> = text.chars().collect();
             let nominal: Vec<u16> = chars.iter().map(|&c| face.glyph(c).unwrap()).collect();
             let shaped = face.shape(&chars, &LIGATURES);
-            assert_eq!(shaped.iter().map(|s| s.cluster as usize).collect::<Vec<_>>(), (0..chars.len()).collect::<Vec<_>>(), "{file} {text}");
+            assert_eq!(
+                shaped
+                    .iter()
+                    .map(|s| s.cluster as usize)
+                    .collect::<Vec<_>>(),
+                (0..chars.len()).collect::<Vec<_>>(),
+                "{file} {text}"
+            );
             (shaped.iter().map(|s| s.glyph).collect::<Vec<_>>(), nominal)
         };
         for text in ["->", "!=", "===", "<=>"] {
             let (shaped, nominal) = shape(text);
-            assert!(shaped.iter().zip(&nominal).all(|(a, b)| a != b), "{file} {text}: {shaped:?} {nominal:?}");
+            assert!(
+                shaped.iter().zip(&nominal).all(|(a, b)| a != b),
+                "{file} {text}: {shaped:?} {nominal:?}"
+            );
         }
         for text in ["plain", "a b", "- >"] {
             let (shaped, nominal) = shape(text);
@@ -510,14 +754,26 @@ fn ligature_fonts() {
         }
         // Without the features, nothing changes.
         let chars: Vec<char> = "->".chars().collect();
-        assert_eq!(face.shape(&chars, &[]).iter().map(|s| s.glyph).collect::<Vec<_>>(), chars.iter().map(|&c| face.glyph(c).unwrap()).collect::<Vec<_>>());
+        assert_eq!(
+            face.shape(&chars, &[])
+                .iter()
+                .map(|s| s.glyph)
+                .collect::<Vec<_>>(),
+            chars
+                .iter()
+                .map(|&c| face.glyph(c).unwrap())
+                .collect::<Vec<_>>()
+        );
         // An accent sits above its letter, by the font's anchors.
         let chars: Vec<char> = "e\u{301}".chars().collect();
         let (placed, width) = face.position(&face.shape(&chars, &LIGATURES));
         assert_eq!(width, face.advance(face.glyph('e').unwrap()));
         let (lo, hi) = face.bounds(placed[1].glyph).unwrap();
         let centre = placed[1].x + (lo.x + hi.x) / 2.0;
-        assert!(centre > 0.0 && centre < width && placed[1].y + lo.y > 0.0, "{placed:?}");
+        assert!(
+            centre > 0.0 && centre < width && placed[1].y + lo.y > 0.0,
+            "{placed:?}"
+        );
     }
 }
 
@@ -528,7 +784,21 @@ fn recursive_gsub() -> Vec<u8> {
     // Header (10), script list (8) + script (4) + lang sys (8) at 10,
     // feature list (8) + feature (6) at 30, lookup list at 44.
     let mut g = [be(1), be(0), be(10), be(30), be(44)].concat();
-    g.extend([be(1), *b"DF", *b"LT", be(8), be(4), be(0), be(0), be(0xFFFF), be(1), be(0)].concat());
+    g.extend(
+        [
+            be(1),
+            *b"DF",
+            *b"LT",
+            be(8),
+            be(4),
+            be(0),
+            be(0),
+            be(0xFFFF),
+            be(1),
+            be(0),
+        ]
+        .concat(),
+    );
     g.extend([be(1), *b"li", *b"ga", be(8), be(0), be(1), be(0)].concat());
     // Lookup list (4) at 44, lookup (8) at 48, subtable at 56.
     g.extend([be(1), be(4), be(6), be(0), be(1), be(8)].concat());
@@ -544,7 +814,11 @@ fn recursive_gsub() -> Vec<u8> {
 
 #[test]
 fn substitution_bombs_are_refused() {
-    let face = Face::parse(FontData::from(font_with(&[], None, vec![(b"GSUB", recursive_gsub())])), 0).unwrap();
+    let face = Face::parse(
+        FontData::from(font_with(&[], None, vec![(b"GSUB", recursive_gsub())])),
+        0,
+    )
+    .unwrap();
     let text = vec!['x'; 200];
     let started = std::time::Instant::now();
     let shaped = face.shape(&text, &LIGATURES);
@@ -560,7 +834,21 @@ fn huge_gsub() -> Vec<u8> {
     let features: u16 = 4096;
     // Header, script list, lang sys, feature list at 30, its feature at 38.
     let mut g = [be(1), be(0), be(10), be(30), be(0)].concat();
-    g.extend([be(1), *b"DF", *b"LT", be(8), be(4), be(0), be(0), be(0xFFFF), be(1), be(0)].concat());
+    g.extend(
+        [
+            be(1),
+            *b"DF",
+            *b"LT",
+            be(8),
+            be(4),
+            be(0),
+            be(0),
+            be(0xFFFF),
+            be(1),
+            be(0),
+        ]
+        .concat(),
+    );
     g.extend([be(1), *b"li", *b"ga", be(8), be(0), be(features)].concat());
     (0..features).for_each(|i| g.extend(be(i)));
     let list = g.len();
@@ -579,7 +867,11 @@ fn huge_gsub() -> Vec<u8> {
 
 #[test]
 fn huge_lookup_lists_are_read_within_a_budget() {
-    let face = Face::parse(FontData::from(font_with(&[], None, vec![(b"GSUB", huge_gsub())])), 0).unwrap();
+    let face = Face::parse(
+        FontData::from(font_with(&[], None, vec![(b"GSUB", huge_gsub())])),
+        0,
+    )
+    .unwrap();
     let started = std::time::Instant::now();
     let shaped = face.shape(&['x'; 100], &LIGATURES);
     assert_eq!(shaped.len(), 100);

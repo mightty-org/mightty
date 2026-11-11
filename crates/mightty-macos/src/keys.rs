@@ -2,7 +2,9 @@
 //! protocol for programs that ask for it
 //! (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>).
 
-use mightty_term::{KEY_ALL_AS_ESCAPES, KEY_ALTERNATES, KEY_DISAMBIGUATE, KEY_EVENT_TYPES, KEY_TEXT};
+use mightty_term::{
+    KEY_ALL_AS_ESCAPES, KEY_ALTERNATES, KEY_DISAMBIGUATE, KEY_EVENT_TYPES, KEY_TEXT,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Mods {
@@ -61,7 +63,11 @@ pub fn kitty(key: &Key, flags: u8, app_cursor: bool) -> Option<Vec<u8>> {
     let (number, end, kind) = match functional(key.code, all) {
         Some(f) => f,
         None => match key.unshifted.chars().next().filter(|c| !c.is_control()) {
-            Some(c) => (c.to_lowercase().next().unwrap_or(c) as u32, b'u', Kind::Text),
+            Some(c) => (
+                c.to_lowercase().next().unwrap_or(c) as u32,
+                b'u',
+                Kind::Text,
+            ),
             None => return legacy(),
         },
     };
@@ -76,11 +82,19 @@ pub fn kitty(key: &Key, flags: u8, app_cursor: bool) -> Option<Vec<u8>> {
         // xterm has nothing for it (Insert, F13 and up), or for F3, whose
         // `CSI 1;5R` reads as a cursor position report.
         Kind::Function => {
-            all || m.cmd || (events && key.action != KeyAction::Press) || end == b'u' || number == 2 || key.code == 99
+            all || m.cmd
+                || (events && key.action != KeyAction::Press)
+                || end == b'u'
+                || number == 2
+                || key.code == 99
         }
     };
     if !escape {
-        return if kind == Kind::Modifier { None } else { legacy() };
+        return if kind == Kind::Modifier {
+            None
+        } else {
+            legacy()
+        };
     }
     if key.action == KeyAction::Release && !events {
         return None;
@@ -107,7 +121,11 @@ pub fn kitty(key: &Key, flags: u8, app_cursor: bool) -> Option<Vec<u8>> {
         KeyAction::Release => ":3",
     };
     let text: Vec<String> = if all && flags & KEY_TEXT != 0 && key.action != KeyAction::Release {
-        key.text.chars().take_while(|c| !c.is_control()).map(|c| (c as u32).to_string()).collect()
+        key.text
+            .chars()
+            .take_while(|c| !c.is_control())
+            .map(|c| (c as u32).to_string())
+            .collect()
     } else {
         Vec::new()
     };
@@ -214,7 +232,13 @@ fn us_layout(code: u16) -> Option<u8> {
 
 /// Encodes a key press. `chars` is what the key typed; `base` is the same key
 /// ignoring every modifier except Shift.
-pub fn encode(key_code: u16, chars: &str, base: &str, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
+pub fn encode(
+    key_code: u16,
+    chars: &str,
+    base: &str,
+    mods: Mods,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     // macOS virtual key codes (Carbon `kVK_*`).
     let cursor_key = |letter: u8| {
         if mods.param() > 1 {
@@ -308,13 +332,27 @@ pub enum MouseAction {
 /// Encodes a mouse report. `button`: 0 left, 1 middle, 2 right, 64/65 wheel
 /// up/down. SGR (mode 1006) when `sgr`, otherwise the legacy X10 encoding,
 /// which can't express columns or rows past 223.
-pub fn mouse_report(button: u8, action: MouseAction, col: usize, row: usize, mods: Mods, sgr: bool) -> Vec<u8> {
-    let mut code = button + if mods.shift { 4 } else { 0 } + if mods.alt { 8 } else { 0 } + if mods.ctrl { 16 } else { 0 };
+pub fn mouse_report(
+    button: u8,
+    action: MouseAction,
+    col: usize,
+    row: usize,
+    mods: Mods,
+    sgr: bool,
+) -> Vec<u8> {
+    let mut code = button
+        + if mods.shift { 4 } else { 0 }
+        + if mods.alt { 8 } else { 0 }
+        + if mods.ctrl { 16 } else { 0 };
     if action == MouseAction::Motion {
         code += 32;
     }
     if sgr {
-        let end = if action == MouseAction::Release { 'm' } else { 'M' };
+        let end = if action == MouseAction::Release {
+            'm'
+        } else {
+            'M'
+        };
         return format!("\x1b[<{code};{};{}{end}", col + 1, row + 1).into_bytes();
     }
     if action == MouseAction::Release && button < 64 {
@@ -408,7 +446,10 @@ mod tests {
         // Keys in disguise are risky either way.
         assert!(paste_is_risky("echo hi\u{3}", true));
         assert!(paste_is_risky("x\u{1b}[201~rm -rf ~\r", true));
-        assert_eq!(visible_controls("\n\n\u{1b}[31mok\u{7f}\u{9b}", 100), "␊␊␛[31mok\u{2421}\u{FFFD}");
+        assert_eq!(
+            visible_controls("\n\n\u{1b}[31mok\u{7f}\u{9b}", 100),
+            "␊␊␛[31mok\u{2421}\u{FFFD}"
+        );
         assert_eq!(visible_controls("abcdef", 3), "abc…");
     }
 
@@ -421,30 +462,73 @@ mod tests {
         assert_eq!(key(0, "a", Mods::default()), b"a");
         assert_eq!(key(36, "\r", Mods::default()), b"\r");
         assert_eq!(key(51, "\x7f", Mods::default()), b"\x7f");
-        assert_eq!(key(48, "\t", Mods { shift: true, ..Default::default() }), b"\x1b[Z");
+        assert_eq!(
+            key(
+                48,
+                "\t",
+                Mods {
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            b"\x1b[Z"
+        );
     }
 
     #[test]
     fn control_and_meta() {
-        let ctrl = Mods { ctrl: true, ..Default::default() };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Default::default()
+        };
         assert_eq!(key(8, "c", ctrl), [3]);
         assert_eq!(key(33, "[", ctrl), [0x1b]);
-        let alt = Mods { alt: true, ..Default::default() };
+        let alt = Mods {
+            alt: true,
+            ..Default::default()
+        };
         assert_eq!(encode(11, "∫", "b", alt, false).unwrap(), b"\x1bb");
     }
 
     #[test]
     fn cursor_keys() {
         assert_eq!(key(126, "", Mods::default()), b"\x1b[A");
-        assert_eq!(encode(126, "", "", Mods::default(), true).unwrap(), b"\x1bOA");
-        assert_eq!(key(123, "", Mods { ctrl: true, ..Default::default() }), b"\x1b[1;5D");
+        assert_eq!(
+            encode(126, "", "", Mods::default(), true).unwrap(),
+            b"\x1bOA"
+        );
+        assert_eq!(
+            key(
+                123,
+                "",
+                Mods {
+                    ctrl: true,
+                    ..Default::default()
+                }
+            ),
+            b"\x1b[1;5D"
+        );
         assert_eq!(key(116, "", Mods::default()), b"\x1b[5~");
     }
 
     /// A key on a US layout: `text` typed, `unshifted` without modifiers.
-    fn kitty_key(code: u16, text: &str, unshifted: &str, mods: Mods, action: KeyAction, flags: u8) -> Option<String> {
+    fn kitty_key(
+        code: u16,
+        text: &str,
+        unshifted: &str,
+        mods: Mods,
+        action: KeyAction,
+        flags: u8,
+    ) -> Option<String> {
         let shifted = if mods.shift { text } else { unshifted };
-        let key = Key { code, text, shifted, unshifted, mods, action };
+        let key = Key {
+            code,
+            text,
+            shifted,
+            unshifted,
+            mods,
+            action,
+        };
         kitty(&key, flags, false).map(|b| String::from_utf8(b).unwrap())
     }
 
@@ -456,7 +540,10 @@ mod tests {
     fn kitty_disambiguate() {
         let none = Mods::default();
         let ctrl = Mods { ctrl: true, ..none };
-        let shift = Mods { shift: true, ..none };
+        let shift = Mods {
+            shift: true,
+            ..none
+        };
         let f = KEY_DISAMBIGUATE;
         // Text, and Return, Tab and Backspace alone, stay as they were.
         assert_eq!(press(0, "a", "a", none, f), "a");
@@ -465,13 +552,32 @@ mod tests {
         assert_eq!(press(51, "\x7f", "\x7f", none, f), "\x7f");
         // Chords and Esc become unambiguous.
         assert_eq!(press(0, "\x01", "a", ctrl, f), "\x1b[97;5u");
-        assert_eq!(press(0, "a", "a", Mods { alt: true, ..none }, f), "\x1b[97;3u");
-        assert_eq!(press(0, "\x01", "a", Mods { ctrl: true, shift: true, ..none }, f), "\x1b[97;6u");
+        assert_eq!(
+            press(0, "a", "a", Mods { alt: true, ..none }, f),
+            "\x1b[97;3u"
+        );
+        assert_eq!(
+            press(
+                0,
+                "\x01",
+                "a",
+                Mods {
+                    ctrl: true,
+                    shift: true,
+                    ..none
+                },
+                f
+            ),
+            "\x1b[97;6u"
+        );
         assert_eq!(press(34, "\t", "i", ctrl, f), "\x1b[105;5u");
         assert_eq!(press(53, "\x1b", "\x1b", none, f), "\x1b[27u");
         assert_eq!(press(36, "\r", "\r", shift, f), "\x1b[13;2u");
         assert_eq!(press(48, "\t", "\t", shift, f), "\x1b[9;2u");
-        assert_eq!(press(0, "a", "a", Mods { cmd: true, ..none }, f), "\x1b[97;9u");
+        assert_eq!(
+            press(0, "a", "a", Mods { cmd: true, ..none }, f),
+            "\x1b[97;9u"
+        );
         // Function keys keep xterm's forms; kitty's only where xterm has none.
         assert_eq!(press(126, "", "", none, f), "\x1b[A");
         assert_eq!(press(126, "", "", ctrl, f), "\x1b[1;5A");
@@ -488,49 +594,104 @@ mod tests {
         let none = Mods::default();
         let ctrl = Mods { ctrl: true, ..none };
         let f = KEY_DISAMBIGUATE | KEY_EVENT_TYPES;
-        assert_eq!(kitty_key(0, "\x01", "a", ctrl, KeyAction::Release, f).unwrap(), "\x1b[97;5:3u");
-        assert_eq!(kitty_key(126, "", "", none, KeyAction::Repeat, f).unwrap(), "\x1b[1;1:2A");
-        assert_eq!(kitty_key(126, "", "", none, KeyAction::Release, f).unwrap(), "\x1b[1;1:3A");
+        assert_eq!(
+            kitty_key(0, "\x01", "a", ctrl, KeyAction::Release, f).unwrap(),
+            "\x1b[97;5:3u"
+        );
+        assert_eq!(
+            kitty_key(126, "", "", none, KeyAction::Repeat, f).unwrap(),
+            "\x1b[1;1:2A"
+        );
+        assert_eq!(
+            kitty_key(126, "", "", none, KeyAction::Release, f).unwrap(),
+            "\x1b[1;1:3A"
+        );
         // Text, Return and friends have no release unless every key is an escape code.
         assert_eq!(kitty_key(0, "a", "a", none, KeyAction::Release, f), None);
         assert_eq!(kitty_key(36, "\r", "\r", none, KeyAction::Release, f), None);
-        assert_eq!(kitty_key(0, "a", "a", none, KeyAction::Repeat, f).unwrap(), "a");
+        assert_eq!(
+            kitty_key(0, "a", "a", none, KeyAction::Repeat, f).unwrap(),
+            "a"
+        );
         let all = f | KEY_ALL_AS_ESCAPES;
-        assert_eq!(kitty_key(36, "\r", "\r", none, KeyAction::Release, all).unwrap(), "\x1b[13;1:3u");
+        assert_eq!(
+            kitty_key(36, "\r", "\r", none, KeyAction::Release, all).unwrap(),
+            "\x1b[13;1:3u"
+        );
     }
 
     #[test]
     fn kitty_all_keys() {
         let none = Mods::default();
-        let shift = Mods { shift: true, ..none };
+        let shift = Mods {
+            shift: true,
+            ..none
+        };
         let f = KEY_ALL_AS_ESCAPES;
         assert_eq!(press(0, "a", "a", none, f), "\x1b[97u");
         assert_eq!(press(36, "\r", "\r", none, f), "\x1b[13u");
         assert_eq!(press(126, "", "", none, f), "\x1b[A");
         assert_eq!(press(83, "1", "1", none, f), "\x1b[57400u");
         assert_eq!(press(76, "\x03", "\x03", none, f), "\x1b[57414u");
-        assert_eq!(press(0, "A", "a", Mods { caps_lock: true, ..none }, f), "\x1b[97;65u");
+        assert_eq!(
+            press(
+                0,
+                "A",
+                "a",
+                Mods {
+                    caps_lock: true,
+                    ..none
+                },
+                f
+            ),
+            "\x1b[97;65u"
+        );
         // Modifier keys, with themselves held on press.
         assert_eq!(press(56, "", "", shift, f), "\x1b[57441;2u");
         assert_eq!(kitty_key(56, "", "", none, KeyAction::Release, f), None);
-        assert_eq!(kitty_key(56, "", "", none, KeyAction::Release, f | KEY_EVENT_TYPES).unwrap(), "\x1b[57441;1:3u");
+        assert_eq!(
+            kitty_key(56, "", "", none, KeyAction::Release, f | KEY_EVENT_TYPES).unwrap(),
+            "\x1b[57441;1:3u"
+        );
         // With the text it typed.
         let text = f | KEY_TEXT;
         assert_eq!(press(0, "a", "a", none, text), "\x1b[97;;97u");
         assert_eq!(press(0, "A", "a", shift, text), "\x1b[97;2;65u");
-        assert_eq!(kitty_key(0, "a", "a", none, KeyAction::Release, text | KEY_EVENT_TYPES).unwrap(), "\x1b[97;1:3u");
+        assert_eq!(
+            kitty_key(
+                0,
+                "a",
+                "a",
+                none,
+                KeyAction::Release,
+                text | KEY_EVENT_TYPES
+            )
+            .unwrap(),
+            "\x1b[97;1:3u"
+        );
         // Shifted and US-layout keys.
         let alternates = f | KEY_ALTERNATES;
         assert_eq!(press(0, "A", "a", shift, alternates), "\x1b[97:65;2u");
         assert_eq!(press(0, "ф", "ф", none, alternates), "\x1b[1092::97u");
-        assert_eq!(press(0, "Ф", "ф", shift, alternates), "\x1b[1092:1060:97;2u");
+        assert_eq!(
+            press(0, "Ф", "ф", shift, alternates),
+            "\x1b[1092:1060:97;2u"
+        );
     }
 
     #[test]
     fn kitty_without_flags_is_xterm() {
         let none = Mods::default();
-        for (code, text, mods) in [(0, "a", none), (126, "", Mods { ctrl: true, ..none }), (53, "\x1b", none), (36, "\r", none)] {
-            assert_eq!(press(code, text, text, mods, 0).into_bytes(), encode(code, text, text, mods, false).unwrap());
+        for (code, text, mods) in [
+            (0, "a", none),
+            (126, "", Mods { ctrl: true, ..none }),
+            (53, "\x1b", none),
+            (36, "\r", none),
+        ] {
+            assert_eq!(
+                press(code, text, text, mods, 0).into_bytes(),
+                encode(code, text, text, mods, false).unwrap()
+            );
         }
         assert_eq!(kitty_key(0, "a", "a", none, KeyAction::Release, 0), None);
     }
@@ -538,12 +699,37 @@ mod tests {
     #[test]
     fn mouse_reports() {
         let none = Mods::default();
-        assert_eq!(mouse_report(0, MouseAction::Press, 4, 9, none, true), b"\x1b[<0;5;10M");
-        assert_eq!(mouse_report(0, MouseAction::Release, 4, 9, none, true), b"\x1b[<0;5;10m");
-        assert_eq!(mouse_report(0, MouseAction::Motion, 0, 0, none, true), b"\x1b[<32;1;1M");
-        assert_eq!(mouse_report(65, MouseAction::Press, 0, 0, Mods { ctrl: true, ..none }, true), b"\x1b[<81;1;1M");
-        assert_eq!(mouse_report(0, MouseAction::Press, 0, 0, none, false), b"\x1b[M !!");
-        assert_eq!(mouse_report(2, MouseAction::Release, 0, 0, none, false), b"\x1b[M#!!");
+        assert_eq!(
+            mouse_report(0, MouseAction::Press, 4, 9, none, true),
+            b"\x1b[<0;5;10M"
+        );
+        assert_eq!(
+            mouse_report(0, MouseAction::Release, 4, 9, none, true),
+            b"\x1b[<0;5;10m"
+        );
+        assert_eq!(
+            mouse_report(0, MouseAction::Motion, 0, 0, none, true),
+            b"\x1b[<32;1;1M"
+        );
+        assert_eq!(
+            mouse_report(
+                65,
+                MouseAction::Press,
+                0,
+                0,
+                Mods { ctrl: true, ..none },
+                true
+            ),
+            b"\x1b[<81;1;1M"
+        );
+        assert_eq!(
+            mouse_report(0, MouseAction::Press, 0, 0, none, false),
+            b"\x1b[M !!"
+        );
+        assert_eq!(
+            mouse_report(2, MouseAction::Release, 0, 0, none, false),
+            b"\x1b[M#!!"
+        );
     }
 
     #[test]
@@ -563,5 +749,4 @@ mod tests {
         assert_eq!(password_length(2, b"\x1b[D\x1bOA\x1b[200~xyz\x1b[201~"), 5);
         assert_eq!(password_length(0, b"\x1bb"), 0);
     }
-
 }

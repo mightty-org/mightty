@@ -31,7 +31,11 @@ fn f2dot14(b: Bytes<'_>, at: usize) -> Option<f32> {
 
 /// The axes `fvar` at `at` declares; `None` if any makes no sense.
 pub(crate) fn axes(b: Bytes<'_>, at: usize) -> Option<Vec<Axis>> {
-    let (first, count, size) = (b.u16(at + 4)? as usize, b.u16(at + 8)? as usize, b.u16(at + 10)? as usize);
+    let (first, count, size) = (
+        b.u16(at + 4)? as usize,
+        b.u16(at + 8)? as usize,
+        b.u16(at + 10)? as usize,
+    );
     if size < 20 {
         return None;
     }
@@ -39,7 +43,12 @@ pub(crate) fn axes(b: Bytes<'_>, at: usize) -> Option<Vec<Axis>> {
         .map(|i| {
             let a = at + first + i * size;
             let tag = b.slice(a, 4)?.0.try_into().ok()?;
-            let axis = Axis { tag, min: fixed(b, a + 4)?, default: fixed(b, a + 8)?, max: fixed(b, a + 12)? };
+            let axis = Axis {
+                tag,
+                min: fixed(b, a + 4)?,
+                default: fixed(b, a + 8)?,
+                max: fixed(b, a + 12)?,
+            };
             // A damaged axis makes the font not variable at all.
             (axis.min <= axis.default && axis.default <= axis.max).then_some(axis)
         })
@@ -48,11 +57,22 @@ pub(crate) fn axes(b: Bytes<'_>, at: usize) -> Option<Vec<Axis>> {
 
 /// `settings` (axis tag and value) as normalized coordinates, one per
 /// axis; axes not named stay at their defaults (0).
-pub(crate) fn normalize(b: Bytes<'_>, axes: &[Axis], avar: Option<usize>, settings: &[([u8; 4], f32)]) -> Vec<f32> {
+pub(crate) fn normalize(
+    b: Bytes<'_>,
+    axes: &[Axis],
+    avar: Option<usize>,
+    settings: &[([u8; 4], f32)],
+) -> Vec<f32> {
     let mut coords: Vec<f32> = axes
         .iter()
         .map(|axis| {
-            let Some(&(_, value)) = settings.iter().rev().find(|s| s.0 == axis.tag && s.1.is_finite()) else { return 0.0 };
+            let Some(&(_, value)) = settings
+                .iter()
+                .rev()
+                .find(|s| s.0 == axis.tag && s.1.is_finite())
+            else {
+                return 0.0;
+            };
             let v = value.clamp(axis.min, axis.max);
             if v < axis.default {
                 (v - axis.default) / (axis.default - axis.min)
@@ -81,14 +101,20 @@ fn remap(b: Bytes<'_>, avar: usize, coords: &mut [f32]) -> Option<()> {
     let mut at = avar + 8;
     for c in coords.iter_mut() {
         let pairs = b.u16(at)? as usize;
-        let map: Vec<(f32, f32)> = (0..pairs).map(|i| Some((f2dot14(b, at + 2 + 4 * i)?, f2dot14(b, at + 4 + 4 * i)?))).collect::<Option<_>>()?;
+        let map: Vec<(f32, f32)> = (0..pairs)
+            .map(|i| Some((f2dot14(b, at + 2 + 4 * i)?, f2dot14(b, at + 4 + 4 * i)?)))
+            .collect::<Option<_>>()?;
         at += 2 + 4 * pairs;
         if let Some(i) = map.iter().position(|&(from, _)| from >= *c) {
             *c = match i {
                 0 => map[0].1,
                 _ => {
                     let ((x0, y0), (x1, y1)) = (map[i - 1], map[i]);
-                    if x1 == x0 { y1 } else { y0 + (*c - x0) * (y1 - y0) / (x1 - x0) }
+                    if x1 == x0 {
+                        y1
+                    } else {
+                        y0 + (*c - x0) * (y1 - y0) / (x1 - x0)
+                    }
                 }
             };
         }
@@ -109,14 +135,24 @@ fn region_scalar(coords: &[f32], region: impl Iterator<Item = (f32, f32, f32)>) 
         if c == peak {
             continue;
         }
-        scalar *= if c < peak { (c - start) / (peak - start) } else { (end - c) / (end - peak) };
+        scalar *= if c < peak {
+            (c - start) / (peak - start)
+        } else {
+            (end - c) / (end - peak)
+        };
     }
     scalar
 }
 
 /// An ItemVariationStore (inside HVAR and MVAR): rows of deltas, each
 /// weighted by how much its region applies.
-pub(crate) fn item_delta(b: Bytes<'_>, store: usize, coords: &[f32], outer: u16, inner: u16) -> Option<f32> {
+pub(crate) fn item_delta(
+    b: Bytes<'_>,
+    store: usize,
+    coords: &[f32],
+    outer: u16,
+    inner: u16,
+) -> Option<f32> {
     let regions = store + b.u32(store + 2)? as usize;
     let (axis_count, region_count) = (b.u16(regions)? as usize, b.u16(regions + 2)?);
     if axis_count != coords.len() {
@@ -126,7 +162,8 @@ pub(crate) fn item_delta(b: Bytes<'_>, store: usize, coords: &[f32], outer: u16,
         return None;
     }
     let data = store + b.u32(store + 8 + 4 * outer as usize)? as usize;
-    let (items, word_count, region_index_count) = (b.u16(data)?, b.u16(data + 2)?, b.u16(data + 4)? as usize);
+    let (items, word_count, region_index_count) =
+        (b.u16(data)?, b.u16(data + 2)?, b.u16(data + 4)? as usize);
     if inner >= items {
         return None;
     }
@@ -154,7 +191,11 @@ pub(crate) fn item_delta(b: Bytes<'_>, store: usize, coords: &[f32], outer: u16,
         let r = regions + 4 + region as usize * axis_count * 6;
         let triples = (0..axis_count).map(|i| {
             let a = r + 6 * i;
-            (f2dot14(b, a).unwrap_or(0.0), f2dot14(b, a + 2).unwrap_or(0.0), f2dot14(b, a + 4).unwrap_or(0.0))
+            (
+                f2dot14(b, a).unwrap_or(0.0),
+                f2dot14(b, a + 2).unwrap_or(0.0),
+                f2dot14(b, a + 4).unwrap_or(0.0),
+            )
         });
         b.slice(r, axis_count * 6)?;
         total += delta * region_scalar(coords, triples);
@@ -176,15 +217,29 @@ pub(crate) fn delta_set_index(b: Bytes<'_>, map: usize, i: u32) -> Option<(u16, 
     let size = ((entry_format >> 4) & 3) as usize + 1;
     let inner_bits = (entry_format & 0x0F) as u32 + 1;
     let at = data + i.min(count - 1) as usize * size;
-    let entry = b.slice(at, size)?.0.iter().fold(0u32, |v, &byte| (v << 8) | byte as u32);
-    Some(((entry >> inner_bits) as u16, (entry & ((1 << inner_bits) - 1)) as u16))
+    let entry = b
+        .slice(at, size)?
+        .0
+        .iter()
+        .fold(0u32, |v, &byte| (v << 8) | byte as u32);
+    Some((
+        (entry >> inner_bits) as u16,
+        (entry & ((1 << inner_bits) - 1)) as u16,
+    ))
 }
 
 /// `gvar`'s deltas for `glyph`'s `points` points (four phantom points
 /// included, last), at `coords`. `original` gives the outline's points and
 /// contour ends, so points without deltas of their own can follow their
 /// neighbours'; composite glyphs pass `None`.
-pub(crate) fn glyph_deltas(b: Bytes<'_>, gvar: usize, coords: &[f32], glyph: u16, points: usize, original: Option<(&[Point], &[usize])>) -> Option<Vec<Point>> {
+pub(crate) fn glyph_deltas(
+    b: Bytes<'_>,
+    gvar: usize,
+    coords: &[f32],
+    glyph: u16,
+    points: usize,
+    original: Option<(&[Point], &[usize])>,
+) -> Option<Vec<Point>> {
     let axis_count = b.u16(gvar + 4)? as usize;
     if axis_count != coords.len() {
         return None;
@@ -200,9 +255,15 @@ pub(crate) fn glyph_deltas(b: Bytes<'_>, gvar: usize, coords: &[f32], glyph: u16
     }
     let g = glyph as usize;
     let (start, end) = if long {
-        (b.u32(gvar + 20 + 4 * g)? as usize, b.u32(gvar + 24 + 4 * g)? as usize)
+        (
+            b.u32(gvar + 20 + 4 * g)? as usize,
+            b.u32(gvar + 24 + 4 * g)? as usize,
+        )
     } else {
-        (2 * b.u16(gvar + 20 + 2 * g)? as usize, 2 * b.u16(gvar + 22 + 2 * g)? as usize)
+        (
+            2 * b.u16(gvar + 20 + 2 * g)? as usize,
+            2 * b.u16(gvar + 22 + 2 * g)? as usize,
+        )
     };
     if end <= start {
         return Some(deltas);
@@ -228,18 +289,26 @@ pub(crate) fn glyph_deltas(b: Bytes<'_>, gvar: usize, coords: &[f32], glyph: u16
         header += 4;
         let peak: Vec<f32> = if index & 0x8000 != 0 {
             header += 2 * axis_count;
-            (0..axis_count).map(|i| f2dot14(data, header - 2 * axis_count + 2 * i)).collect::<Option<_>>()?
+            (0..axis_count)
+                .map(|i| f2dot14(data, header - 2 * axis_count + 2 * i))
+                .collect::<Option<_>>()?
         } else {
             let i = (index & 0x0FFF) as usize;
             if i >= shared_count {
                 return None;
             }
-            (0..axis_count).map(|a| f2dot14(b, shared + 2 * (i * axis_count + a))).collect::<Option<_>>()?
+            (0..axis_count)
+                .map(|a| f2dot14(b, shared + 2 * (i * axis_count + a)))
+                .collect::<Option<_>>()?
         };
         let intermediate: Option<(Vec<f32>, Vec<f32>)> = if index & 0x4000 != 0 {
             let at = header;
             header += 4 * axis_count;
-            let read = |from: usize| (0..axis_count).map(|i| f2dot14(data, from + 2 * i)).collect::<Option<Vec<_>>>();
+            let read = |from: usize| {
+                (0..axis_count)
+                    .map(|i| f2dot14(data, from + 2 * i))
+                    .collect::<Option<Vec<_>>>()
+            };
             Some((read(at)?, read(at + 2 * axis_count)?))
         } else {
             None
@@ -258,7 +327,11 @@ pub(crate) fn glyph_deltas(b: Bytes<'_>, gvar: usize, coords: &[f32], glyph: u16
         if work > MAX_DELTA_WORK {
             return None;
         }
-        let (private, at) = if index & 0x2000 != 0 { packed_points(tuple, 0, points).map(|(p, at)| (Some(p), at))? } else { (None, 0) };
+        let (private, at) = if index & 0x2000 != 0 {
+            packed_points(tuple, 0, points).map(|(p, at)| (Some(p), at))?
+        } else {
+            (None, 0)
+        };
         let which = private.as_ref().or(shared_points.as_ref())?;
         let n = which.as_ref().map_or(points, Vec::len);
         let (xs, at) = packed_deltas(tuple, at, n)?;
@@ -378,16 +451,27 @@ fn infer(deltas: &mut [Option<Point>], outline: &[Point], ends: &[usize]) {
                 continue;
             }
             // The touched points before and after `i`, around the contour.
-            let before = if k > 0 { touched[k - 1] } else { touched[touched.len() - 1] };
+            let before = if k > 0 {
+                touched[k - 1]
+            } else {
+                touched[touched.len() - 1]
+            };
             let after = touched.get(k).copied().unwrap_or(touched[0]);
-            let (db, da) = (deltas[before].unwrap_or(Point { x: 0.0, y: 0.0 }), deltas[after].unwrap_or(Point { x: 0.0, y: 0.0 }));
+            let (db, da) = (
+                deltas[before].unwrap_or(Point { x: 0.0, y: 0.0 }),
+                deltas[after].unwrap_or(Point { x: 0.0, y: 0.0 }),
+            );
             let axis = |c: fn(Point) -> f32| {
                 let (cb, ca, ci) = (c(outline[before]), c(outline[after]), c(outline[i]));
                 let (dbv, dav) = (c(db), c(da));
                 if cb == ca {
                     return if dbv == dav { dbv } else { 0.0 };
                 }
-                let ((lo, dlo), (hi, dhi)) = if cb < ca { ((cb, dbv), (ca, dav)) } else { ((ca, dav), (cb, dbv)) };
+                let ((lo, dlo), (hi, dhi)) = if cb < ca {
+                    ((cb, dbv), (ca, dav))
+                } else {
+                    ((ca, dav), (cb, dbv))
+                };
                 if ci <= lo {
                     dlo
                 } else if ci >= hi {
@@ -396,7 +480,13 @@ fn infer(deltas: &mut [Option<Point>], outline: &[Point], ends: &[usize]) {
                     dlo + (ci - lo) * (dhi - dlo) / (hi - lo)
                 }
             };
-            inferred.push((i, Point { x: axis(|p| p.x), y: axis(|p| p.y) }));
+            inferred.push((
+                i,
+                Point {
+                    x: axis(|p| p.x),
+                    y: axis(|p| p.y),
+                },
+            ));
         }
         for (i, d) in inferred {
             deltas[i] = Some(d);
@@ -429,7 +519,9 @@ mod tests {
     fn inferring_is_linear() {
         let n = 65_535;
         let outline: Vec<Point> = (0..n).map(|i| p(i as f32, 0.0)).collect();
-        let mut deltas: Vec<Option<Point>> = (0..n).map(|i| (i % 2 == 0).then_some(p(1.0, 0.0))).collect();
+        let mut deltas: Vec<Option<Point>> = (0..n)
+            .map(|i| (i % 2 == 0).then_some(p(1.0, 0.0)))
+            .collect();
         let started = std::time::Instant::now();
         infer(&mut deltas, &outline, &[n - 1]);
         assert!(started.elapsed().as_millis() < 500);
@@ -442,7 +534,10 @@ mod tests {
         assert_eq!((at(0.0), at(0.5), at(1.0), at(-0.5)), (0.0, 0.5, 1.0, 0.0));
         // Peaked in the middle of an intermediate region.
         let mid = |c: f32| region_scalar(&[c], [(0.25, 0.5, 1.0)].into_iter());
-        assert_eq!((mid(0.375), mid(0.5), mid(0.75), mid(0.125)), (0.5, 1.0, 0.5, 0.0));
+        assert_eq!(
+            (mid(0.375), mid(0.5), mid(0.75), mid(0.125)),
+            (0.5, 1.0, 0.5, 0.0)
+        );
     }
 
     #[test]
@@ -453,6 +548,9 @@ mod tests {
         let b = Bytes(&bytes);
         let (points, at) = packed_points(b, 0, 10).unwrap();
         assert_eq!(points, Some(vec![1, 3, 6]));
-        assert_eq!(packed_deltas(b, at, 4).unwrap(), (vec![0.0, 0.0, 256.0, -1.0], bytes.len()));
+        assert_eq!(
+            packed_deltas(b, at, 4).unwrap(),
+            (vec![0.0, 0.0, 256.0, -1.0], bytes.len())
+        );
     }
 }

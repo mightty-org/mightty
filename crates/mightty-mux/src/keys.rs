@@ -36,7 +36,9 @@ pub fn key_bytes(name: &str, app_cursor: bool) -> Option<Vec<u8>> {
             }
             let (prefix, key) = name.split_once(['-', '+'])?;
             let mut key_chars = key.chars();
-            let (Some(c), None) = (key_chars.next(), key_chars.next()) else { return None };
+            let (Some(c), None) = (key_chars.next(), key_chars.next()) else {
+                return None;
+            };
             match prefix {
                 "ctrl" | "c" => vec![match c {
                     'a'..='z' => c as u8 - b'a' + 1,

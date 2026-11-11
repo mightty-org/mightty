@@ -169,9 +169,18 @@ impl Block {
 
     const fn with_invoke(invoke: *const c_void) -> Self {
         const BLOCK_IS_GLOBAL: i32 = 1 << 28;
-        static DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() };
+        static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+            reserved: 0,
+            size: std::mem::size_of::<Block>(),
+        };
         // Only the address of the runtime's class object is taken.
-        Self { isa: (&raw const _NSConcreteGlobalBlock).cast(), flags: BLOCK_IS_GLOBAL, reserved: 0, invoke, descriptor: &DESCRIPTOR }
+        Self {
+            isa: (&raw const _NSConcreteGlobalBlock).cast(),
+            flags: BLOCK_IS_GLOBAL,
+            reserved: 0,
+            invoke,
+            descriptor: &DESCRIPTOR,
+        }
     }
 }
 
@@ -230,7 +239,12 @@ unsafe extern "C" {
         is_external: bool,
     ) -> CFStringRef;
     pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
-    pub fn CFDataCreateWithBytesNoCopy(alloc: *const c_void, bytes: *const u8, len: isize, deallocator: CFTypeRef) -> CFTypeRef;
+    pub fn CFDataCreateWithBytesNoCopy(
+        alloc: *const c_void,
+        bytes: *const u8,
+        len: isize,
+        deallocator: CFTypeRef,
+    ) -> CFTypeRef;
     pub static kCFAllocatorNull: CFTypeRef;
     pub fn CFRelease(cf: CFTypeRef);
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
@@ -242,14 +256,27 @@ unsafe extern "C" {
         key_callbacks: *const c_void,
         value_callbacks: *const c_void,
     ) -> CFTypeRef;
-    pub fn CFAttributedStringCreate(alloc: *const c_void, string: CFStringRef, attributes: CFTypeRef) -> CFTypeRef;
+    pub fn CFAttributedStringCreate(
+        alloc: *const c_void,
+        string: CFStringRef,
+        attributes: CFTypeRef,
+    ) -> CFTypeRef;
     pub fn CFDictionaryGetCount(dict: CFTypeRef) -> isize;
-    pub fn CFDictionaryGetKeysAndValues(dict: CFTypeRef, keys: *mut CFTypeRef, values: *mut CFTypeRef);
+    pub fn CFDictionaryGetKeysAndValues(
+        dict: CFTypeRef,
+        keys: *mut CFTypeRef,
+        values: *mut CFTypeRef,
+    );
     pub fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
     pub fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
     pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
-    pub fn CFArrayCreate(alloc: *const c_void, values: *const CFTypeRef, count: isize, callbacks: *const c_void) -> CFTypeRef;
+    pub fn CFArrayCreate(
+        alloc: *const c_void,
+        values: *const CFTypeRef,
+        count: isize,
+        callbacks: *const c_void,
+    ) -> CFTypeRef;
     pub fn CFNumberCreate(alloc: *const c_void, kind: isize, value: *const c_void) -> CFTypeRef;
     pub static kCFTypeArrayCallBacks: [u8; 0];
     pub fn CFPreferencesCopyAppValue(key: CFStringRef, application: CFStringRef) -> CFTypeRef;
@@ -277,10 +304,24 @@ unsafe extern "C" {
         matrix: *const CGAffineTransform,
         attributes: CFTypeRef,
     ) -> CTFontRef;
-    pub fn CTFontGetBoundingRectsForGlyphs(font: CTFontRef, orientation: u32, glyphs: *const u16, rects: *mut CGRect, count: isize) -> CGRect;
+    pub fn CTFontGetBoundingRectsForGlyphs(
+        font: CTFontRef,
+        orientation: u32,
+        glyphs: *const u16,
+        rects: *mut CGRect,
+        count: isize,
+    ) -> CGRect;
     pub fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeRef) -> CFTypeRef;
-    pub fn CTFontCreateWithFontDescriptor(descriptor: CFTypeRef, size: f64, matrix: *const c_void) -> CTFontRef;
-    pub fn CTFontCreateForString(current: CTFontRef, string: CFStringRef, range: CFRange) -> CTFontRef;
+    pub fn CTFontCreateWithFontDescriptor(
+        descriptor: CFTypeRef,
+        size: f64,
+        matrix: *const c_void,
+    ) -> CTFontRef;
+    pub fn CTFontCreateForString(
+        current: CTFontRef,
+        string: CFStringRef,
+        range: CFRange,
+    ) -> CTFontRef;
     pub fn CTFontGetAscent(font: CTFontRef) -> f64;
     pub fn CTFontGetDescent(font: CTFontRef) -> f64;
     pub fn CTFontGetLeading(font: CTFontRef) -> f64;
@@ -295,7 +336,12 @@ unsafe extern "C" {
     pub static kCTFontOpenTypeFeatureTag: CFStringRef;
     pub static kCTFontOpenTypeFeatureValue: CFStringRef;
     pub static kCTFontURLAttribute: CFStringRef;
-    pub fn CTFontGetGlyphsForCharacters(font: CTFontRef, chars: *const u16, glyphs: *mut u16, count: isize) -> bool;
+    pub fn CTFontGetGlyphsForCharacters(
+        font: CTFontRef,
+        chars: *const u16,
+        glyphs: *mut u16,
+        count: isize,
+    ) -> bool;
     pub fn CTFontGetAdvancesForGlyphs(
         font: CTFontRef,
         orientation: u32,
@@ -303,9 +349,20 @@ unsafe extern "C" {
         advances: *mut CGSize,
         count: isize,
     ) -> f64;
-    pub fn CTFontDrawGlyphs(font: CTFontRef, glyphs: *const u16, positions: *const CGPoint, count: usize, ctx: CGContextRef);
+    pub fn CTFontDrawGlyphs(
+        font: CTFontRef,
+        glyphs: *const u16,
+        positions: *const CGPoint,
+        count: usize,
+        ctx: CGContextRef,
+    );
     pub fn CTLineCreateWithAttributedString(string: CFTypeRef) -> CFTypeRef;
-    pub fn CTLineGetTypographicBounds(line: CFTypeRef, ascent: *mut f64, descent: *mut f64, leading: *mut f64) -> f64;
+    pub fn CTLineGetTypographicBounds(
+        line: CFTypeRef,
+        ascent: *mut f64,
+        descent: *mut f64,
+        leading: *mut f64,
+    ) -> f64;
     pub fn CTLineDraw(line: CFTypeRef, ctx: CGContextRef);
     pub fn CTLineGetGlyphRuns(line: CFTypeRef) -> CFTypeRef;
     pub fn CTRunGetGlyphCount(run: CFTypeRef) -> isize;
@@ -365,7 +422,12 @@ unsafe extern "C" {
 
 #[link(name = "ImageIO", kind = "framework")]
 unsafe extern "C" {
-    pub fn CGImageDestinationCreateWithURL(url: CFTypeRef, kind: CFStringRef, count: usize, options: CFTypeRef) -> CFTypeRef;
+    pub fn CGImageDestinationCreateWithURL(
+        url: CFTypeRef,
+        kind: CFStringRef,
+        count: usize,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
     pub fn CGImageDestinationAddImage(dest: CFTypeRef, image: CFTypeRef, properties: CFTypeRef);
     pub fn CGImageDestinationFinalize(dest: CFTypeRef) -> bool;
 }
@@ -373,14 +435,35 @@ unsafe extern "C" {
 // libdispatch lives in libSystem.
 unsafe extern "C" {
     static _dispatch_main_q: u8;
-    fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
-    fn dispatch_after_f(when: u64, queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn dispatch_async_f(
+        queue: *const c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+    fn dispatch_after_f(
+        when: u64,
+        queue: *const c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
     fn dispatch_time(when: u64, delta: i64) -> u64;
-    fn dispatch_sync_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn dispatch_sync_f(
+        queue: *const c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
     fn pthread_main_np() -> i32;
     static _dispatch_source_type_signal: u8;
-    fn dispatch_source_create(kind: *const c_void, handle: usize, mask: usize, queue: *const c_void) -> *mut c_void;
-    fn dispatch_source_set_event_handler_f(source: *mut c_void, handler: extern "C" fn(*mut c_void));
+    fn dispatch_source_create(
+        kind: *const c_void,
+        handle: usize,
+        mask: usize,
+        queue: *const c_void,
+    ) -> *mut c_void;
+    fn dispatch_source_set_event_handler_f(
+        source: *mut c_void,
+        handler: extern "C" fn(*mut c_void),
+    );
     fn dispatch_resume(object: *mut c_void);
     fn signal(signal: i32, handler: usize) -> usize;
 }
@@ -394,7 +477,12 @@ pub fn on_signal_run_on_main(signal_number: i32, work: extern "C" fn(*mut c_void
     unsafe {
         signal(signal_number, SIG_IGN);
         let kind = (&raw const _dispatch_source_type_signal).cast();
-        let source = dispatch_source_create(kind, signal_number as usize, 0, (&raw const _dispatch_main_q).cast());
+        let source = dispatch_source_create(
+            kind,
+            signal_number as usize,
+            0,
+            (&raw const _dispatch_main_q).cast(),
+        );
         if !source.is_null() {
             dispatch_source_set_event_handler_f(source, work);
             dispatch_resume(source);
@@ -416,7 +504,13 @@ pub fn run_on_main_sync<F: FnOnce() -> R + Send, R: Send>(work: F) -> R {
     }
     let mut slot = (Some(work), None);
     // SAFETY: dispatch_sync_f returns only after `trampoline` has run.
-    unsafe { dispatch_sync_f((&raw const _dispatch_main_q).cast(), (&raw mut slot).cast(), trampoline::<F, R>) };
+    unsafe {
+        dispatch_sync_f(
+            (&raw const _dispatch_main_q).cast(),
+            (&raw mut slot).cast(),
+            trampoline::<F, R>,
+        )
+    };
     slot.1.expect("main-thread work ran")
 }
 
@@ -429,7 +523,13 @@ pub fn run_on_main(work: extern "C" fn(*mut c_void)) {
 pub fn run_on_main_with(context: usize, work: extern "C" fn(*mut c_void)) {
     // SAFETY: the main queue is a static object that lives for the whole
     // process, and the context is only ever read back as an integer.
-    unsafe { dispatch_async_f((&raw const _dispatch_main_q).cast(), context as *mut c_void, work) }
+    unsafe {
+        dispatch_async_f(
+            (&raw const _dispatch_main_q).cast(),
+            context as *mut c_void,
+            work,
+        )
+    }
 }
 
 /// Like `run_on_main`, but no sooner than `delay` from now.
@@ -437,7 +537,12 @@ pub fn run_on_main_after(delay: std::time::Duration, work: extern "C" fn(*mut c_
     // SAFETY: as in `run_on_main_with`; `dispatch_time(DISPATCH_TIME_NOW, ns)`.
     unsafe {
         let when = dispatch_time(0, delay.as_nanos().min(i64::MAX as u128) as i64);
-        dispatch_after_f(when, (&raw const _dispatch_main_q).cast(), std::ptr::null_mut(), work)
+        dispatch_after_f(
+            when,
+            (&raw const _dispatch_main_q).cast(),
+            std::ptr::null_mut(),
+            work,
+        )
     }
 }
 
@@ -511,12 +616,20 @@ pub struct ObjcSuper {
 /// # Safety
 /// `obj` must be an instance of a subclass of `superclass`, which must
 /// respond to `sel` with signature `(args) -> CGRect`.
-pub unsafe fn send_super_rect<A: MessageArgs>(obj: Id, superclass: Id, sel_name: &CStr, args: A) -> CGRect {
+pub unsafe fn send_super_rect<A: MessageArgs>(
+    obj: Id,
+    superclass: Id,
+    sel_name: &CStr,
+    args: A,
+) -> CGRect {
     #[cfg(target_arch = "x86_64")]
     let imp = objc_msgSendSuper_stret as *const ();
     #[cfg(not(target_arch = "x86_64"))]
     let imp = objc_msgSendSuper as *const ();
-    let sup = ObjcSuper { receiver: obj, superclass };
+    let sup = ObjcSuper {
+        receiver: obj,
+        superclass,
+    };
     // The receiver argument is a pointer to `objc_super`.
     unsafe { args.invoke(imp, (&raw const sup).cast_mut().cast(), sel(sel_name)) }
 }
@@ -525,9 +638,23 @@ pub unsafe fn send_super_rect<A: MessageArgs>(obj: Id, superclass: Id, sel_name:
 ///
 /// # Safety
 /// As for `send_super_rect`, with signature `(args) -> R`.
-pub unsafe fn send_super<A: MessageArgs, R>(obj: Id, superclass: Id, sel_name: &CStr, args: A) -> R {
-    let sup = ObjcSuper { receiver: obj, superclass };
-    unsafe { args.invoke(objc_msgSendSuper as *const (), (&raw const sup).cast_mut().cast(), sel(sel_name)) }
+pub unsafe fn send_super<A: MessageArgs, R>(
+    obj: Id,
+    superclass: Id,
+    sel_name: &CStr,
+    args: A,
+) -> R {
+    let sup = ObjcSuper {
+        receiver: obj,
+        superclass,
+    };
+    unsafe {
+        args.invoke(
+            objc_msgSendSuper as *const (),
+            (&raw const sup).cast_mut().cast(),
+            sel(sel_name),
+        )
+    }
 }
 
 /// `send_rect` for a method taking `args`.
@@ -568,7 +695,13 @@ pub fn nsstring(s: &str) -> Id {
     // SAFETY: bytes/len describe a valid UTF-8 buffer; the result is +1 and
     // handed to the current autorelease pool.
     unsafe {
-        let cf = CFStringCreateWithBytes(ptr::null(), s.as_ptr(), s.len() as isize, kCFStringEncodingUTF8, false);
+        let cf = CFStringCreateWithBytes(
+            ptr::null(),
+            s.as_ptr(),
+            s.len() as isize,
+            kCFStringEncodingUTF8,
+            false,
+        );
         msg!(cf as Id, c"autorelease")
     }
 }
@@ -591,11 +724,23 @@ pub unsafe fn string_from_ns(s: Id) -> String {
 /// A `CFString` the caller must `CFRelease`.
 pub fn cfstring(s: &str) -> CFStringRef {
     // SAFETY: valid UTF-8 buffer.
-    unsafe { CFStringCreateWithBytes(ptr::null(), s.as_ptr(), s.len() as isize, kCFStringEncodingUTF8, false) }
+    unsafe {
+        CFStringCreateWithBytes(
+            ptr::null(),
+            s.as_ptr(),
+            s.len() as isize,
+            kCFStringEncodingUTF8,
+            false,
+        )
+    }
 }
 
 /// Registers a new Objective-C class with the given methods.
-pub unsafe fn register_class(name: &CStr, superclass: &CStr, methods: &[(&CStr, *const c_void, &CStr)]) -> Id {
+pub unsafe fn register_class(
+    name: &CStr,
+    superclass: &CStr,
+    methods: &[(&CStr, *const c_void, &CStr)],
+) -> Id {
     unsafe { register_class_with(name, superclass, &[], methods) }
 }
 

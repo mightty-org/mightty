@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use mightty_render::{Rgb, Theme, boxdraw};
-use mightty_term::{Color, Colors, Flags, Progress, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
+use mightty_term::{
+    Color, Colors, Flags, ImageData, PLACEHOLDER, PlaceholderRun, Placement, Progress, Row,
+    StyledCell, Term, Underline, char_width,
+};
 
 use crate::config::{Adjust, Colorspace, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
@@ -103,7 +106,13 @@ const IMAGE: u32 = 3;
 
 impl Quad {
     fn solid(x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) -> Self {
-        Self { pos: [x, y], size: [w, h], color, mode: SOLID, ..Default::default() }
+        Self {
+            pos: [x, y],
+            size: [w, h],
+            color,
+            mode: SOLID,
+            ..Default::default()
+        }
     }
 }
 
@@ -211,11 +220,22 @@ impl Snapshot {
                 break;
             }
             let i = row * self.cols + col;
-            let wide = if width == 2 { Flags::WIDE } else { Flags::empty() };
-            self.cells[i] = StyledCell { c, flags: Flags::UNDERLINE | wide, ..StyledCell::BLANK };
+            let wide = if width == 2 {
+                Flags::WIDE
+            } else {
+                Flags::empty()
+            };
+            self.cells[i] = StyledCell {
+                c,
+                flags: Flags::UNDERLINE | wide,
+                ..StyledCell::BLANK
+            };
             self.clusters.remove(&i);
             if width == 2 {
-                self.cells[i + 1] = StyledCell { flags: Flags::WIDE_SPACER, ..StyledCell::BLANK };
+                self.cells[i + 1] = StyledCell {
+                    flags: Flags::WIDE_SPACER,
+                    ..StyledCell::BLANK
+                };
                 self.clusters.remove(&(i + 1));
             }
             col += width;
@@ -229,7 +249,11 @@ impl Snapshot {
     pub fn capture(&mut self, term: &Term, scroll_offset: usize) {
         let history = term.scrollback();
         let lines = term.lines();
-        let offset = if term.is_alt_screen() { 0 } else { scroll_offset.min(history.len()) };
+        let offset = if term.is_alt_screen() {
+            0
+        } else {
+            scroll_offset.min(history.len())
+        };
         let (cols, rows) = (term.cols(), term.rows());
         self.cols = cols;
         self.rows = rows;
@@ -237,27 +261,42 @@ impl Snapshot {
         self.clusters.clear();
         for r in 0..rows {
             let index = history.len() - offset + r;
-            let row: &Row = if index < history.len() { &history[index] } else { &lines[index - history.len()] };
+            let row: &Row = if index < history.len() {
+                &history[index]
+            } else {
+                &lines[index - history.len()]
+            };
             let n = row.cells.len().min(cols);
             let start = self.cells.len();
-            self.cells.extend(row.cells[..n].iter().map(|&cell| term.resolve(cell)));
+            self.cells
+                .extend(row.cells[..n].iter().map(|&cell| term.resolve(cell)));
             for (i, &cell) in row.cells[..n].iter().enumerate() {
                 if let Some(text) = term.cell_text(cell) {
                     self.clusters.insert(start + i, text.into());
                 }
             }
-            self.cells.resize(self.cells.len() + cols - n, StyledCell::BLANK);
+            self.cells
+                .resize(self.cells.len() + cols - n, StyledCell::BLANK);
         }
         self.first_line = term.lines_scrolled() - offset as u64;
         let (cursor_row, cursor_col) = term.cursor();
         let visible = offset == 0 && term.modes().show_cursor;
         self.cursor = visible.then_some((cursor_row, cursor_col, term.modes().cursor_shape));
-        let (top, bottom) = (self.first_line as i64, (self.first_line + rows as u64) as i64);
+        let (top, bottom) = (
+            self.first_line as i64,
+            (self.first_line + rows as u64) as i64,
+        );
         self.images.clear();
         self.placeholders = term.placeholder_runs(self.first_line, rows);
         let floating = term.floating_placements(&self.placeholders);
         let shown = |p: &Placement| p.line + p.cells[1] as i64 > top && p.line < bottom;
-        self.images.extend(term.image_placements().iter().cloned().chain(floating).filter(shown));
+        self.images.extend(
+            term.image_placements()
+                .iter()
+                .cloned()
+                .chain(floating)
+                .filter(shown),
+        );
         self.colors = Some(term.colors());
         self.progress = term.progress();
     }
@@ -295,12 +334,16 @@ unsafe fn set_colorspace(layer: Id, space: Colorspace) {
 fn undercurl(period: u32, width: u32, height: u32, baseline: f32, thickness: f32) -> Vec<u8> {
     let below = height as f32 - baseline;
     let amplitude = ((below - thickness) / 2.0 - 0.5).clamp(1.0, 2.0 * thickness);
-    let centre = (baseline + thickness / 2.0 + amplitude).min(height as f32 - amplitude - thickness / 2.0);
+    let centre =
+        (baseline + thickness / 2.0 + amplitude).min(height as f32 - amplitude - thickness / 2.0);
     let k = std::f32::consts::TAU / period as f32;
     let mut mask = vec![0u8; (width * height) as usize];
     for px in 0..width {
         let x = px as f32 + 0.5;
-        let (curve, slope) = (centre - amplitude * (k * x).sin(), -amplitude * k * (k * x).cos());
+        let (curve, slope) = (
+            centre - amplitude * (k * x).sin(),
+            -amplitude * k * (k * x).cos(),
+        );
         // Distance to the curve across it, not straight down, so the
         // line keeps its thickness where it's steep.
         let stretch = (1.0 + slope * slope).sqrt();
@@ -322,8 +365,17 @@ fn placeholder_quad(run: &PlaceholderRun, cw: f32, ch: f32) -> Option<Quad> {
     let (bw, bh) = (run.cells[0] as f32 * cw, run.cells[1] as f32 * ch);
     let scale = (bw / sw).min(bh / sh);
     // The image within the box, and the run, in box pixels.
-    let (ix, iy, iw, ih) = ((bw - sw * scale) / 2.0, (bh - sh * scale) / 2.0, sw * scale, sh * scale);
-    let (rx, ry, rw) = (run.at[0] as f32 * cw, run.at[1] as f32 * ch, run.len as f32 * cw);
+    let (ix, iy, iw, ih) = (
+        (bw - sw * scale) / 2.0,
+        (bh - sh * scale) / 2.0,
+        sw * scale,
+        sh * scale,
+    );
+    let (rx, ry, rw) = (
+        run.at[0] as f32 * cw,
+        run.at[1] as f32 * ch,
+        run.len as f32 * cw,
+    );
     let (left, top) = (ix.max(rx), iy.max(ry));
     let (right, bottom) = ((ix + iw).min(rx + rw), (iy + ih).min(ry + ch));
     if right <= left || bottom <= top {
@@ -445,12 +497,28 @@ impl Renderer {
             set_colorspace(layer, config.colorspace);
             let snapshot = env::var_os("MIGHTTY_SNAPSHOT").map(PathBuf::from);
             // Snapshots read the drawable back, which framebuffer-only textures forbid.
-            call!(layer, c"setFramebufferOnly:", if snapshot.is_some() { NO } else { YES });
-            call!(layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
+            call!(
+                layer,
+                c"setFramebufferOnly:",
+                if snapshot.is_some() { NO } else { YES }
+            );
+            call!(
+                layer,
+                c"setOpaque:",
+                if config.look.background_opacity < 1.0 {
+                    NO
+                } else {
+                    YES
+                }
+            );
             // Each drawable is a full window image (~11 MiB at 120x40 on
             // Retina); frames are paced by the display, so two are enough.
             call!(layer, c"setMaximumDrawableCount:", 2usize);
-            call!(layer, c"setDisplaySyncEnabled:", if config.vsync { YES } else { NO });
+            call!(
+                layer,
+                c"setDisplaySyncEnabled:",
+                if config.vsync { YES } else { NO }
+            );
             // Keep content pinned during live resize instead of stretching it.
             call!(layer, c"setContentsGravity:", kCAGravityTopLeft);
 
@@ -459,10 +527,23 @@ impl Renderer {
                 queue: msg!(device, c"newCommandQueue"),
                 pipeline: create_pipeline(device),
                 layer,
-                atlas: Atlas { texture: create_atlas(device, ATLAS_MIN), size: ATLAS_MIN, x: 0, y: 0, row_height: 0 },
+                atlas: Atlas {
+                    texture: create_atlas(device, ATLAS_MIN),
+                    size: ATLAS_MIN,
+                    x: 0,
+                    y: 0,
+                    row_height: 0,
+                },
                 glyphs: HashMap::new(),
                 atlas_reset: false,
-                font: load_font(&config.fonts, config.font_size, config.font_backend, config.ligatures, config.look.cell_adjust, scale),
+                font: load_font(
+                    &config.fonts,
+                    config.font_size,
+                    config.font_backend,
+                    config.ligatures,
+                    config.look.cell_adjust,
+                    scale,
+                ),
                 ligatures: config.ligatures,
                 shaped: HashMap::new(),
                 backend: config.font_backend,
@@ -477,7 +558,11 @@ impl Renderer {
                 blink_off: false,
                 spare: Vec::new(),
                 front: Vec::new(),
-                vertices: [VertexBuffer { buffer: NIL, bytes: 0, commands: NIL }; VERTEX_BUFFERS],
+                vertices: [VertexBuffer {
+                    buffer: NIL,
+                    bytes: 0,
+                    commands: NIL,
+                }; VERTEX_BUFFERS],
                 next_vertices: 0,
                 focused: true,
                 snapshot,
@@ -498,7 +583,11 @@ impl Renderer {
     /// What goes behind a translucent pane: the background drawn (a
     /// program's, if it set one), at `background-opacity`, in its colour space.
     pub fn backing(&self) -> (Rgb, f64, Colorspace) {
-        (self.theme.background, self.look.background_opacity, self.colorspace)
+        (
+            self.theme.background,
+            self.look.background_opacity,
+            self.colorspace,
+        )
     }
 
     /// The `CAMetalLayer` drawn into.
@@ -519,12 +608,32 @@ impl Renderer {
         self.theme = config.theme.clone();
         // SAFETY: documented signatures; `layer` is a CAMetalLayer.
         unsafe {
-            call!(self.layer, c"setDisplaySyncEnabled:", if config.vsync { YES } else { NO });
-            call!(self.layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
+            call!(
+                self.layer,
+                c"setDisplaySyncEnabled:",
+                if config.vsync { YES } else { NO }
+            );
+            call!(
+                self.layer,
+                c"setOpaque:",
+                if config.look.background_opacity < 1.0 {
+                    NO
+                } else {
+                    YES
+                }
+            );
             set_colorspace(self.layer, config.colorspace);
         }
         self.colorspace = config.colorspace;
-        let font = |r: &Self| (r.fonts.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
+        let font = |r: &Self| {
+            (
+                r.fonts.clone(),
+                r.font_size,
+                r.backend,
+                r.ligatures,
+                r.look.cell_adjust,
+            )
+        };
         let before = (font(self), self.look.padding);
         self.config_fonts = config.fonts.clone();
         self.fonts = with_family(&self.config_fonts, self.family.as_deref());
@@ -551,7 +660,14 @@ impl Renderer {
     }
 
     fn reload_font(&mut self) {
-        self.font = load_font(&self.fonts, self.font_size, self.backend, self.ligatures, self.look.cell_adjust, self.scale);
+        self.font = load_font(
+            &self.fonts,
+            self.font_size,
+            self.backend,
+            self.ligatures,
+            self.look.cell_adjust,
+            self.scale,
+        );
         self.shaped.clear();
         self.reset_atlas();
     }
@@ -602,7 +718,17 @@ impl Renderer {
     pub fn prepare(&mut self, snapshot: &Snapshot, highlights: Highlights) -> Frame {
         if let Some(colors) = &snapshot.colors {
             let theme = &mut self.theme;
-            (theme.palette, theme.foreground, theme.background, theme.cursor) = (colors.palette, colors.foreground, colors.background, colors.cursor);
+            (
+                theme.palette,
+                theme.foreground,
+                theme.background,
+                theme.cursor,
+            ) = (
+                colors.palette,
+                colors.foreground,
+                colors.background,
+                colors.cursor,
+            );
         }
         let (mut quads, mut text) = self.build_quads(snapshot, highlights);
         // The atlas grew or was cleared mid-frame, dropping glyphs already placed.
@@ -616,7 +742,9 @@ impl Renderer {
         self.frames += 1;
         let mut frame = self.add_images(snapshot, quads, text);
         if let Some(bar) = snapshot.progress.map(|p| self.progress_bar(p)) {
-            frame.batches.push((frame.quads.len()..frame.quads.len() + 1, None));
+            frame
+                .batches
+                .push((frame.quads.len()..frame.quads.len() + 1, None));
             frame.quads.push(bar);
         }
         self.retire_images();
@@ -635,9 +763,18 @@ impl Renderer {
             Progress::Normal(p) => (p, palette(4)),
             Progress::Error(p) => (p, palette(1)),
             Progress::Paused(p) => (p, palette(3)),
-            Progress::Indeterminate => (100, { let [r, g, b, _] = palette(4); [r, g, b, 0.5] }),
+            Progress::Indeterminate => (100, {
+                let [r, g, b, _] = palette(4);
+                [r, g, b, 0.5]
+            }),
         };
-        Quad::solid(0.0, 0.0, size.width as f32 * f32::from(done) / 100.0, height, color)
+        Quad::solid(
+            0.0,
+            0.0,
+            size.width as f32 * f32::from(done) / 100.0,
+            height,
+            color,
+        )
     }
 
     /// Adds `snapshot`'s images to `quads`, whose text starts at `text`:
@@ -645,13 +782,18 @@ impl Renderer {
     /// backgrounds, and the rest over it, as in kitty.
     fn add_images(&mut self, snapshot: &Snapshot, mut quads: Vec<Quad>, text: usize) -> Frame {
         if snapshot.images.is_empty() && snapshot.placeholders.is_empty() {
-            return Frame { batches: vec![(0..quads.len(), None)], quads };
+            return Frame {
+                batches: vec![(0..quads.len(), None)],
+                quads,
+            };
         }
         let (cw, ch) = (self.font.cell_width as f32, self.font.cell_height as f32);
         let (pad_x, pad_y) = self.padding_px();
         let mut images: Vec<(i32, Quad, Id)> = Vec::new();
         for p in &snapshot.images {
-            let Some(texture) = self.image_texture(&p.image) else { continue };
+            let Some(texture) = self.image_texture(&p.image) else {
+                continue;
+            };
             let [sx, sy, sw, sh] = p.source.map(|v| v as f32);
             let ([c, r], [ox, oy]) = (p.size.map(|v| v as f32), p.offset.map(|v| v as f32));
             // Natural size, unless cells were asked for: then scaled to them,
@@ -663,12 +805,25 @@ impl Renderer {
                 (true, true) => [c * cw, r * ch],
             };
             let row = (p.line - snapshot.first_line as i64) as f32;
-            let pos = [pad_x as f32 + p.col as f32 * cw + ox, pad_y as f32 + row * ch + oy];
-            let quad = Quad { pos, size, uv: [sx, sy], uv_size: [sw, sh], color: [1.0; 4], mode: IMAGE, _pad: [0; 3] };
+            let pos = [
+                pad_x as f32 + p.col as f32 * cw + ox,
+                pad_y as f32 + row * ch + oy,
+            ];
+            let quad = Quad {
+                pos,
+                size,
+                uv: [sx, sy],
+                uv_size: [sw, sh],
+                color: [1.0; 4],
+                mode: IMAGE,
+                _pad: [0; 3],
+            };
             images.push((p.z, quad, texture));
         }
         for run in &snapshot.placeholders {
-            let Some(texture) = self.image_texture(&run.image) else { continue };
+            let Some(texture) = self.image_texture(&run.image) else {
+                continue;
+            };
             let row = (run.line - snapshot.first_line) as f32;
             if let Some(mut quad) = placeholder_quad(run, cw, ch) {
                 quad.pos[0] += pad_x as f32 + run.col as f32 * cw;
@@ -679,7 +834,10 @@ impl Renderer {
         // By z-index, then in the order sent.
         images.sort_by_key(|i| i.0);
         let below = images.partition_point(|i| i.0 < 0);
-        let mut frame = Frame { quads: Vec::with_capacity(quads.len() + images.len()), batches: Vec::new() };
+        let mut frame = Frame {
+            quads: Vec::with_capacity(quads.len() + images.len()),
+            batches: Vec::new(),
+        };
         frame.add(&quads[..text], None);
         for &(_, quad, texture) in &images[..below] {
             frame.add(&[quad], Some(texture));
@@ -717,7 +875,11 @@ impl Renderer {
             }
             let region = MTLRegion {
                 origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                size: MTLSize { width: image.width as usize, height: image.height as usize, depth: 1 },
+                size: MTLSize {
+                    width: image.width as usize,
+                    height: image.height as usize,
+                    depth: 1,
+                },
             };
             call!(
                 texture,
@@ -729,7 +891,13 @@ impl Renderer {
             );
             texture
         };
-        self.images.insert(image.serial, ImageTexture { texture, used: self.frames });
+        self.images.insert(
+            image.serial,
+            ImageTexture {
+                texture,
+                used: self.frames,
+            },
+        );
         Some(texture)
     }
 
@@ -748,7 +916,11 @@ impl Renderer {
 
     /// Draws `frame`; `presented` is called with the drawable once it's on
     /// screen (or dropped).
-    pub fn present(&mut self, Frame { mut quads, batches }: Frame, presented: Option<&'static Block>) {
+    pub fn present(
+        &mut self,
+        Frame { mut quads, batches }: Frame,
+        presented: Option<&'static Block>,
+    ) {
         // SAFETY: Metal calls with the documented signatures; objects created
         // with `new...` are released, the rest are autoreleased.
         unsafe {
@@ -758,21 +930,37 @@ impl Renderer {
                 return;
             }
             let pass: Id = msg!(class(c"MTLRenderPassDescriptor"), c"renderPassDescriptor");
-            let attachment: Id = msg!(msg!(pass, c"colorAttachments"), c"objectAtIndexedSubscript:", 0usize);
+            let attachment: Id = msg!(
+                msg!(pass, c"colorAttachments"),
+                c"objectAtIndexedSubscript:",
+                0usize
+            );
             // Translucent: the default background comes from the view behind,
             // at `background-opacity`, so the window shows through only once.
-            let [r, g, b, _] = if self.look.background_opacity < 1.0 { [0.0; 4] } else { rgba(self.theme.background) };
-            let alpha = if self.look.background_opacity < 1.0 { 0.0 } else { 1.0 };
+            let [r, g, b, _] = if self.look.background_opacity < 1.0 {
+                [0.0; 4]
+            } else {
+                rgba(self.theme.background)
+            };
+            let alpha = if self.look.background_opacity < 1.0 {
+                0.0
+            } else {
+                1.0
+            };
             let texture: Id = msg!(drawable, c"texture");
             call!(attachment, c"setTexture:", texture);
             call!(attachment, c"setLoadAction:", 2usize); // clear
             call!(attachment, c"setStoreAction:", 1usize); // store
-            call!(attachment, c"setClearColor:", MTLClearColor {
-                red: r as f64,
-                green: g as f64,
-                blue: b as f64,
-                alpha
-            });
+            call!(
+                attachment,
+                c"setClearColor:",
+                MTLClearColor {
+                    red: r as f64,
+                    green: g as f64,
+                    blue: b as f64,
+                    alpha
+                }
+            );
 
             let commands: Id = msg!(self.queue, c"commandBuffer");
             let encoder: Id = msg!(commands, c"renderCommandEncoderWithDescriptor:", pass);
@@ -782,14 +970,35 @@ impl Renderer {
                 let bytes = quads.len() * mem::size_of::<Quad>();
                 let buffer = self.vertex_buffer(slot, bytes);
                 let contents: *mut c_void = msg!(buffer, c"contents");
-                std::ptr::copy_nonoverlapping(quads.as_ptr() as *const u8, contents as *mut u8, bytes);
+                std::ptr::copy_nonoverlapping(
+                    quads.as_ptr() as *const u8,
+                    contents as *mut u8,
+                    bytes,
+                );
                 let viewport = [size.width as f32, size.height as f32];
                 call!(encoder, c"setRenderPipelineState:", self.pipeline);
-                call!(encoder, c"setVertexBuffer:offset:atIndex:", buffer, 0usize, 0usize);
-                call!(encoder, c"setVertexBytes:length:atIndex:", viewport.as_ptr() as *const c_void, 8usize, 1usize);
+                call!(
+                    encoder,
+                    c"setVertexBuffer:offset:atIndex:",
+                    buffer,
+                    0usize,
+                    0usize
+                );
+                call!(
+                    encoder,
+                    c"setVertexBytes:length:atIndex:",
+                    viewport.as_ptr() as *const c_void,
+                    8usize,
+                    1usize
+                );
                 // Triangle strip, 4 vertices per quad instance.
                 for (range, texture) in batches.into_iter().filter(|b| !b.0.is_empty()) {
-                    call!(encoder, c"setFragmentTexture:atIndex:", texture.unwrap_or(self.atlas.texture), 0usize);
+                    call!(
+                        encoder,
+                        c"setFragmentTexture:atIndex:",
+                        texture.unwrap_or(self.atlas.texture),
+                        0usize
+                    );
                     call!(
                         encoder,
                         c"drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:",
@@ -843,7 +1052,12 @@ impl Renderer {
                 }
                 vb.bytes = bytes.next_power_of_two();
                 // Shared storage: written by the CPU, read by the GPU.
-                vb.buffer = msg!(self.device, c"newBufferWithLength:options:", vb.bytes, 0usize);
+                vb.buffer = msg!(
+                    self.device,
+                    c"newBufferWithLength:options:",
+                    vb.bytes,
+                    0usize
+                );
             }
             vb.buffer
         }
@@ -851,7 +1065,13 @@ impl Renderer {
 
     /// The frame's quads, and where those drawn over cell backgrounds start.
     fn build_quads(&mut self, snapshot: &Snapshot, highlights: Highlights) -> (Vec<Quad>, usize) {
-        let Highlights { selection, block, matches, current, link } = highlights;
+        let Highlights {
+            selection,
+            block,
+            matches,
+            current,
+            link,
+        } = highlights;
         let within = |(start, end): Selection, at| start <= at && at <= end;
         let in_block = |((l0, c0), (l1, c1)): Selection, (line, col): (u64, usize)| {
             (l0.min(l1)..=l0.max(l1)).contains(&line) && (c0.min(c1)..=c0.max(c1)).contains(&col)
@@ -875,7 +1095,11 @@ impl Renderer {
         for r in 0..rows {
             let y = pad_y + r as f32 * ch;
             let line = snapshot.first_line + r as u64;
-            let ligatures = if self.font.shapes() { self.row_ligatures(snapshot, r, &mut ligature_cells) } else { Rc::from([]) };
+            let ligatures = if self.font.shapes() {
+                self.row_ligatures(snapshot, r, &mut ligature_cells)
+            } else {
+                Rc::from([])
+            };
 
             for c in 0..cols {
                 let cell = &snapshot.cells[r * cols + c];
@@ -890,11 +1114,21 @@ impl Renderer {
                     mem::swap(&mut fg, &mut bg);
                 }
                 let at = (line, c);
-                let selected = selection.is_some_and(|s| if block { in_block(s, at) } else { within(s, at) });
+                let selected = selection.is_some_and(|s| {
+                    if block {
+                        in_block(s, at)
+                    } else {
+                        within(s, at)
+                    }
+                });
                 while matches.get(next).is_some_and(|m| m.1 < at) {
                     next += 1;
                 }
-                let found = !selected && matches[next..].iter().take_while(|m| m.0 <= at).any(|&m| within(m, at));
+                let found = !selected
+                    && matches[next..]
+                        .iter()
+                        .take_while(|m| m.0 <= at)
+                        .any(|&m| within(m, at));
                 if selected {
                     bg = rgba(theme.selection_background);
                     if let Some(color) = theme.selection_foreground {
@@ -902,7 +1136,10 @@ impl Renderer {
                     }
                 } else if found {
                     if current.is_some_and(|m| within(m, at)) {
-                        (fg, bg) = (rgba(theme.search_selected_foreground), rgba(theme.search_selected_background));
+                        (fg, bg) = (
+                            rgba(theme.search_selected_foreground),
+                            rgba(theme.search_selected_background),
+                        );
                     } else {
                         (fg, bg) = (rgba(theme.search_foreground), rgba(theme.search_background));
                     }
@@ -925,9 +1162,17 @@ impl Renderer {
                             fg = theme.cursor_text.map_or(bg, rgba);
                         }
                         (true, CursorStyle::Underline) => {
-                            back.push(Quad::solid(x, y + ch - 2.0 * thickness, w, 2.0 * thickness, cursor));
+                            back.push(Quad::solid(
+                                x,
+                                y + ch - 2.0 * thickness,
+                                w,
+                                2.0 * thickness,
+                                cursor,
+                            ));
                         }
-                        (true, CursorStyle::Bar) => back.push(Quad::solid(x, y, 2.0 * thickness, ch, cursor)),
+                        (true, CursorStyle::Bar) => {
+                            back.push(Quad::solid(x, y, 2.0 * thickness, ch, cursor))
+                        }
                         (true, CursorStyle::BlockHollow) | (false, _) => {
                             // Hollow block when the window isn't focused.
                             front.push(Quad::solid(x, y, w, thickness, cursor));
@@ -953,7 +1198,11 @@ impl Renderer {
                     };
                     color[3] = fg[3];
                     let top = y + baseline + thickness;
-                    match if cell.flags.contains(Flags::UNDERLINE) { cell.underline } else { Underline::Single } {
+                    match if cell.flags.contains(Flags::UNDERLINE) {
+                        cell.underline
+                    } else {
+                        Underline::Single
+                    } {
                         Underline::Single => front.push(Quad::solid(x, top, w, thickness, color)),
                         Underline::Double => {
                             // Kept inside the cell, where the next row can't cover it.
@@ -968,11 +1217,29 @@ impl Renderer {
                                 dot += 2.0 * thickness;
                             }
                         }
-                        Underline::Dashed => front.push(Quad::solid(x + (w / 4.0).round(), top, (w / 2.0).round(), thickness, color)),
+                        Underline::Dashed => front.push(Quad::solid(
+                            x + (w / 4.0).round(),
+                            top,
+                            (w / 2.0).round(),
+                            thickness,
+                            color,
+                        )),
                         Underline::Curly => {
                             let cells = if wide { 2 } else { 1 };
-                            if let Some(g) = self.glyph(GlyphKey::Undercurl(cells), Style::default(), cells.into()) {
-                                front.push(Quad { pos: [x, y], size: g.size, uv: g.uv, uv_size: g.size, color, mode: MASK, _pad: [0; 3] });
+                            if let Some(g) = self.glyph(
+                                GlyphKey::Undercurl(cells),
+                                Style::default(),
+                                cells.into(),
+                            ) {
+                                front.push(Quad {
+                                    pos: [x, y],
+                                    size: g.size,
+                                    uv: g.uv,
+                                    uv_size: g.size,
+                                    color,
+                                    mode: MASK,
+                                    _pad: [0; 3],
+                                });
                             }
                         }
                     }
@@ -985,10 +1252,21 @@ impl Renderer {
                     Some(LigatureCell::Covered) => continue,
                     Some(LigatureCell::Start(n)) => {
                         let lig: &Ligature = &ligatures[n];
-                        let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
+                        let style = Style::new(
+                            cell.flags.contains(Flags::BOLD),
+                            cell.flags.contains(Flags::ITALIC),
+                        );
                         let key = GlyphKey::Ligature(lig.glyphs.clone(), lig.cells as u16);
                         if let Some(g) = self.glyph(key, style, lig.cells as u32) {
-                            front.push(Quad { pos: [x, y], size: g.size, uv: g.uv, uv_size: g.size, color: fg, mode: MASK, _pad: [0; 3] });
+                            front.push(Quad {
+                                pos: [x, y],
+                                size: g.size,
+                                uv: g.uv,
+                                uv_size: g.size,
+                                color: fg,
+                                mode: MASK,
+                                _pad: [0; 3],
+                            });
                         }
                         continue;
                     }
@@ -1003,11 +1281,18 @@ impl Renderer {
                 if blank {
                     continue;
                 }
-                let style = Style::new(cell.flags.contains(Flags::BOLD), cell.flags.contains(Flags::ITALIC));
+                let style = Style::new(
+                    cell.flags.contains(Flags::BOLD),
+                    cell.flags.contains(Flags::ITALIC),
+                );
                 // An icon followed by a space spreads over it, to be drawn larger.
                 let icon = !wide
                     && font::is_private_use(cell.c)
-                    && snapshot.cells.get(r * cols + c + 1).is_some_and(|next| c + 1 < cols && next.c == ' ' && next.flags.bits() & (Flags::WIDE | Flags::WIDE_SPACER).bits() == 0);
+                    && snapshot.cells.get(r * cols + c + 1).is_some_and(|next| {
+                        c + 1 < cols
+                            && next.c == ' '
+                            && next.flags.bits() & (Flags::WIDE | Flags::WIDE_SPACER).bits() == 0
+                    });
                 let key = match snapshot.clusters.get(&(r * cols + c)) {
                     Some(text) => GlyphKey::Cluster(text.clone()),
                     None if icon => GlyphKey::Icon(cell.c),
@@ -1036,7 +1321,12 @@ impl Renderer {
     /// shaped in runs of cells that look alike (style and colours), apart
     /// from the cursor's cell, wide characters, clusters and box drawing,
     /// so a ligature never spans what's drawn differently.
-    fn row_ligatures(&mut self, snapshot: &Snapshot, r: usize, cells: &mut Vec<Option<LigatureCell>>) -> Rc<[Ligature]> {
+    fn row_ligatures(
+        &mut self,
+        snapshot: &Snapshot,
+        r: usize,
+        cells: &mut Vec<Option<LigatureCell>>,
+    ) -> Rc<[Ligature]> {
         let cols = snapshot.cols;
         cells.clear();
         cells.resize(cols, None);
@@ -1074,7 +1364,10 @@ impl Renderer {
             if text.iter().filter(|&&ch| ch != ' ').count() < 2 {
                 continue;
             }
-            let style = Style::new(look.2 & Flags::BOLD.bits() != 0, look.2 & Flags::ITALIC.bits() != 0);
+            let style = Style::new(
+                look.2 & Flags::BOLD.bits() != 0,
+                look.2 & Flags::ITALIC.bits() != 0,
+            );
             let found = match self.shaped.get(&(text.clone(), style)) {
                 Some(found) => found.clone(),
                 None => {
@@ -1092,7 +1385,10 @@ impl Renderer {
                 for covered in &mut cells[first + 1..first + lig.cells] {
                     *covered = Some(LigatureCell::Covered);
                 }
-                all.push(Ligature { start: first, ..lig.clone() });
+                all.push(Ligature {
+                    start: first,
+                    ..lig.clone()
+                });
             }
         }
         all.into()
@@ -1116,7 +1412,12 @@ impl Renderer {
                 let (cw, ch) = self.cell_size();
                 let thickness = (self.scale as f32).round().max(1.0);
                 let mask = undercurl(cw, cw * cells, ch, self.font.baseline as f32, thickness);
-                let raster = RasterGlyph { pixels: mask.iter().flat_map(|&a| [a; 4]).collect(), width: cw * cells, height: ch, color: false };
+                let raster = RasterGlyph {
+                    pixels: mask.iter().flat_map(|&a| [a; 4]).collect(),
+                    width: cw * cells,
+                    height: ch,
+                    color: false,
+                };
                 let glyph = Some(self.upload(&raster)?);
                 self.glyphs.insert((key, style), glyph);
                 return glyph;
@@ -1179,8 +1480,16 @@ impl Renderer {
         }
         let (x, y) = (atlas.x, atlas.y);
         let region = MTLRegion {
-            origin: MTLOrigin { x: x as usize, y: y as usize, z: 0 },
-            size: MTLSize { width: raster.width as usize, height: raster.height as usize, depth: 1 },
+            origin: MTLOrigin {
+                x: x as usize,
+                y: y as usize,
+                z: 0,
+            },
+            size: MTLSize {
+                width: raster.width as usize,
+                height: raster.height as usize,
+                depth: 1,
+            },
         };
         // SAFETY: the region lies inside the texture and `pixels` holds width*height BGRA pixels.
         unsafe {
@@ -1213,24 +1522,50 @@ impl Renderer {
 /// A cell's size in pixels with `config`'s font at `scale`, before any
 /// window has one.
 pub fn cell_size_for(config: &Config, scale: f64) -> (u32, u32) {
-    let font = load_font(&config.fonts, config.font_size, config.font_backend, config.ligatures, config.look.cell_adjust, scale);
+    let font = load_font(
+        &config.fonts,
+        config.font_size,
+        config.font_backend,
+        config.ligatures,
+        config.look.cell_adjust,
+        scale,
+    );
     (font.cell_width, font.cell_height)
 }
 
 /// `fonts` at `points`, with its cells adjusted (`adjust-cell-width`,
 /// `adjust-cell-height`).
-fn load_font(fonts: &Fonts, points: f64, backend: FontBackend, ligatures: bool, (width, height): (Adjust, Adjust), scale: f64) -> Font {
+fn load_font(
+    fonts: &Fonts,
+    points: f64,
+    backend: FontBackend,
+    ligatures: bool,
+    (width, height): (Adjust, Adjust),
+    scale: f64,
+) -> Font {
     let mut font = Font::with(fonts, points * scale, backend, ligatures);
-    font.resize_cells(width.apply(font.cell_width, scale), height.apply(font.cell_height, scale));
+    font.resize_cells(
+        width.apply(font.cell_width, scale),
+        height.apply(font.cell_height, scale),
+    );
     font
 }
 
 unsafe fn create_pipeline(device: Id) -> Id {
     unsafe {
         let mut error = NIL;
-        let library: Id = msg!(device, c"newLibraryWithSource:options:error:", nsstring(SHADER), NIL, &mut error as *mut Id);
+        let library: Id = msg!(
+            device,
+            c"newLibraryWithSource:options:error:",
+            nsstring(SHADER),
+            NIL,
+            &mut error as *mut Id
+        );
         if library.is_null() {
-            panic!("shader compilation failed: {}", string_from_ns(msg!(error, c"localizedDescription")));
+            panic!(
+                "shader compilation failed: {}",
+                string_from_ns(msg!(error, c"localizedDescription"))
+            );
         }
         let vertex: Id = msg!(library, c"newFunctionWithName:", nsstring("vs"));
         let fragment: Id = msg!(library, c"newFunctionWithName:", nsstring("fs"));
@@ -1238,7 +1573,11 @@ unsafe fn create_pipeline(device: Id) -> Id {
         let desc = new_object(c"MTLRenderPipelineDescriptor");
         call!(desc, c"setVertexFunction:", vertex);
         call!(desc, c"setFragmentFunction:", fragment);
-        let attachment: Id = msg!(msg!(desc, c"colorAttachments"), c"objectAtIndexedSubscript:", 0usize);
+        let attachment: Id = msg!(
+            msg!(desc, c"colorAttachments"),
+            c"objectAtIndexedSubscript:",
+            0usize
+        );
         call!(attachment, c"setPixelFormat:", PIXEL_FORMAT_BGRA8);
         // Premultiplied alpha: src + dst * (1 - src.a).
         call!(attachment, c"setBlendingEnabled:", YES);
@@ -1247,9 +1586,17 @@ unsafe fn create_pipeline(device: Id) -> Id {
         call!(attachment, c"setSourceAlphaBlendFactor:", 1usize);
         call!(attachment, c"setDestinationAlphaBlendFactor:", 5usize);
 
-        let pipeline: Id = msg!(device, c"newRenderPipelineStateWithDescriptor:error:", desc, &mut error as *mut Id);
+        let pipeline: Id = msg!(
+            device,
+            c"newRenderPipelineStateWithDescriptor:error:",
+            desc,
+            &mut error as *mut Id
+        );
         if pipeline.is_null() {
-            panic!("pipeline creation failed: {}", string_from_ns(msg!(error, c"localizedDescription")));
+            panic!(
+                "pipeline creation failed: {}",
+                string_from_ns(msg!(error, c"localizedDescription"))
+            );
         }
         for object in [desc, vertex, fragment, library] {
             call!(object, c"release");
@@ -1313,12 +1660,43 @@ mod tests {
     #[test]
     fn placeholders_fit_their_image_in_the_box() {
         // A 4×2 image in a 2×2 box of 10×20 cells: 20×10 pixels, centred down.
-        let image = Arc::new(ImageData { serial: 0, width: 4, height: 2, pixels: vec![0; 32] });
-        let run = |row: u32| PlaceholderRun { image: image.clone(), line: 0, col: 0, len: 2, at: [0, row], cells: [2, 2], source: [0, 0, 4, 2], z: 0, owner: (1, 1) };
-        let parts: Vec<_> = (0..2).map(|r| placeholder_quad(&run(r), 10.0, 20.0).map(|q| (q.pos, q.size, q.uv, q.uv_size))).collect();
-        assert_eq!(parts, [Some(([0.0, 15.0], [20.0, 5.0], [0.0, 0.0], [4.0, 1.0])), Some(([0.0, 0.0], [20.0, 5.0], [0.0, 1.0], [4.0, 1.0]))]);
+        let image = Arc::new(ImageData {
+            serial: 0,
+            width: 4,
+            height: 2,
+            pixels: vec![0; 32],
+        });
+        let run = |row: u32| PlaceholderRun {
+            image: image.clone(),
+            line: 0,
+            col: 0,
+            len: 2,
+            at: [0, row],
+            cells: [2, 2],
+            source: [0, 0, 4, 2],
+            z: 0,
+            owner: (1, 1),
+        };
+        let parts: Vec<_> = (0..2)
+            .map(|r| {
+                placeholder_quad(&run(r), 10.0, 20.0).map(|q| (q.pos, q.size, q.uv, q.uv_size))
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                Some(([0.0, 15.0], [20.0, 5.0], [0.0, 0.0], [4.0, 1.0])),
+                Some(([0.0, 0.0], [20.0, 5.0], [0.0, 1.0], [4.0, 1.0]))
+            ]
+        );
         // A run in the margin beside a tall image shows nothing.
-        let tall = PlaceholderRun { at: [0, 0], len: 1, cells: [4, 1], source: [0, 0, 1, 2], ..run(0) };
+        let tall = PlaceholderRun {
+            at: [0, 0],
+            len: 1,
+            cells: [4, 1],
+            source: [0, 0, 1, 2],
+            ..run(0)
+        };
         assert!(placeholder_quad(&tall, 10.0, 20.0).is_none());
     }
 
@@ -1327,15 +1705,32 @@ mod tests {
         // The last has a pixel below the baseline: the wave rises over it.
         for (w, h, baseline, t) in [(9, 18, 14.0, 1.0), (18, 36, 28.0, 2.0), (10, 15, 14.0, 1.0)] {
             let mask = undercurl(w, w, h, baseline, t);
-            let ink = |x: u32| (0..h).map(|y| mask[(y * w + x) as usize] as u32).sum::<u32>();
+            let ink = |x: u32| {
+                (0..h)
+                    .map(|y| mask[(y * w + x) as usize] as u32)
+                    .sum::<u32>()
+            };
             assert!((0..w).all(|x| ink(x) > 0), "{w}x{h}");
             if h as f32 - baseline >= 4.0 * t {
-                assert!(mask[..(baseline as u32 * w) as usize].iter().all(|&a| a == 0), "{w}x{h}: ink above the baseline");
+                assert!(
+                    mask[..(baseline as u32 * w) as usize]
+                        .iter()
+                        .all(|&a| a == 0),
+                    "{w}x{h}: ink above the baseline"
+                );
             }
             // A wide cell's second half starts as the next cell would.
-            let column = |x: u32| (0..h).map(|y| mask[(y * w + x) as usize]).collect::<Vec<_>>();
+            let column = |x: u32| {
+                (0..h)
+                    .map(|y| mask[(y * w + x) as usize])
+                    .collect::<Vec<_>>()
+            };
             let doubled = undercurl(w, 2 * w, h, baseline, t);
-            let column2 = |x: u32| (0..h).map(|y| doubled[(y * 2 * w + x) as usize]).collect::<Vec<_>>();
+            let column2 = |x: u32| {
+                (0..h)
+                    .map(|y| doubled[(y * 2 * w + x) as usize])
+                    .collect::<Vec<_>>()
+            };
             assert_eq!(column(0), column2(w));
         }
     }

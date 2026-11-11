@@ -18,7 +18,10 @@ impl Face {
     /// `glyphs` placed: the glyphs and the width they take together.
     pub fn position(&self, glyphs: &[Shaped]) -> (Vec<Placed>, f32) {
         let b = self.bytes();
-        let mark_lookups: Vec<u16> = self.gpos_table().map(|gpos| crate::shape::lookups_of(b, gpos, &[*b"mark", *b"mkmk"])).unwrap_or_default();
+        let mark_lookups: Vec<u16> = self
+            .gpos_table()
+            .map(|gpos| crate::shape::lookups_of(b, gpos, &[*b"mark", *b"mkmk"]))
+            .unwrap_or_default();
         let mut placed: Vec<Placed> = Vec::with_capacity(glyphs.len());
         let mut pen = 0.0;
         // The last glyph that wasn't a mark, by index into `placed`.
@@ -31,14 +34,24 @@ impl Face {
                 let previous = placed.len() - 1;
                 // On the mark before it if the font says how, else on the base.
                 let anchored = (previous != bi)
-                    .then(|| self.attach(&mark_lookups, 6, g, placed[previous].glyph).map(|(dx, dy)| (placed[previous].x + dx, placed[previous].y + dy)))
+                    .then(|| {
+                        self.attach(&mark_lookups, 6, g, placed[previous].glyph)
+                            .map(|(dx, dy)| (placed[previous].x + dx, placed[previous].y + dy))
+                    })
                     .flatten()
-                    .or_else(|| self.attach(&mark_lookups, 4, g, placed[bi].glyph).map(|(dx, dy)| (placed[bi].x + dx, placed[bi].y + dy)));
+                    .or_else(|| {
+                        self.attach(&mark_lookups, 4, g, placed[bi].glyph)
+                            .map(|(dx, dy)| (placed[bi].x + dx, placed[bi].y + dy))
+                    });
                 let (x, y) = anchored.unwrap_or_else(|| self.centred(g, placed[bi]));
                 placed.push(Placed { glyph: g, x, y });
                 continue;
             }
-            placed.push(Placed { glyph: g, x: pen, y: 0.0 });
+            placed.push(Placed {
+                glyph: g,
+                x: pen,
+                y: 0.0,
+            });
             pen += self.advance(g);
             base = Some(placed.len() - 1);
         }
@@ -48,7 +61,11 @@ impl Face {
     /// A mark by its GDEF class, or, without one, one that doesn't advance.
     fn is_mark(&self, glyph: u16) -> bool {
         let b = self.bytes();
-        match self.gdef_table().and_then(|gdef| b.u16(gdef + 4).filter(|&o| o != 0).map(|o| gdef + o as usize)) {
+        match self.gdef_table().and_then(|gdef| {
+            b.u16(gdef + 4)
+                .filter(|&o| o != 0)
+                .map(|o| gdef + o as usize)
+        }) {
             Some(classes) => class_of(b, classes, glyph) == 3,
             None => self.advance(glyph) == 0.0,
         }
@@ -80,7 +97,9 @@ impl Face {
     /// Without anchors: `mark` centred over `base`'s outline, at the height
     /// it was drawn for.
     fn centred(&self, mark: u16, base: Placed) -> (f32, f32) {
-        let (Some(m), Some(bb)) = (self.bounds(mark), self.bounds(base.glyph)) else { return (base.x, base.y) };
+        let (Some(m), Some(bb)) = (self.bounds(mark), self.bounds(base.glyph)) else {
+            return (base.x, base.y);
+        };
         let centre = |(lo, hi): (Point, Point)| (lo.x + hi.x) / 2.0;
         (base.x + centre(bb) - centre(m), base.y)
     }
@@ -95,7 +114,18 @@ impl Face {
             Segment::Close => vec![],
         });
         let first = points.next()?;
-        Some(points.fold((first, first), |(lo, hi), p| (Point { x: lo.x.min(p.x), y: lo.y.min(p.y) }, Point { x: hi.x.max(p.x), y: hi.y.max(p.y) })))
+        Some(points.fold((first, first), |(lo, hi), p| {
+            (
+                Point {
+                    x: lo.x.min(p.x),
+                    y: lo.y.min(p.y),
+                },
+                Point {
+                    x: hi.x.max(p.x),
+                    y: hi.y.max(p.y),
+                },
+            )
+        }))
     }
 }
 

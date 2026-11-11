@@ -62,7 +62,14 @@ mod map {
     const MAP_PRIVATE: i32 = 2;
 
     unsafe extern "C" {
-        fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut c_void;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut c_void;
         fn munmap(addr: *mut c_void, len: usize) -> i32;
     }
 
@@ -78,13 +85,23 @@ mod map {
     impl Mapped {
         /// `None` for an empty file, which can't be mapped.
         pub(super) fn new(file: &File) -> io::Result<Option<Mapped>> {
-            let len = usize::try_from(file.metadata()?.len()).map_err(|_| io::Error::other("file too large"))?;
+            let len = usize::try_from(file.metadata()?.len())
+                .map_err(|_| io::Error::other("file too large"))?;
             if len == 0 {
                 return Ok(None);
             }
             // SAFETY: a fresh read-only private mapping of an open file; the
             // descriptor may close after, the mapping stays valid.
-            let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, file.as_raw_fd(), 0) };
+            let ptr = unsafe {
+                mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    PROT_READ,
+                    MAP_PRIVATE,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
             if ptr as isize == -1 {
                 return Err(io::Error::last_os_error());
             }

@@ -14,14 +14,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_char, c_int, c_void};
-use std::os::fd::FromRawFd;
-use std::{fs, mem};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use std::{fs, mem};
 
 use crate::cell::{Color, Flags};
 use crate::{Term, base64};
@@ -98,7 +98,15 @@ struct Animation {
 
 impl Image {
     fn new(id: u32, number: u32, data: ImageData) -> Self {
-        Self { id, number, frames: vec![Frame { data: Arc::new(data), gap: DEFAULT_GAP }], animation: Animation::default() }
+        Self {
+            id,
+            number,
+            frames: vec![Frame {
+                data: Arc::new(data),
+                gap: DEFAULT_GAP,
+            }],
+            animation: Animation::default(),
+        }
     }
 
     fn shown(&self) -> &Arc<ImageData> {
@@ -175,7 +183,8 @@ impl Placement {
     }
 
     fn covers(&self, line: i64, col: usize) -> bool {
-        (self.line..self.line + self.cells[1] as i64).contains(&line) && (self.col..self.col + self.cells[0] as usize).contains(&col)
+        (self.line..self.line + self.cells[1] as i64).contains(&line)
+            && (self.col..self.col + self.cells[0] as usize).contains(&col)
     }
 }
 
@@ -229,7 +238,11 @@ impl Loading {
                 None => return Err("EINVAL:bad base64"),
             }
         }
-        if self.too_big { Err("EFBIG:image data too large or damaged") } else { Ok((self.command, self.data)) }
+        if self.too_big {
+            Err("EFBIG:image data too large or damaged")
+        } else {
+            Ok((self.command, self.data))
+        }
     }
 }
 
@@ -301,7 +314,9 @@ impl Command {
     fn parse(control: &[u8]) -> Option<Command> {
         let mut c = Command::default();
         for pair in control.split(|&b| b == b',').filter(|p| !p.is_empty()) {
-            let [key, b'=', value @ ..] = pair else { return None };
+            let [key, b'=', value @ ..] = pair else {
+                return None;
+            };
             let number = || -> Option<u32> { std::str::from_utf8(value).ok()?.parse().ok() };
             let letter = || -> Option<u8> { (value.len() == 1).then(|| value[0]) };
             let signed = || -> Option<i32> { std::str::from_utf8(value).ok()?.parse().ok() };
@@ -376,7 +391,9 @@ impl Graphics {
             placed.insert(keep);
             while over(self) && self.images.len() > 1 {
                 let unplaced = self.images.iter().position(|i| !placed.contains(&i.id));
-                let at = unplaced.or_else(|| self.images.iter().position(|i| i.id != keep)).unwrap_or(0);
+                let at = unplaced
+                    .or_else(|| self.images.iter().position(|i| i.id != keep))
+                    .unwrap_or(0);
                 let id = self.images[at].id;
                 placed.remove(&id);
                 self.remove_image(id);
@@ -401,22 +418,38 @@ impl Graphics {
     }
 
     fn all_placements(&self) -> impl Iterator<Item = &Placement> {
-        self.placements.iter().chain(&self.virtuals).chain(&self.floating)
+        self.placements
+            .iter()
+            .chain(&self.virtuals)
+            .chain(&self.floating)
     }
 
     /// The placement `[image, placement]` names (any of the image's when 0),
     /// for `child` to be placed relative to: its ids, unless that would make
     /// a loop or a chain too long.
-    fn parent_for(&self, [image, placement]: [u32; 2], child: (u32, u32)) -> Result<(u32, u32), &'static str> {
-        let found = self.all_placements().find(|p| p.image_id == image && (placement == 0 || p.id == placement));
-        let Some(mut p) = found else { return Err("ENOPARENT:no such parent placement") };
+    fn parent_for(
+        &self,
+        [image, placement]: [u32; 2],
+        child: (u32, u32),
+    ) -> Result<(u32, u32), &'static str> {
+        let found = self
+            .all_placements()
+            .find(|p| p.image_id == image && (placement == 0 || p.id == placement));
+        let Some(mut p) = found else {
+            return Err("ENOPARENT:no such parent placement");
+        };
         let parent = p.key();
         for _ in 0..MAX_DEPTH {
             if p.key() == child {
                 return Err("ECYCLE:the placement would be its own parent");
             }
             // An orphan goes when placements settle, and its children with it.
-            let Some(up) = p.parent.and_then(|up| self.all_placements().find(|q| q.key() == up)) else { return Ok(parent) };
+            let Some(up) = p
+                .parent
+                .and_then(|up| self.all_placements().find(|q| q.key() == up))
+            else {
+                return Ok(parent);
+            };
             p = up;
         }
         Err("ETOODEEP:too many parents")
@@ -430,14 +463,21 @@ impl Graphics {
         if self.floating.is_empty() && !self.placements.iter().any(|p| p.parent.is_some()) {
             return;
         }
-        let (mut pending, grid): (Vec<_>, Vec<_>) = mem::take(&mut self.placements).into_iter().partition(|p| p.parent.is_some());
+        let (mut pending, grid): (Vec<_>, Vec<_>) = mem::take(&mut self.placements)
+            .into_iter()
+            .partition(|p| p.parent.is_some());
         self.placements = grid;
         pending.append(&mut self.floating);
         // Where each placement settled: its top-left on the grid, or none
         // when floating. One level of the chains settles a round, so those
         // deeper than MAX_DEPTH (after a parent was placed again) go too.
-        let mut settled: HashMap<(u32, u32), Option<(i64, usize)>> = self.virtuals.iter().map(|p| (p.key(), None)).collect();
-        settled.extend(self.placements.iter().map(|p| (p.key(), Some((p.line, p.col)))));
+        let mut settled: HashMap<(u32, u32), Option<(i64, usize)>> =
+            self.virtuals.iter().map(|p| (p.key(), None)).collect();
+        settled.extend(
+            self.placements
+                .iter()
+                .map(|p| (p.key(), Some((p.line, p.col)))),
+        );
         for _ in 0..MAX_DEPTH {
             let before = pending.len();
             let mut level = Vec::new();
@@ -453,7 +493,11 @@ impl Graphics {
             }
             for (p, grid) in level {
                 settled.insert(p.key(), grid.then_some((p.line, p.col)));
-                if grid { self.placements.push(p) } else { self.floating.push(p) }
+                if grid {
+                    self.placements.push(p)
+                } else {
+                    self.floating.push(p)
+                }
             }
             if pending.len() == before {
                 break;
@@ -471,7 +515,11 @@ impl Graphics {
     /// Counting down from the top, clear of the small ids clients pick.
     fn fresh_id(&mut self) -> u32 {
         loop {
-            self.next_id = if self.next_id <= 1 { u32::MAX } else { self.next_id - 1 };
+            self.next_id = if self.next_id <= 1 {
+                u32::MAX
+            } else {
+                self.next_id - 1
+            };
             if self.image(self.next_id).is_none() {
                 return self.next_id;
             }
@@ -480,8 +528,16 @@ impl Graphics {
 
     /// Placements of image `id` show its current frame.
     fn show_frame(&mut self, id: u32) {
-        let Some(data) = self.image(id).map(|i| i.shown().clone()) else { return };
-        for p in self.placements.iter_mut().chain(&mut self.virtuals).chain(&mut self.floating).filter(|p| p.image_id == id) {
+        let Some(data) = self.image(id).map(|i| i.shown().clone()) else {
+            return;
+        };
+        for p in self
+            .placements
+            .iter_mut()
+            .chain(&mut self.virtuals)
+            .chain(&mut self.floating)
+            .filter(|p| p.image_id == id)
+        {
             p.image = data.clone();
         }
     }
@@ -495,7 +551,9 @@ impl Graphics {
             if image.animation.playing == Playing::Stopped {
                 continue;
             }
-            let gap = |image: &Image| Duration::from_millis(image.frames[image.animation.current].gap.max(0) as u64);
+            let gap = |image: &Image| {
+                Duration::from_millis(image.frames[image.animation.current].gap.max(0) as u64)
+            };
             let due = match image.animation.due {
                 Some(due) if due <= now => {
                     if !image.step() {
@@ -511,7 +569,11 @@ impl Graphics {
                 }
                 Some(due) => due,
                 // Waiting at the last frame for more (`s=2`).
-                None if image.animation.playing == Playing::Loading && image.animation.current + 1 == image.frames.len() => continue,
+                None if image.animation.playing == Playing::Loading
+                    && image.animation.current + 1 == image.frames.len() =>
+                {
+                    continue;
+                }
                 None if image.frames.len() > 1 => now + gap(image),
                 None => continue,
             };
@@ -528,10 +590,23 @@ impl Graphics {
     /// over frame `c=` or the `Y=` colour, as a new frame or replacing frame
     /// `r=`; `z=` its gap.
     fn add_frame(&mut self, c: &Command, id: u32, frame: ImageData) -> Result<(), &'static str> {
-        let (base, edit, replace, background) = (c.cols as usize, c.rows as usize, c.offset[0] == 1, c.offset[1]);
-        let image = self.images.iter_mut().find(|i| i.id == id).expect("found by the caller");
+        let (base, edit, replace, background) = (
+            c.cols as usize,
+            c.rows as usize,
+            c.offset[0] == 1,
+            c.offset[1],
+        );
+        let image = self
+            .images
+            .iter_mut()
+            .find(|i| i.id == id)
+            .expect("found by the caller");
         let (width, height) = (image.frames[0].data.width, image.frames[0].data.height);
-        let frame_of = |n: usize| n.checked_sub(1).and_then(|i| image.frames.get(i)).ok_or("ENOENT:no such frame");
+        let frame_of = |n: usize| {
+            n.checked_sub(1)
+                .and_then(|i| image.frames.get(i))
+                .ok_or("ENOENT:no such frame")
+        };
         let mut canvas = if edit != 0 {
             frame_of(edit)?.data.pixels.clone()
         } else if base != 0 {
@@ -541,12 +616,28 @@ impl Graphics {
             let pre = |v: u8| ((v as u32 * a as u32 + 127) / 255) as u8;
             [pre(r), pre(g), pre(b), a].repeat(width as usize * height as usize)
         };
-        if edit == 0 && (image.frames.len() >= MAX_FRAMES || image.bytes() + canvas.len() > MAX_STORED) {
+        if edit == 0
+            && (image.frames.len() >= MAX_FRAMES || image.bytes() + canvas.len() > MAX_STORED)
+        {
             return Err("ENOSPC:too many frames");
         }
         let at = [c.source[0], c.source[1]];
-        blit(&mut canvas, width, &frame.pixels, frame.width, [0, 0, frame.width, frame.height], at, replace, height);
-        let data = Arc::new(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels: canvas });
+        blit(
+            &mut canvas,
+            width,
+            &frame.pixels,
+            frame.width,
+            [0, 0, frame.width, frame.height],
+            at,
+            replace,
+            height,
+        );
+        let data = Arc::new(ImageData {
+            serial: SERIAL.fetch_add(1, Ordering::Relaxed),
+            width,
+            height,
+            pixels: canvas,
+        });
         if edit != 0 {
             let frame = &mut image.frames[edit - 1];
             frame.data = data;
@@ -555,7 +646,10 @@ impl Graphics {
             }
         } else {
             self.stored += data.pixels.len();
-            image.frames.push(Frame { data, gap: if c.z != 0 { c.z } else { DEFAULT_GAP } });
+            image.frames.push(Frame {
+                data,
+                gap: if c.z != 0 { c.z } else { DEFAULT_GAP },
+            });
         }
         let current = image.animation.current;
         self.make_room(id);
@@ -569,7 +663,11 @@ impl Graphics {
     /// how often; `c=` the frame shown; `r=` and `z=` a frame's gap.
     fn control(&mut self, c: &Command, id: u32) -> Result<(), &'static str> {
         let (state, plays, current, frame) = (c.width, c.height, c.cols as usize, c.rows as usize);
-        let image = self.images.iter_mut().find(|i| i.id == id).expect("found by the caller");
+        let image = self
+            .images
+            .iter_mut()
+            .find(|i| i.id == id)
+            .expect("found by the caller");
         let count = image.frames.len();
         if (frame != 0 && frame > count) || current > count {
             return Err("ENOENT:no such frame");
@@ -581,7 +679,11 @@ impl Graphics {
         match state {
             1 => (a.playing, a.played, a.due) = (Playing::Stopped, 0, None),
             2 | 3 => {
-                let playing = if state == 2 { Playing::Loading } else { Playing::Running };
+                let playing = if state == 2 {
+                    Playing::Loading
+                } else {
+                    Playing::Running
+                };
                 if a.playing == Playing::Stopped {
                     a.due = None;
                 }
@@ -605,15 +707,28 @@ impl Graphics {
     /// in frame `c=`, blended or (`C=1`) replacing.
     fn compose(&mut self, c: &Command, id: u32) -> Result<(), &'static str> {
         let (from, to, replace) = (c.rows as usize, c.cols as usize, c.cursor_stays);
-        let image = self.images.iter_mut().find(|i| i.id == id).expect("found by the caller");
+        let image = self
+            .images
+            .iter_mut()
+            .find(|i| i.id == id)
+            .expect("found by the caller");
         let (width, height) = (image.frames[0].data.width, image.frames[0].data.height);
-        let (Some(source), Some(_)) = (from.checked_sub(1).and_then(|i| image.frames.get(i)), to.checked_sub(1).and_then(|i| image.frames.get(i))) else {
+        let (Some(source), Some(_)) = (
+            from.checked_sub(1).and_then(|i| image.frames.get(i)),
+            to.checked_sub(1).and_then(|i| image.frames.get(i)),
+        ) else {
             return Err("ENOENT:no such frame");
         };
         let [dx, dy, w, h] = c.source;
-        let (w, h) = (if w == 0 { width } else { w }, if h == 0 { height } else { h });
+        let (w, h) = (
+            if w == 0 { width } else { w },
+            if h == 0 { height } else { h },
+        );
         let [sx, sy] = c.offset;
-        let fits = |x: u32, y: u32| x.checked_add(w).is_some_and(|r| r <= width) && y.checked_add(h).is_some_and(|b| b <= height);
+        let fits = |x: u32, y: u32| {
+            x.checked_add(w).is_some_and(|r| r <= width)
+                && y.checked_add(h).is_some_and(|b| b <= height)
+        };
         if !fits(sx, sy) || !fits(dx, dy) {
             return Err("EINVAL:rectangle out of bounds");
         }
@@ -623,8 +738,22 @@ impl Graphics {
         let source = source.data.clone();
         let target = &mut image.frames[to - 1];
         let mut pixels = target.data.pixels.clone();
-        blit(&mut pixels, width, &source.pixels, width, [sx, sy, w, h], [dx, dy], replace, height);
-        target.data = Arc::new(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels });
+        blit(
+            &mut pixels,
+            width,
+            &source.pixels,
+            width,
+            [sx, sy, w, h],
+            [dx, dy],
+            replace,
+            height,
+        );
+        target.data = Arc::new(ImageData {
+            serial: SERIAL.fetch_add(1, Ordering::Relaxed),
+            width,
+            height,
+            pixels,
+        });
         if image.animation.current + 1 == to {
             self.show_frame(id);
         }
@@ -634,7 +763,10 @@ impl Graphics {
     /// Moves placements anchored in screen rows `top..=bottom` by `delta`
     /// rows, as the text there scrolls; those that leave the region go.
     pub(crate) fn scroll(&mut self, lines_scrolled: u64, top: usize, bottom: usize, delta: i64) {
-        let (top, bottom) = (lines_scrolled as i64 + top as i64, lines_scrolled as i64 + bottom as i64);
+        let (top, bottom) = (
+            lines_scrolled as i64 + top as i64,
+            lines_scrolled as i64 + bottom as i64,
+        );
         // Relative placements follow their parents.
         self.placements.retain_mut(|p| {
             if p.parent.is_some() || !(top..=bottom).contains(&p.line) {
@@ -648,14 +780,16 @@ impl Graphics {
 
     /// Drops placements wholly above `line`: history that's gone.
     pub(crate) fn forget_above(&mut self, line: u64) {
-        self.placements.retain(|p| p.parent.is_some() || p.line + p.cells[1] as i64 > line as i64);
+        self.placements
+            .retain(|p| p.parent.is_some() || p.line + p.cells[1] as i64 > line as i64);
         self.settle();
     }
 
     /// Drops placements that touch lines `from..to`.
     pub(crate) fn clear_lines(&mut self, from: u64, to: u64) {
         let (from, to) = (from as i64, to as i64);
-        self.placements.retain(|p| p.line + p.cells[1] as i64 <= from || p.line >= to);
+        self.placements
+            .retain(|p| p.line + p.cells[1] as i64 <= from || p.line >= to);
         self.settle();
     }
 }
@@ -698,7 +832,14 @@ fn read_shm(c: &Command, name: &[u8]) -> Option<Vec<u8>> {
     unsafe extern "C" {
         fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
         fn shm_unlink(name: *const c_char) -> c_int;
-        fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) -> *mut c_void;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
         fn munmap(addr: *mut c_void, len: usize) -> c_int;
     }
     const PROT_READ: c_int = 1;
@@ -736,7 +877,9 @@ fn read_shm(c: &Command, name: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     // SAFETY: the mapping is `len` readable bytes until unmapped below.
-    let data = unsafe { std::slice::from_raw_parts(map as *const u8, len) }[c.read_offset as usize..].to_vec();
+    let data = unsafe { std::slice::from_raw_parts(map as *const u8, len) }
+        [c.read_offset as usize..]
+        .to_vec();
     // SAFETY: `map` and `len` are the mapping just made; `name` is
     // NUL-terminated. Unlinked only once read: a request refused leaves it.
     unsafe {
@@ -765,7 +908,11 @@ const FILE_ERROR: &str = "EBADF:can't read an image from the file";
 /// directory resolved, so `..` and symlinked directories can't lead out.
 /// Output can come from other machines (ssh), so this guards the deletion.
 fn temp_file(path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
         return None;
     }
     let name = path.file_name()?;
@@ -773,8 +920,18 @@ fn temp_file(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let dir = fs::canonicalize(path.parent()?).ok()?;
-    let temp_dirs = [std::env::temp_dir(), "/tmp".into(), "/var/tmp".into(), "/var/folders".into(), "/dev/shm".into()];
-    temp_dirs.iter().filter_map(|t| fs::canonicalize(t).ok()).any(|t| dir.starts_with(t)).then(|| dir.join(name))
+    let temp_dirs = [
+        std::env::temp_dir(),
+        "/tmp".into(),
+        "/var/tmp".into(),
+        "/var/folders".into(),
+        "/dev/shm".into(),
+    ];
+    temp_dirs
+        .iter()
+        .filter_map(|t| fs::canonicalize(t).ok())
+        .any(|t| dir.starts_with(t))
+        .then(|| dir.join(name))
 }
 
 /// Reads what `t=f` or `t=t` names. Only regular files, opened without
@@ -795,7 +952,10 @@ fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
     } else {
         // Resolved first, so a symlink can't lead into them.
         let path = fs::canonicalize(&path).ok()?;
-        if ["/proc", "/sys", "/dev"].iter().any(|dir| path.starts_with(dir)) {
+        if ["/proc", "/sys", "/dev"]
+            .iter()
+            .any(|dir| path.starts_with(dir))
+        {
             return None;
         }
         options.custom_flags(O_NONBLOCK);
@@ -809,7 +969,11 @@ fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     file.seek(SeekFrom::Start(c.read_offset)).ok()?;
-    let size = if c.read_size > 0 { c.read_size } else { meta.len().saturating_sub(c.read_offset) };
+    let size = if c.read_size > 0 {
+        c.read_size
+    } else {
+        meta.len().saturating_sub(c.read_offset)
+    };
     if size > MAX_TRANSMIT as u64 {
         return None;
     }
@@ -843,7 +1007,11 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
         return Err("EFBIG:image too large");
     }
     if c.compressed {
-        let limit = if raw { c.width as usize * c.height as usize * (c.format / 8) as usize } else { MAX_TRANSMIT };
+        let limit = if raw {
+            c.width as usize * c.height as usize * (c.format / 8) as usize
+        } else {
+            MAX_TRANSMIT
+        };
         data = mightty_image::inflate::zlib(&data, limit).ok_or("EINVAL:bad zlib data")?;
     }
     let (width, height, pixels) = match c.format {
@@ -866,19 +1034,34 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
             if png_size(&data).is_none_or(|(w, h)| w as usize * h as usize * 4 > MAX_STORED) {
                 return Err("EBADPNG:can't decode the PNG");
             }
-            let image = mightty_image::png::decode_limited(&data, MAX_SIDE).ok_or("EBADPNG:can't decode the PNG")?;
+            let image = mightty_image::png::decode_limited(&data, MAX_SIDE)
+                .ok_or("EBADPNG:can't decode the PNG")?;
             (image.width, image.height, image.pixels)
         }
         _ => return Err("EINVAL:unknown format"),
     };
-    Ok(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels })
+    Ok(ImageData {
+        serial: SERIAL.fetch_add(1, Ordering::Relaxed),
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// Draws the `[x, y, w, h]` part of `src` (`src_width` wide) onto `dst`
 /// (`width` × `height`) at `at`, clipped to it: over it by alpha, or in
 /// place of it. Both are premultiplied RGBA.
 #[allow(clippy::too_many_arguments)]
-fn blit(dst: &mut [u8], width: u32, src: &[u8], src_width: u32, [x, y, w, h]: [u32; 4], [dx, dy]: [u32; 2], replace: bool, height: u32) {
+fn blit(
+    dst: &mut [u8],
+    width: u32,
+    src: &[u8],
+    src_width: u32,
+    [x, y, w, h]: [u32; 4],
+    [dx, dy]: [u32; 2],
+    replace: bool,
+    height: u32,
+) {
     let w = w.min(width.saturating_sub(dx)) as usize;
     let h = h.min(height.saturating_sub(dy)) as usize;
     if w == 0 {
@@ -934,8 +1117,8 @@ static DIACRITICS: [u32; 297] = [
     0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1,
     0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED,
     0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1,
-    0xFE20, 0xFE21, 0xFE22, 0xFE23, 0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
-    0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
+    0xFE20, 0xFE21, 0xFE22, 0xFE23, 0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186,
+    0x1D187, 0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
 ];
 
 fn diacritic(c: char) -> Option<u32> {
@@ -999,12 +1182,21 @@ impl Term {
                 // Left out, each continues the cell before: same row, next column.
                 let follows = before.filter(|b| b.0 == colors);
                 let mut marks = chars.map(diacritic);
-                let (r, c, top) = (marks.next().flatten(), marks.next().flatten(), marks.next().flatten());
+                let (r, c, top) = (
+                    marks.next().flatten(),
+                    marks.next().flatten(),
+                    marks.next().flatten(),
+                );
                 let r = r.or(follows.map(|b| b.2)).unwrap_or(0);
-                let c = c.or(follows.filter(|b| b.2 == r).map(|b| b.3 + 1)).unwrap_or(0);
+                let c = c
+                    .or(follows.filter(|b| b.2 == r).map(|b| b.3 + 1))
+                    .unwrap_or(0);
                 let id = top.map_or(follows.map_or(id, |b| b.1), |top| id | top << 24);
                 before = Some((colors, id, r, c));
-                let found = graphics.virtuals.iter().find(|p| p.image_id == id && (placement == 0 || p.id == placement));
+                let found = graphics
+                    .virtuals
+                    .iter()
+                    .find(|p| p.image_id == id && (placement == 0 || p.id == placement));
                 let Some(p) = found else { continue };
                 if r >= p.cells[1] || c >= p.cells[0] {
                     continue;
@@ -1055,7 +1247,9 @@ impl Term {
         for _ in 0..MAX_DEPTH {
             let before = pending.len();
             pending.retain(|p| {
-                let Some(&(line, col)) = p.parent.and_then(|up| at.get(&up)) else { return true };
+                let Some(&(line, col)) = p.parent.and_then(|up| at.get(&up)) else {
+                    return true;
+                };
                 let mut p = (*p).clone();
                 p.hang(line, col);
                 at.insert(p.key(), (p.line, p.col));
@@ -1078,7 +1272,9 @@ impl Term {
 
     /// An APC string: a graphics command if it starts with `G`.
     pub(crate) fn apc(&mut self, data: &[u8]) {
-        let Some(command) = data.strip_prefix(b"G") else { return };
+        let Some(command) = data.strip_prefix(b"G") else {
+            return;
+        };
         let (control, payload) = match command.iter().position(|&b| b == b';') {
             Some(at) => (&command[..at], &command[at + 1..]),
             None => (command, &[][..]),
@@ -1091,7 +1287,15 @@ impl Term {
             None => {
                 let Some(command) = parsed else { return };
                 let more = command.more && matches!(command.action, b't' | b'T' | b'q' | b'f');
-                (Loading { command, data: Vec::new(), carry: Vec::new(), too_big: false }, more)
+                (
+                    Loading {
+                        command,
+                        data: Vec::new(),
+                        carry: Vec::new(),
+                        too_big: false,
+                    },
+                    more,
+                )
             }
         };
         loading.push(payload);
@@ -1121,9 +1325,13 @@ impl Term {
             b'f' if c.format != 100 || c.compressed || c.read_offset != 0 || c.read_size != 0 => {
                 Err("EINVAL:a file must be sent as a whole, uncompressed PNG")
             }
-            b'f' | b't' => read_file(c, &data).and_then(|data| decode(c, data).ok()).ok_or(FILE_ERROR),
+            b'f' | b't' => read_file(c, &data)
+                .and_then(|data| decode(c, data).ok())
+                .ok_or(FILE_ERROR),
             // As with files, one reply for any failure tells nothing of what's there.
-            b's' => read_shm(c, &data).and_then(|data| decode(c, data).ok()).ok_or(SHM_ERROR),
+            b's' => read_shm(c, &data)
+                .and_then(|data| decode(c, data).ok())
+                .ok_or(SHM_ERROR),
             _ => Err("EINVAL:unknown transmission medium"),
         };
         match c.action {
@@ -1173,10 +1381,13 @@ impl Term {
                     (0, number) => graphics.numbered(number),
                     (id, _) => graphics.image(id),
                 };
-                let Some(id) = found.map(|i| i.id) else { return self.graphics_reply(&c, "ENOENT:no such image") };
+                let Some(id) = found.map(|i| i.id) else {
+                    return self.graphics_reply(&c, "ENOENT:no such image");
+                };
                 c.id = id;
                 let done = match c.action {
-                    b'f' => pixels(&c, data).and_then(|frame| self.graphics_mut().add_frame(&c, id, frame)),
+                    b'f' => pixels(&c, data)
+                        .and_then(|frame| self.graphics_mut().add_frame(&c, id, frame)),
                     b'a' => self.graphics_mut().control(&c, id),
                     _ => self.graphics_mut().compose(&c, id),
                 };
@@ -1200,15 +1411,24 @@ impl Term {
             return self.graphics_reply(c, "EINVAL:a virtual placement can't be relative");
         }
         let (cw, ch) = self.cell_pixels;
-        let (cursor_row, cursor_col, lines_scrolled) = (self.cursor.row, self.cursor.col, self.lines_scrolled);
+        let (cursor_row, cursor_col, lines_scrolled) =
+            (self.cursor.row, self.cursor.col, self.lines_scrolled);
         let graphics = self.graphics_mut();
         let Some(image) = graphics.image(id).map(|i| i.shown().clone()) else {
             return self.graphics_reply(c, "ENOENT:no such image");
         };
         let [x, y, w, h] = c.source;
         let (x, y) = (x.min(image.width - 1), y.min(image.height - 1));
-        let w = if w == 0 { image.width - x } else { w.min(image.width - x) };
-        let h = if h == 0 { image.height - y } else { h.min(image.height - y) };
+        let w = if w == 0 {
+            image.width - x
+        } else {
+            w.min(image.width - x)
+        };
+        let h = if h == 0 {
+            image.height - y
+        } else {
+            h.min(image.height - y)
+        };
         // Offsets stay within the first cell; sizes within reason.
         let [ox, oy] = [c.offset[0].min(cw - 1), c.offset[1].min(ch - 1)];
         let (asked_cols, asked_rows) = (c.cols.min(MAX_CELLS), c.rows.min(MAX_CELLS));
@@ -1216,8 +1436,14 @@ impl Term {
         // its aspect when only one is given.
         let (cols, rows) = match (asked_cols, asked_rows) {
             (0, 0) => ((w + ox).div_ceil(cw), (h + oy).div_ceil(ch)),
-            (cols, 0) => (cols, ((cols * cw) as u64 * h as u64 / w as u64).div_ceil(ch as u64) as u32),
-            (0, rows) => (((rows * ch) as u64 * w as u64 / h as u64).div_ceil(cw as u64) as u32, rows),
+            (cols, 0) => (
+                cols,
+                ((cols * cw) as u64 * h as u64 / w as u64).div_ceil(ch as u64) as u32,
+            ),
+            (0, rows) => (
+                ((rows * ch) as u64 * w as u64 / h as u64).div_ceil(cw as u64) as u32,
+                rows,
+            ),
             (cols, rows) => (cols, rows),
         };
         // An image far taller than wide asked for many columns would otherwise
@@ -1230,26 +1456,37 @@ impl Term {
             }
             p => p,
         };
-        let parent = match relative.then(|| graphics.parent_for(c.parent, (id, placement_id))).transpose() {
+        let parent = match relative
+            .then(|| graphics.parent_for(c.parent, (id, placement_id)))
+            .transpose()
+        {
             Ok(parent) => parent,
             Err(error) => return self.graphics_reply(c, error),
         };
         if c.unicode {
             graphics.virtuals.retain(|p| p.key() != (id, placement_id));
         } else {
-            graphics.placements.retain(|p| p.key() != (id, placement_id));
+            graphics
+                .placements
+                .retain(|p| p.key() != (id, placement_id));
             graphics.floating.retain(|p| p.key() != (id, placement_id));
         }
         // Floating placements count with the grid's.
         if c.unicode && graphics.virtuals.len() >= MAX_PLACEMENTS {
             graphics.virtuals.remove(0);
-        } else if !c.unicode && graphics.placements.len() + graphics.floating.len() >= MAX_PLACEMENTS {
+        } else if !c.unicode
+            && graphics.placements.len() + graphics.floating.len() >= MAX_PLACEMENTS
+        {
             match graphics.placements.is_empty() {
                 true => graphics.floating.remove(0),
                 false => graphics.placements.remove(0),
             };
         }
-        let placements = if c.unicode { &mut graphics.virtuals } else { &mut graphics.placements };
+        let placements = if c.unicode {
+            &mut graphics.virtuals
+        } else {
+            &mut graphics.placements
+        };
         placements.push(Placement {
             image,
             image_id: id,
@@ -1303,13 +1540,28 @@ impl Term {
             b'r' => (x..=y).contains(&p.image_id),
             _ => false,
         };
-        let mut touched: HashSet<u32> = graphics.placements.iter().filter(|p| doomed(p)).map(|p| p.image_id).collect();
+        let mut touched: HashSet<u32> = graphics
+            .placements
+            .iter()
+            .filter(|p| doomed(p))
+            .map(|p| p.image_id)
+            .collect();
         graphics.placements.retain(|p| !doomed(p));
         // Virtual placements have no place on the grid to match, nor
         // those placed relative to them.
-        if matches!(c.delete.to_ascii_lowercase(), b'a' | b'i' | b'n' | b'r' | b'z') {
+        if matches!(
+            c.delete.to_ascii_lowercase(),
+            b'a' | b'i' | b'n' | b'r' | b'z'
+        ) {
             let gone = |p: &Placement| c.delete.eq_ignore_ascii_case(&b'a') || doomed(p);
-            touched.extend(graphics.virtuals.iter().chain(&graphics.floating).filter(|p| gone(p)).map(|p| p.image_id));
+            touched.extend(
+                graphics
+                    .virtuals
+                    .iter()
+                    .chain(&graphics.floating)
+                    .filter(|p| gone(p))
+                    .map(|p| p.image_id),
+            );
             graphics.virtuals.retain(|p| !gone(p));
             graphics.floating.retain(|p| !gone(p));
         }
@@ -1351,7 +1603,11 @@ mod tests {
     /// zlib framing around stored (uncompressed) DEFLATE blocks.
     fn zlib(data: &[u8]) -> Vec<u8> {
         let mut z = vec![0x78, 0x01];
-        let blocks: Vec<&[u8]> = if data.is_empty() { vec![&[]] } else { data.chunks(65535).collect() };
+        let blocks: Vec<&[u8]> = if data.is_empty() {
+            vec![&[]]
+        } else {
+            data.chunks(65535).collect()
+        };
         for (i, block) in blocks.iter().enumerate() {
             z.push((i + 1 == blocks.len()) as u8);
             z.extend((block.len() as u16).to_le_bytes());
@@ -1364,7 +1620,9 @@ mod tests {
 
     /// An 8-bit RGBA PNG of `width × height` opaque green pixels.
     fn png(width: u32, height: u32) -> Vec<u8> {
-        let chunk = |kind: &[u8; 4], body: &[u8]| [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat();
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat()
+        };
         let mut ihdr = [width.to_be_bytes(), height.to_be_bytes()].concat();
         ihdr.extend([8, 6, 0, 0, 0]);
         let row = [&[0u8][..], &[0, 255, 0, 255].repeat(width as usize)].concat();
@@ -1378,25 +1636,48 @@ mod tests {
     #[test]
     fn transmit_and_reply() {
         let mut t = term();
-        assert_eq!(send(&mut t, "a=t,f=32,s=2,v=1,i=7", &rgba(2, 1)), "\x1b_Gi=7;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=t,f=32,s=2,v=1,i=7", &rgba(2, 1)),
+            "\x1b_Gi=7;OK\x1b\\"
+        );
         assert!(t.image_placements().is_empty());
         // Quiet: no OK with q=1, nothing at all with q=2.
         assert_eq!(send(&mut t, "a=t,f=32,s=2,v=1,i=8,q=1", &rgba(2, 1)), "");
         assert_eq!(send(&mut t, "a=t,f=32,s=2,v=2,i=9,q=2", &rgba(2, 1)), "");
-        assert_eq!(send(&mut t, "a=t,f=32,s=2,v=2,i=9", &rgba(2, 1)), "\x1b_Gi=9;ENODATA:not enough image data\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=t,f=32,s=2,v=2,i=9", &rgba(2, 1)),
+            "\x1b_Gi=9;ENODATA:not enough image data\x1b\\"
+        );
         // No id, no reply.
         assert_eq!(send(&mut t, "a=t,f=32,s=2,v=1", &rgba(2, 1)), "");
-        assert_eq!(send(&mut t, "a=p,i=99", &[]), "\x1b_Gi=99;ENOENT:no such image\x1b\\");
-        assert_eq!(send(&mut t, "a=t,t=s,i=3", b"/mightty-no-such-name"), format!("\x1b_Gi=3;{SHM_ERROR}\x1b\\"));
-        assert_eq!(send(&mut t, "a=q,f=100,i=31", &png(3, 2)), "\x1b_Gi=31;OK\x1b\\");
-        assert_eq!(send(&mut t, "a=q,f=100,i=31", b"not a png"), "\x1b_Gi=31;EBADPNG:can't decode the PNG\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=99", &[]),
+            "\x1b_Gi=99;ENOENT:no such image\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=t,t=s,i=3", b"/mightty-no-such-name"),
+            format!("\x1b_Gi=3;{SHM_ERROR}\x1b\\")
+        );
+        assert_eq!(
+            send(&mut t, "a=q,f=100,i=31", &png(3, 2)),
+            "\x1b_Gi=31;OK\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=q,f=100,i=31", b"not a png"),
+            "\x1b_Gi=31;EBADPNG:can't decode the PNG\x1b\\"
+        );
         // A query stores nothing.
-        assert_eq!(send(&mut t, "a=p,i=31", &[]), "\x1b_Gi=31;ENOENT:no such image\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=31", &[]),
+            "\x1b_Gi=31;ENOENT:no such image\x1b\\"
+        );
     }
 
     /// The first pixel of what image 1's placement shows.
     fn shown(t: &Term) -> [u8; 4] {
-        t.image_placements()[0].image.pixels[..4].try_into().unwrap()
+        t.image_placements()[0].image.pixels[..4]
+            .try_into()
+            .unwrap()
     }
 
     #[test]
@@ -1404,11 +1685,20 @@ mod tests {
         let mut t = term();
         let red = [255, 0, 0, 255];
         let blue = [0, 0, 255, 255].repeat(2);
-        assert_eq!(send(&mut t, "a=T,f=32,s=2,v=1,i=1", &rgba(2, 1)), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,f=32,s=2,v=1,i=1", &rgba(2, 1)),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
         // Frame 2: blue over a transparent canvas, shown for 100 ms.
-        assert_eq!(send(&mut t, "a=f,f=32,s=2,v=1,i=1,z=100", &blue), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=f,f=32,s=2,v=1,i=1,z=100", &blue),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
         // Frame 3: frame 2 with its second pixel green.
-        assert_eq!(send(&mut t, "a=f,f=32,s=1,v=1,i=1,c=2,x=1", &[0, 255, 0, 255]), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=f,f=32,s=1,v=1,i=1,c=2,x=1", &[0, 255, 0, 255]),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
         // Stopped until told to run.
@@ -1421,7 +1711,10 @@ mod tests {
         assert_eq!(shown(&t), [0, 0, 255, 255]);
         assert_eq!(t.animate(ms(140)), Some(ms(180)));
         assert_eq!(t.image_placements()[0].image.pixels[4..], [0, 255, 0, 255]);
-        assert_eq!(&t.image_placements()[0].image.pixels[..4], &[0, 0, 255, 255]);
+        assert_eq!(
+            &t.image_placements()[0].image.pixels[..4],
+            &[0, 0, 255, 255]
+        );
         // Twice through (v=2), then it stops on the last frame.
         assert_eq!(t.animate(ms(180)), Some(ms(220)));
         assert_eq!(shown(&t), red);
@@ -1452,7 +1745,10 @@ mod tests {
         assert!(t.animate(t0).is_some());
         t.animate(t0 + Duration::from_millis(40));
         // Frame 2: replaced, not blended, with Y's opaque black elsewhere.
-        assert_eq!(t.image_placements()[0].image.pixels, [0, 0, 0, 0, 0, 0, 0, 255]);
+        assert_eq!(
+            t.image_placements()[0].image.pixels,
+            [0, 0, 0, 0, 0, 0, 0, 255]
+        );
         assert_eq!(t.animate(t0 + Duration::from_millis(80)), None);
         // A gapless frame is never shown.
         send(&mut t, "a=f,f=32,s=1,v=1,i=1,z=-1", &[9, 9, 9, 255]);
@@ -1464,14 +1760,35 @@ mod tests {
         // Compose: frame 1's first pixel into frame 2's second, replacing.
         assert_eq!(send(&mut t, "a=c,i=1,r=1,c=2,w=1,h=1,x=1,C=1", &[]), "");
         send(&mut t, "a=a,i=1,s=1,c=2", &[]);
-        assert_eq!(t.image_placements()[0].image.pixels, [0, 0, 0, 0, 255, 0, 0, 255]);
+        assert_eq!(
+            t.image_placements()[0].image.pixels,
+            [0, 0, 0, 0, 255, 0, 0, 255]
+        );
         // Errors.
-        assert_eq!(send(&mut t, "a=c,i=1,r=1,c=2,w=2,h=1,x=1", &[]), "\x1b_Gi=1;EINVAL:rectangle out of bounds\x1b\\");
-        assert_eq!(send(&mut t, "a=c,i=1,r=2,c=2,w=2,h=1", &[]), "\x1b_Gi=1;EINVAL:source and destination overlap\x1b\\");
-        assert_eq!(send(&mut t, "a=c,i=1,r=9,c=2", &[]), "\x1b_Gi=1;ENOENT:no such frame\x1b\\");
-        assert_eq!(send(&mut t, "a=f,f=32,s=1,v=1,i=1,c=9", &[0; 4]), "\x1b_Gi=1;ENOENT:no such frame\x1b\\");
-        assert_eq!(send(&mut t, "a=a,i=1,c=9", &[]), "\x1b_Gi=1;ENOENT:no such frame\x1b\\");
-        assert_eq!(send(&mut t, "a=f,i=5", &[]), "\x1b_Gi=5;ENOENT:no such image\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=c,i=1,r=1,c=2,w=2,h=1,x=1", &[]),
+            "\x1b_Gi=1;EINVAL:rectangle out of bounds\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=c,i=1,r=2,c=2,w=2,h=1", &[]),
+            "\x1b_Gi=1;EINVAL:source and destination overlap\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=c,i=1,r=9,c=2", &[]),
+            "\x1b_Gi=1;ENOENT:no such frame\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=f,f=32,s=1,v=1,i=1,c=9", &[0; 4]),
+            "\x1b_Gi=1;ENOENT:no such frame\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=a,i=1,c=9", &[]),
+            "\x1b_Gi=1;ENOENT:no such frame\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=f,i=5", &[]),
+            "\x1b_Gi=5;ENOENT:no such image\x1b\\"
+        );
         // Frames count toward the quota.
         let stored = t.graphics_mut().stored;
         assert_eq!(stored, 3 * 8);
@@ -1482,9 +1799,15 @@ mod tests {
         let mut t = term();
         t.feed(b"ab");
         // 25×45 pixels: 3 columns and 3 rows of 10×20 cells.
-        assert_eq!(send(&mut t, "a=T,f=24,s=25,v=45,i=1", &[9; 25 * 45 * 3]), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,f=24,s=25,v=45,i=1", &[9; 25 * 45 * 3]),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
         let p = &t.image_placements()[0];
-        assert_eq!((p.line, p.col, p.cells, p.source), (0, 2, [3, 3], [0, 0, 25, 45]));
+        assert_eq!(
+            (p.line, p.col, p.cells, p.source),
+            (0, 2, [3, 3], [0, 0, 25, 45])
+        );
         assert_eq!(p.image.pixels[..4], [9, 9, 9, 255]);
         assert_eq!(t.cursor(), (2, 5));
         // C=1 leaves it; c= and r= set the cells, the other kept in proportion.
@@ -1503,25 +1826,43 @@ mod tests {
     fn limits() {
         let mut t = term();
         // Sizes are checked before inflating, and data can't inflate past them.
-        assert_eq!(send(&mut t, "a=t,f=32,s=99999,v=99999,o=z,i=1", &zlib(&[0; 64])), "\x1b_Gi=1;EINVAL:bad image size\x1b\\");
-        assert_eq!(send(&mut t, "a=t,f=32,s=2,v=2,o=z,i=2", &zlib(&rgba(4, 4))), "\x1b_Gi=2;EINVAL:bad zlib data\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=t,f=32,s=99999,v=99999,o=z,i=1", &zlib(&[0; 64])),
+            "\x1b_Gi=1;EINVAL:bad image size\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=t,f=32,s=2,v=2,o=z,i=2", &zlib(&rgba(4, 4))),
+            "\x1b_Gi=2;EINVAL:bad zlib data\x1b\\"
+        );
         // A 1×10000 image 1000 columns wide: capped at 1000 rows, not millions.
         let start = std::time::Instant::now();
-        assert_eq!(send(&mut t, "a=T,f=32,s=1,v=10000,c=1000,i=3", &rgba(1, 10000)), "\x1b_Gi=3;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,f=32,s=1,v=10000,c=1000,i=3", &rgba(1, 10000)),
+            "\x1b_Gi=3;OK\x1b\\"
+        );
         assert_eq!(t.image_placements()[0].cells, [1000, 1000]);
         assert!(start.elapsed().as_secs() < 2);
         // One image can't take the whole quota, raw or PNG.
-        assert_eq!(send(&mut t, "a=t,f=32,s=10000,v=10000,i=4", b""), "\x1b_Gi=4;EFBIG:image too large\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=t,f=32,s=10000,v=10000,i=4", b""),
+            "\x1b_Gi=4;EFBIG:image too large\x1b\\"
+        );
         let mut huge = png(1, 1);
         huge[16..24].copy_from_slice(&[0, 0, 0x27, 0x10, 0, 0, 0x27, 0x10]);
-        assert_eq!(send(&mut t, "a=t,f=100,i=5", &huge), "\x1b_Gi=5;EBADPNG:can't decode the PNG\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=t,f=100,i=5", &huge),
+            "\x1b_Gi=5;EBADPNG:can't decode the PNG\x1b\\"
+        );
     }
 
     #[test]
     fn unicode_placeholders() {
         let mut t = term();
         // A 2×2-cell virtual placement: nothing drawn, the cursor stays.
-        assert_eq!(send(&mut t, "a=T,U=1,f=32,s=4,v=4,c=2,r=2,i=7", &rgba(4, 4)), "\x1b_Gi=7;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,U=1,f=32,s=4,v=4,c=2,r=2,i=7", &rgba(4, 4)),
+            "\x1b_Gi=7;OK\x1b\\"
+        );
         assert!(t.image_placements().is_empty());
         assert_eq!(t.cursor(), (0, 0));
         // Row and column diacritics, or left out after the first cell;
@@ -1530,7 +1871,10 @@ mod tests {
         t.feed("\x1b[38;2;0;0;7m x\u{10EEEE}\u{305}\u{305}\u{305}".as_bytes());
         let runs = t.placeholder_runs(0, 3);
         let shape: Vec<_> = runs.iter().map(|r| (r.line, r.col, r.len, r.at)).collect();
-        assert_eq!(shape, [(0, 0, 2, [0, 0]), (1, 0, 2, [0, 1]), (1, 4, 1, [0, 0])]);
+        assert_eq!(
+            shape,
+            [(0, 0, 2, [0, 0]), (1, 0, 2, [0, 1]), (1, 4, 1, [0, 0])]
+        );
         assert_eq!(runs[0].cells, [2, 2]);
         // Past the box, or another image: nothing.
         t.feed("\r\n\x1b[38;5;7m\u{10EEEE}\u{30E}\x1b[38;5;8m\u{10EEEE}".as_bytes());
@@ -1541,7 +1885,11 @@ mod tests {
         let runs = t.placeholder_runs(3, 1);
         assert_eq!(runs.iter().map(|r| r.cells).collect::<Vec<_>>(), [[1, 1]]);
         // Every diacritic joins its placeholder.
-        assert!(DIACRITICS.iter().all(|&d| crate::char_width(char::from_u32(d).unwrap()) == 0));
+        assert!(
+            DIACRITICS
+                .iter()
+                .all(|&d| crate::char_width(char::from_u32(d).unwrap()) == 0)
+        );
         // Deleting the image takes the virtual placement with it.
         send(&mut t, "a=d,d=I,i=7", b"");
         assert!(t.placeholder_runs(0, 3).is_empty());
@@ -1550,24 +1898,44 @@ mod tests {
     #[test]
     fn relative_placements() {
         let mut t = term();
-        let at = |t: &Term| t.image_placements().iter().map(|p| (p.image_id, p.id, p.line, p.col)).collect::<Vec<_>>();
+        let at = |t: &Term| {
+            t.image_placements()
+                .iter()
+                .map(|p| (p.image_id, p.id, p.line, p.col))
+                .collect::<Vec<_>>()
+        };
         send(&mut t, "a=t,f=32,s=1,v=1,i=1", &rgba(1, 1));
         send(&mut t, "a=t,f=32,s=1,v=1,i=2", &rgba(1, 1));
         t.feed(b"\x1b[3;5H");
         send(&mut t, "a=p,i=1,p=1,C=1", b"");
         // Offset from the parent's top-left; the cursor stays, C= or not.
-        assert_eq!(send(&mut t, "a=p,i=2,p=1,P=1,Q=1,H=2,V=-1", b""), "\x1b_Gi=2,p=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=2,p=1,P=1,Q=1,H=2,V=-1", b""),
+            "\x1b_Gi=2,p=1;OK\x1b\\"
+        );
         assert_eq!(t.cursor(), (2, 4));
         assert_eq!(at(&t), [(1, 1, 2, 4), (2, 1, 1, 6)]);
-        assert_eq!(send(&mut t, "a=p,i=2,p=2,P=1,Q=9", b""), "\x1b_Gi=2,p=2;ENOPARENT:no such parent placement\x1b\\");
-        assert_eq!(send(&mut t, "a=p,i=2,p=2,P=1,U=1", b""), "\x1b_Gi=2,p=2;EINVAL:a virtual placement can't be relative\x1b\\");
-        assert_eq!(send(&mut t, "a=p,i=1,p=1,P=2,Q=1", b""), "\x1b_Gi=1,p=1;ECYCLE:the placement would be its own parent\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=2,p=2,P=1,Q=9", b""),
+            "\x1b_Gi=2,p=2;ENOPARENT:no such parent placement\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=p,i=2,p=2,P=1,U=1", b""),
+            "\x1b_Gi=2,p=2;EINVAL:a virtual placement can't be relative\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=p,i=1,p=1,P=2,Q=1", b""),
+            "\x1b_Gi=1,p=1;ECYCLE:the placement would be its own parent\x1b\\"
+        );
         // Chains have a limit.
         for p in 2..=MAX_DEPTH {
             send(&mut t, &format!("a=p,i=2,p={p},P=2,Q={},H=-1", p - 1), b"");
         }
         assert_eq!(t.image_placements().len(), MAX_DEPTH + 1);
-        assert_eq!(send(&mut t, "a=p,i=2,p=99,P=2,Q=8", b""), "\x1b_Gi=2,p=99;ETOODEEP:too many parents\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=2,p=99,P=2,Q=8", b""),
+            "\x1b_Gi=2,p=99;ETOODEEP:too many parents\x1b\\"
+        );
         // Clipped at the left edge.
         assert_eq!(t.image_placements()[MAX_DEPTH].col, 0);
         // The chain follows its parent as it moves and scrolls.
@@ -1575,7 +1943,14 @@ mod tests {
         send(&mut t, "a=p,i=1,p=1,C=1", b"");
         t.feed(b"\x1b[10;1H\n");
         assert_eq!(&at(&t)[..3], [(1, 1, 4, 8), (2, 1, 3, 10), (2, 2, 3, 9)]);
-        assert_eq!(t.image_placements().iter().map(|p| p.line - t.lines_scrolled() as i64).take(2).collect::<Vec<_>>(), [3, 2]);
+        assert_eq!(
+            t.image_placements()
+                .iter()
+                .map(|p| p.line - t.lines_scrolled() as i64)
+                .take(2)
+                .collect::<Vec<_>>(),
+            [3, 2]
+        );
         // And goes with it, with its image when that has no other placement.
         send(&mut t, "a=t,f=32,s=1,v=1,i=3", &rgba(1, 1));
         send(&mut t, "a=p,i=3,P=2,Q=1", b"");
@@ -1583,7 +1958,10 @@ mod tests {
         send(&mut t, "a=d,d=i,i=1", b"");
         assert_eq!(at(&t).iter().map(|p| p.0).collect::<Vec<_>>(), [3]);
         assert_eq!(send(&mut t, "a=p,i=1,C=1", b""), "\x1b_Gi=1;OK\x1b\\");
-        assert_eq!(send(&mut t, "a=p,i=2", b""), "\x1b_Gi=2;ENOENT:no such image\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=2", b""),
+            "\x1b_Gi=2;ENOENT:no such image\x1b\\"
+        );
     }
 
     #[test]
@@ -1599,7 +1977,10 @@ mod tests {
         assert_eq!(t.image_placements().len(), MAX_DEPTH + 1);
         // Hung below another, the chain grows one too deep: its last goes.
         send(&mut t, "a=p,i=1,p=100,C=1", b"");
-        assert_eq!(send(&mut t, "a=p,i=1,p=1,P=1,Q=100", b""), "\x1b_Gi=1,p=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=1,p=1,P=1,Q=100", b""),
+            "\x1b_Gi=1,p=1;OK\x1b\\"
+        );
         assert_eq!(t.image_placements().len(), MAX_DEPTH + 1);
         assert!(t.image_placements().iter().all(|p| p.id != last));
     }
@@ -1614,9 +1995,18 @@ mod tests {
         // Floating until drawn, where the placeholders are.
         assert!(t.image_placements().is_empty());
         assert!(t.floating_placements(&t.placeholder_runs(0, 10)).is_empty());
-        t.feed("\x1b[3;5H\x1b[38;5;7m\u{10EEEE}\u{305}\u{30D}\x1b[4;4H\u{10EEEE}\u{30D}\u{305}".as_bytes());
+        t.feed(
+            "\x1b[3;5H\x1b[38;5;7m\u{10EEEE}\u{305}\u{30D}\x1b[4;4H\u{10EEEE}\u{30D}\u{305}"
+                .as_bytes(),
+        );
         let shown = t.floating_placements(&t.placeholder_runs(0, 10));
-        assert_eq!(shown.iter().map(|p| (p.id, p.line, p.col)).collect::<Vec<_>>(), [(1, 2, 6), (2, 3, 6)]);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|p| (p.id, p.line, p.col))
+                .collect::<Vec<_>>(),
+            [(1, 2, 6), (2, 3, 6)]
+        );
         // Gone with the virtual placement.
         send(&mut t, "a=d,d=i,i=7", b"");
         assert!(t.graphics[0].floating.is_empty());
@@ -1645,11 +2035,24 @@ mod tests {
         let mut t = term();
         let data = base64::encode(&rgba(4, 4));
         let (a, b) = data.split_at(20);
-        t.feed(format!("\x1b_Ga=T,f=32,s=4,v=4,i=2,m=1;{a}\x1b\\\x1b_Gm=1;{}\x1b\\\x1b_Gm=0;{}\x1b\\", &b[..8], &b[8..]).as_bytes());
+        t.feed(
+            format!(
+                "\x1b_Ga=T,f=32,s=4,v=4,i=2,m=1;{a}\x1b\\\x1b_Gm=1;{}\x1b\\\x1b_Gm=0;{}\x1b\\",
+                &b[..8],
+                &b[8..]
+            )
+            .as_bytes(),
+        );
         assert_eq!(t.take_responses(), b"\x1b_Gi=2;OK\x1b\\");
         assert_eq!(t.image_placements()[0].image.pixels, rgba(4, 4));
-        assert_eq!(send(&mut t, "a=T,f=32,s=4,v=4,o=z,i=3", &zlib(&rgba(4, 4))), "\x1b_Gi=3;OK\x1b\\");
-        assert_eq!(send(&mut t, "a=T,f=100,i=4", &png(30, 20)), "\x1b_Gi=4;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,f=32,s=4,v=4,o=z,i=3", &zlib(&rgba(4, 4))),
+            "\x1b_Gi=3;OK\x1b\\"
+        );
+        assert_eq!(
+            send(&mut t, "a=T,f=100,i=4", &png(30, 20)),
+            "\x1b_Gi=4;OK\x1b\\"
+        );
         let p = &t.image_placements()[2];
         assert_eq!((p.image.width, p.image.height, p.cells), (30, 20, [3, 1]));
         assert_eq!(p.image.pixels[..4], [0, 255, 0, 255]);
@@ -1661,7 +2064,10 @@ mod tests {
         let reply = send(&mut t, "a=t,f=32,s=1,v=1,I=5", &rgba(1, 1));
         let id = u32::MAX;
         assert_eq!(reply, format!("\x1b_Gi={id},I=5;OK\x1b\\"));
-        assert_eq!(send(&mut t, "a=p,I=5,p=2", &[]), format!("\x1b_Gi={id},I=5,p=2;OK\x1b\\"));
+        assert_eq!(
+            send(&mut t, "a=p,I=5,p=2", &[]),
+            format!("\x1b_Gi={id},I=5,p=2;OK\x1b\\")
+        );
         assert_eq!(t.image_placements().len(), 1);
     }
 
@@ -1670,11 +2076,22 @@ mod tests {
         unsafe extern "C" {
             fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
             fn ftruncate(fd: c_int, len: i64) -> c_int;
-            fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) -> *mut c_void;
+            fn mmap(
+                addr: *mut c_void,
+                len: usize,
+                prot: c_int,
+                flags: c_int,
+                fd: c_int,
+                offset: i64,
+            ) -> *mut c_void;
             fn munmap(addr: *mut c_void, len: usize) -> c_int;
             fn close(fd: c_int) -> c_int;
         }
-        const O_RDWR_CREAT: c_int = if cfg!(target_os = "linux") { 0o102 } else { 0x202 };
+        const O_RDWR_CREAT: c_int = if cfg!(target_os = "linux") {
+            0o102
+        } else {
+            0x202
+        };
         let name = CString::new(name).unwrap();
         // SAFETY: a new object, mapped read-write at its size, filled, unmapped, closed.
         unsafe {
@@ -1696,31 +2113,59 @@ mod tests {
         let mut pixels = rgba(2, 1);
         pixels[4..8].copy_from_slice(&[0, 0, 255, 255]);
         shm(&name, &pixels);
-        assert_eq!(send(&mut t, "a=T,t=s,f=32,s=2,v=1,i=1", name.as_bytes()), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,t=s,f=32,s=2,v=1,i=1", name.as_bytes()),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
         assert_eq!(t.image_placements()[0].image.pixels, pixels);
         // Unlinked once read.
         let gone = format!("\x1b_Gi=2;{SHM_ERROR}\x1b\\");
-        assert_eq!(send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2", name.as_bytes()), gone);
+        assert_eq!(
+            send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2", name.as_bytes()),
+            gone
+        );
         // A part, by offset and size; not past the end (on macOS, its size
         // rounded up to a page).
         shm(&name, &pixels);
-        assert_eq!(send(&mut t, "a=T,t=s,f=32,s=1,v=1,i=3,O=4,S=4", name.as_bytes()), "\x1b_Gi=3;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,t=s,f=32,s=1,v=1,i=3,O=4,S=4", name.as_bytes()),
+            "\x1b_Gi=3;OK\x1b\\"
+        );
         assert_eq!(t.image_placements()[1].image.pixels, [0, 0, 255, 255]);
         shm(&name, &pixels);
-        assert_eq!(send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2,O=4,S=1048576", name.as_bytes()), gone);
+        assert_eq!(
+            send(
+                &mut t,
+                "a=t,t=s,f=32,s=1,v=1,i=2,O=4,S=1048576",
+                name.as_bytes()
+            ),
+            gone
+        );
         // Refused, it's left to its owner; and only names handed over are read.
-        assert_eq!(send(&mut t, "a=T,t=s,f=32,s=1,v=1,i=5", name.as_bytes()), "\x1b_Gi=5;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=T,t=s,f=32,s=1,v=1,i=5", name.as_bytes()),
+            "\x1b_Gi=5;OK\x1b\\"
+        );
         let other = format!("/mightty-test-{}", std::process::id());
         shm(&other, &pixels);
-        assert_eq!(send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2", other.as_bytes()), gone);
+        assert_eq!(
+            send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2", other.as_bytes()),
+            gone
+        );
         unsafe extern "C" {
             fn shm_unlink(name: *const c_char) -> c_int;
         }
         // SAFETY: a NUL-terminated name; it was left, so unlinking succeeds.
-        assert_eq!(unsafe { shm_unlink(CString::new(other).unwrap().as_ptr()) }, 0);
+        assert_eq!(
+            unsafe { shm_unlink(CString::new(other).unwrap().as_ptr()) },
+            0
+        );
         // As PNG too.
         shm(&name, &png(2, 2));
-        assert_eq!(send(&mut t, "a=t,t=s,f=100,i=4", name.as_bytes()), "\x1b_Gi=4;OK\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=t,t=s,f=100,i=4", name.as_bytes()),
+            "\x1b_Gi=4;OK\x1b\\"
+        );
     }
 
     #[test]
@@ -1731,8 +2176,14 @@ mod tests {
         fs::write(&plain, png(2, 2)).unwrap();
         let mut t = term();
         let path = plain.to_str().unwrap().as_bytes();
-        assert_eq!(send(&mut t, "a=T,t=f,f=100,i=1", path), "\x1b_Gi=1;OK\x1b\\");
-        assert_eq!(t.image_placements()[0].image.pixels, [0, 255, 0, 255].repeat(4));
+        assert_eq!(
+            send(&mut t, "a=T,t=f,f=100,i=1", path),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
+        assert_eq!(
+            t.image_placements()[0].image.pixels,
+            [0, 255, 0, 255].repeat(4)
+        );
         // Any file can be named, so only as a PNG: raw pixels or zlib would
         // tell a remote program what the file holds by whether they decode.
         let refused = "\x1b_Gi=8;EINVAL:a file must be sent as a whole, uncompressed PNG\x1b\\";
@@ -1744,21 +2195,48 @@ mod tests {
         assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,O=8,i=2", path), error(2));
         assert!(plain.exists());
         fs::remove_file(&plain).unwrap();
-        let temp = dir.join(format!("tty-graphics-protocol-mightty-{}", std::process::id()));
+        let temp = dir.join(format!(
+            "tty-graphics-protocol-mightty-{}",
+            std::process::id()
+        ));
         fs::write(&temp, rgba(2, 2)).unwrap();
-        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=3", temp.to_str().unwrap().as_bytes()), "\x1b_Gi=3;OK\x1b\\");
+        assert_eq!(
+            send(
+                &mut t,
+                "a=t,t=t,f=32,s=2,v=2,i=3",
+                temp.to_str().unwrap().as_bytes()
+            ),
+            "\x1b_Gi=3;OK\x1b\\"
+        );
         assert!(!temp.exists());
         // Out of the temp directory by `..`, or through a symlink: refused, nothing deleted.
-        let outside = std::env::current_dir().unwrap().join(format!("tty-graphics-protocol-outside-{}", std::process::id()));
+        let outside = std::env::current_dir().unwrap().join(format!(
+            "tty-graphics-protocol-outside-{}",
+            std::process::id()
+        ));
         fs::write(&outside, rgba(2, 2)).unwrap();
-        let sneaky = format!("{}/../{}", dir.display(), outside.strip_prefix("/").unwrap().display());
+        let sneaky = format!(
+            "{}/../{}",
+            dir.display(),
+            outside.strip_prefix("/").unwrap().display()
+        );
         let up = "/..".repeat(dir.components().count());
         let sneaky = sneaky.replacen("/../", &format!("{up}/"), 1);
-        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=6", sneaky.as_bytes()), error(6));
+        assert_eq!(
+            send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=6", sneaky.as_bytes()),
+            error(6)
+        );
         let link = dir.join(format!("tty-graphics-protocol-link-{}", std::process::id()));
         let _ = fs::remove_file(&link);
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert_eq!(send(&mut t, "a=t,t=t,f=32,s=2,v=2,i=7", link.to_str().unwrap().as_bytes()), error(7));
+        assert_eq!(
+            send(
+                &mut t,
+                "a=t,t=t,f=32,s=2,v=2,i=7",
+                link.to_str().unwrap().as_bytes()
+            ),
+            error(7)
+        );
         assert!(outside.exists());
         fs::remove_file(&link).unwrap();
         fs::remove_file(&outside).unwrap();
@@ -1767,15 +2245,38 @@ mod tests {
         let to_dev = dir.join(format!("mightty-graphics-dev-{}", std::process::id()));
         let _ = fs::remove_file(&to_dev);
         std::os::unix::fs::symlink("/dev/zero", &to_dev).unwrap();
-        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=4", to_dev.to_str().unwrap().as_bytes()), error(4));
+        assert_eq!(
+            send(
+                &mut t,
+                "a=t,t=f,f=100,i=4",
+                to_dev.to_str().unwrap().as_bytes()
+            ),
+            error(4)
+        );
         fs::remove_file(&to_dev).unwrap();
-        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=5", b"/nonexistent/x"), error(5));
+        assert_eq!(
+            send(&mut t, "a=t,t=f,f=100,i=5", b"/nonexistent/x"),
+            error(5)
+        );
         assert_eq!(send(&mut t, "a=t,t=f,f=100,i=5", b"/etc/hosts"), error(5));
         // A pipe with no writer is refused at once, not waited on.
         let fifo = dir.join(format!("mightty-graphics-fifo-{}", std::process::id()));
         let _ = fs::remove_file(&fifo);
-        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
-        assert_eq!(send(&mut t, "a=t,t=f,f=100,i=9", fifo.to_str().unwrap().as_bytes()), error(9));
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            send(
+                &mut t,
+                "a=t,t=f,f=100,i=9",
+                fifo.to_str().unwrap().as_bytes()
+            ),
+            error(9)
+        );
         fs::remove_file(&fifo).unwrap();
     }
 
@@ -1796,7 +2297,10 @@ mod tests {
         send(&mut t, "a=d,d=i,i=1", &[]);
         assert_eq!(send(&mut t, "a=p,i=1,C=1", &[]), "\x1b_Gi=1;OK\x1b\\");
         send(&mut t, "a=d,d=I,i=1", &[]);
-        assert_eq!(send(&mut t, "a=p,i=1", &[]), "\x1b_Gi=1;ENOENT:no such image\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=1", &[]),
+            "\x1b_Gi=1;ENOENT:no such image\x1b\\"
+        );
         send(&mut t, "a=p,i=2,C=1", &[]);
         send(&mut t, "a=d", &[]);
         assert!(t.image_placements().is_empty());
@@ -1832,7 +2336,10 @@ mod tests {
         send(&mut t, "a=T,f=32,s=1,v=1,i=1", &rgba(1, 1));
         t.feed(b"\x1b[?1049h");
         assert!(t.image_placements().is_empty());
-        assert_eq!(send(&mut t, "a=p,i=1", &[]), "\x1b_Gi=1;ENOENT:no such image\x1b\\");
+        assert_eq!(
+            send(&mut t, "a=p,i=1", &[]),
+            "\x1b_Gi=1;ENOENT:no such image\x1b\\"
+        );
         send(&mut t, "a=T,f=32,s=1,v=1,i=1", &rgba(1, 1));
         // Scrolling the alternate screen moves its images; off the top, they go.
         t.feed(b"\x1b[3;1H");
@@ -1850,6 +2357,9 @@ mod tests {
     fn size_reports() {
         let mut t = term();
         t.feed(b"\x1b[16t\x1b[14t\x1b[18t");
-        assert_eq!(t.take_responses(), b"\x1b[6;20;10t\x1b[4;200;240t\x1b[8;10;24t");
+        assert_eq!(
+            t.take_responses(),
+            b"\x1b[6;20;10t\x1b[4;200;240t\x1b[8;10;24t"
+        );
     }
 }

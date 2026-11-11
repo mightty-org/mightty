@@ -15,7 +15,12 @@ pub fn available() -> bool {
 }
 
 unsafe fn center() -> Id {
-    unsafe { msg!(class(c"UNUserNotificationCenter"), c"currentNotificationCenter") }
+    unsafe {
+        msg!(
+            class(c"UNUserNotificationCenter"),
+            c"currentNotificationCenter"
+        )
+    }
 }
 
 /// Makes `delegate` receive clicks on banners
@@ -38,7 +43,14 @@ fn request_permission() {
     static ASKED: std::sync::Once = std::sync::Once::new();
     // UNAuthorizationOptionSound | UNAuthorizationOptionAlert.
     // SAFETY: documented signature; the handler is a global block.
-    ASKED.call_once(|| unsafe { call!(center(), c"requestAuthorizationWithOptions:completionHandler:", 2usize | 4, &AUTHORIZED) });
+    ASKED.call_once(|| unsafe {
+        call!(
+            center(),
+            c"requestAuthorizationWithOptions:completionHandler:",
+            2usize | 4,
+            &AUTHORIZED
+        )
+    });
 }
 
 fn identifier(pane: u64) -> Id {
@@ -59,7 +71,12 @@ pub fn post(pane: u64, title: &str, body: &str) {
         let sound: Id = msg!(class(c"UNNotificationSound"), c"defaultSound");
         call!(content, c"setSound:", sound);
         let number: Id = msg!(class(c"NSNumber"), c"numberWithUnsignedLongLong:", pane);
-        let info: Id = msg!(class(c"NSDictionary"), c"dictionaryWithObject:forKey:", number, nsstring("pane"));
+        let info: Id = msg!(
+            class(c"NSDictionary"),
+            c"dictionaryWithObject:forKey:",
+            number,
+            nsstring("pane")
+        );
         call!(content, c"setUserInfo:", info);
         let request: Id = msg!(
             class(c"UNNotificationRequest"),
@@ -68,7 +85,12 @@ pub fn post(pane: u64, title: &str, body: &str) {
             content,
             NIL
         );
-        call!(center(), c"addNotificationRequest:withCompletionHandler:", request, NIL);
+        call!(
+            center(),
+            c"addNotificationRequest:withCompletionHandler:",
+            request,
+            NIL
+        );
     }
 }
 
@@ -80,7 +102,11 @@ pub fn remove(pane: u64) {
     // SAFETY: main thread; documented signatures.
     unsafe {
         let ids: Id = msg!(class(c"NSArray"), c"arrayWithObject:", identifier(pane));
-        call!(center(), c"removeDeliveredNotificationsWithIdentifiers:", ids);
+        call!(
+            center(),
+            c"removeDeliveredNotificationsWithIdentifiers:",
+            ids
+        );
     }
 }
 

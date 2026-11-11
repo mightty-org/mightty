@@ -26,7 +26,12 @@ fn search_field_class() -> Id {
     extern "C" fn text_rect(cell: Id, _: Sel, bounds: CGRect) -> CGRect {
         // SAFETY: `cell` is a MighttySearchFieldCell; documented signatures.
         unsafe {
-            let mut rect = send_super_rect(cell, class(c"NSSearchFieldCell"), c"searchTextRectForBounds:", (bounds,));
+            let mut rect = send_super_rect(
+                cell,
+                class(c"NSSearchFieldCell"),
+                c"searchTextRectForBounds:",
+                (bounds,),
+            );
             let reserved: isize = msg!(cell, c"tag");
             rect.size.width = (rect.size.width - reserved as f64).max(0.0);
             rect
@@ -38,14 +43,23 @@ fn search_field_class() -> Id {
     *CLASS.get_or_init(|| {
         // SAFETY: registering classes with documented method signatures.
         unsafe {
-            register_class(c"MighttySearchFieldCell", c"NSSearchFieldCell", &[(
-                c"searchTextRectForBounds:",
-                text_rect as *const c_void,
-                c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}",
-            )]);
+            register_class(
+                c"MighttySearchFieldCell",
+                c"NSSearchFieldCell",
+                &[(
+                    c"searchTextRectForBounds:",
+                    text_rect as *const c_void,
+                    c"{CGRect={CGPoint=dd}{CGSize=dd}}@:{CGRect={CGPoint=dd}{CGSize=dd}}",
+                )],
+            );
             let field = register_class(c"MighttySearchField", c"NSSearchField", &[]);
             // `+cellClass` is a class method: it goes on the metaclass.
-            class_addMethod(object_getClass(field), sel(c"cellClass"), cell_class as *const c_void, c"#@:".as_ptr());
+            class_addMethod(
+                object_getClass(field),
+                sel(c"cellClass"),
+                cell_class as *const c_void,
+                c"#@:".as_ptr(),
+            );
             field as usize
         }
     }) as Id
@@ -71,16 +85,30 @@ impl FindBar {
             let bounds = send_rect(container, c"bounds");
             let buttons = 3.0 * BUTTON + 2.0;
             let fixed = PAD + PAD + buttons + PAD;
-            let field_width = (bounds.size.width - 2.0 * MARGIN - fixed).clamp(FIELD_MIN_WIDTH, FIELD_WIDTH);
+            let field_width =
+                (bounds.size.width - 2.0 * MARGIN - fixed).clamp(FIELD_MIN_WIDTH, FIELD_WIDTH);
             let width = fixed + field_width;
-            let frame = rect((bounds.size.width - width - MARGIN).max(0.0), bounds.size.height - HEIGHT - MARGIN, width, HEIGHT);
+            let frame = rect(
+                (bounds.size.width - width - MARGIN).max(0.0),
+                bounds.size.height - HEIGHT - MARGIN,
+                width,
+                HEIGHT,
+            );
 
-            let panel: Id = msg!(msg!(class(c"NSVisualEffectView"), c"alloc"), c"initWithFrame:", frame);
+            let panel: Id = msg!(
+                msg!(class(c"NSVisualEffectView"), c"alloc"),
+                c"initWithFrame:",
+                frame
+            );
             call!(panel, c"setMaterial:", 6isize); // popover
             call!(panel, c"setBlendingMode:", 1isize); // within the window
             call!(panel, c"setState:", 1isize); // always active
             call!(panel, c"setAutoresizingMask:", 1usize | 8); // pinned to the top right
-            let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+            let name = if dark {
+                "NSAppearanceNameDarkAqua"
+            } else {
+                "NSAppearanceNameAqua"
+            };
             let appearance: Id = msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name));
             call!(panel, c"setAppearance:", appearance);
             call!(panel, c"setWantsLayer:", YES);
@@ -93,7 +121,11 @@ impl FindBar {
 
             let mut x = PAD;
             let field_y = (HEIGHT - FIELD_HEIGHT) / 2.0;
-            let field: Id = msg!(msg!(search_field_class(), c"alloc"), c"initWithFrame:", rect(x, field_y, field_width, FIELD_HEIGHT));
+            let field: Id = msg!(
+                msg!(search_field_class(), c"alloc"),
+                c"initWithFrame:",
+                rect(x, field_y, field_width, FIELD_HEIGHT)
+            );
             call!(field, c"setPlaceholderString:", nsstring("Find"));
             call!(field, c"setDelegate:", target);
             call!(field, c"setFocusRingType:", 1usize); // none: the panel already frames it
@@ -102,15 +134,30 @@ impl FindBar {
 
             // Inside the field, just left of its clear button; placed by `show_count`.
             let count: Id = msg!(class(c"NSTextField"), c"labelWithString:", nsstring(""));
-            let font: Id = msg!(class(c"NSFont"), c"monospacedDigitSystemFontOfSize:weight:", 11.0f64, 0.0f64);
+            let font: Id = msg!(
+                class(c"NSFont"),
+                c"monospacedDigitSystemFontOfSize:weight:",
+                11.0f64,
+                0.0f64
+            );
             call!(count, c"setFont:", font);
             call!(field, c"addSubview:", count);
 
             let button_y = (HEIGHT - BUTTON) / 2.0;
             let mut button = |symbol: &str, tip: &str, action: &std::ffi::CStr| {
-                let image: Id =
-                    msg!(class(c"NSImage"), c"imageWithSystemSymbolName:accessibilityDescription:", nsstring(symbol), nsstring(tip));
-                let button: Id = msg!(class(c"NSButton"), c"buttonWithImage:target:action:", image, target, sel(action));
+                let image: Id = msg!(
+                    class(c"NSImage"),
+                    c"imageWithSystemSymbolName:accessibilityDescription:",
+                    nsstring(symbol),
+                    nsstring(tip)
+                );
+                let button: Id = msg!(
+                    class(c"NSButton"),
+                    c"buttonWithImage:target:action:",
+                    image,
+                    target,
+                    sel(action)
+                );
                 call!(button, c"setFrame:", rect(x, button_y, BUTTON, BUTTON));
                 call!(button, c"setBezelStyle:", 13usize); // recessed
                 call!(button, c"setShowsBorderOnlyWhileMouseInside:", YES);
@@ -120,13 +167,24 @@ impl FindBar {
                 button
             };
             let older = button("chevron.up", "Older match (Return, ⌘G)", c"searchOlder:");
-            let newer = button("chevron.down", "Newer match (⇧Return, ⇧⌘G)", c"searchNewer:");
+            let newer = button(
+                "chevron.down",
+                "Newer match (⇧Return, ⇧⌘G)",
+                c"searchNewer:",
+            );
             button("xmark", "Close (Esc)", c"closeSearch:");
 
             call!(panel, c"setAlphaValue:", 0.0f64);
             call!(container, c"addSubview:", panel);
             call!(msg!(panel, c"animator"), c"setAlphaValue:", 1.0f64);
-            let mut bar = Self { panel, field, count, older, newer, shown: None };
+            let mut bar = Self {
+                panel,
+                field,
+                count,
+                older,
+                newer,
+                shown: None,
+            };
             bar.show_count(None, false);
             bar
         }
@@ -147,7 +205,14 @@ impl FindBar {
         // SAFETY: main thread; documented signatures.
         unsafe {
             call!(self.count, c"setStringValue:", nsstring(&text));
-            let color: Id = msg!(class(c"NSColor"), if missing { c"systemRedColor" } else { c"secondaryLabelColor" });
+            let color: Id = msg!(
+                class(c"NSColor"),
+                if missing {
+                    c"systemRedColor"
+                } else {
+                    c"secondaryLabelColor"
+                }
+            );
             call!(self.count, c"setTextColor:", color);
             // As wide as its text, centred on the field's height, ending at the clear button.
             call!(self.count, c"sizeToFit");
@@ -156,15 +221,28 @@ impl FindBar {
             let cell: Id = msg!(self.field, c"cell");
             let clear = send_rect_with(cell, c"cancelButtonRectForBounds:", (bounds,));
             let (width, height) = (size.size.width, size.size.height);
-            let frame = rect(clear.origin.x - width - GAP / 2.0, ((bounds.size.height - height) / 2.0).round(), width, height);
+            let frame = rect(
+                clear.origin.x - width - GAP / 2.0,
+                ((bounds.size.height - height) / 2.0).round(),
+                width,
+                height,
+            );
             call!(self.count, c"setFrame:", frame);
             // Keep the text clear of it, also while editing.
-            let reserved = if text.is_empty() { 0 } else { (width + GAP).ceil() as isize };
+            let reserved = if text.is_empty() {
+                0
+            } else {
+                (width + GAP).ceil() as isize
+            };
             call!(cell, c"setTag:", reserved);
             let editor: Id = msg!(self.field, c"currentEditor");
             if !editor.is_null() {
                 let clip: Id = msg!(editor, c"superview");
-                call!(clip, c"setFrame:", send_rect_with(cell, c"searchTextRectForBounds:", (bounds,)));
+                call!(
+                    clip,
+                    c"setFrame:",
+                    send_rect_with(cell, c"searchTextRectForBounds:", (bounds,))
+                );
             }
             call!(self.field, c"setNeedsDisplay:", YES);
             let enabled = if position.is_some() { YES } else { NO };
@@ -194,5 +272,8 @@ unsafe fn add(parent: Id, view: Id) {
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
-    CGRect { origin: CGPoint { x, y }, size: CGSize { width, height } }
+    CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize { width, height },
+    }
 }

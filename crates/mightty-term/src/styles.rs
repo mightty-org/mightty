@@ -23,7 +23,10 @@ pub struct Styles {
 
 impl Styles {
     pub(crate) fn new() -> Self {
-        let mut styles = Self { list: Vec::new(), recent: vec![(EMPTY, 0); RECENT].into_boxed_slice() };
+        let mut styles = Self {
+            list: Vec::new(),
+            recent: vec![(EMPTY, 0); RECENT].into_boxed_slice(),
+        };
         styles.list.push(Style::default());
         styles
     }
@@ -54,7 +57,8 @@ impl Styles {
             // Always id 0, so blank cells compare equal to `Cell::BLANK`.
             return StyleId::DEFAULT;
         }
-        let slot = &mut self.recent[(key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 52) as usize % RECENT];
+        let slot =
+            &mut self.recent[(key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 52) as usize % RECENT];
         // Some keys aren't exact (see `Style::key`); such styles are rare.
         if slot.0 != key || (!style.key_is_exact() && self.list[slot.1 as usize] != style) {
             *slot = (key, self.list.len() as u32);
@@ -88,14 +92,23 @@ impl Styles {
             ranks.push(n);
             n += word.count_ones();
         }
-        Live { bits, ranks, len: n as usize }
+        Live {
+            bits,
+            ranks,
+            len: n as usize,
+        }
     }
 
     /// Drops styles `live` doesn't hold and renumbers `rows` (the same rows
     /// `live` came from). Order is kept, so the table compacts in place
     /// without a second copy. Leaves room for at least `capacity` styles,
     /// so the table won't reallocate before it is next collected.
-    pub(crate) fn compact<'a>(&mut self, live: &Live, rows: impl Iterator<Item = &'a mut Row>, capacity: usize) {
+    pub(crate) fn compact<'a>(
+        &mut self,
+        live: &Live,
+        rows: impl Iterator<Item = &'a mut Row>,
+        capacity: usize,
+    ) {
         let mut kept = 0;
         for id in 0..self.list.len() {
             if live.contains(id) {

@@ -58,20 +58,32 @@ impl Subscriber {
 impl Events {
     /// Sends `connection` the events `patterns` match (all of them for
     /// `*`), replacing what it asked for before. An unknown name is an error.
-    pub fn subscribe(&self, connection: u64, patterns: Vec<String>, to: SyncSender<Value>) -> Result<(), String> {
+    pub fn subscribe(
+        &self,
+        connection: u64,
+        patterns: Vec<String>,
+        to: SyncSender<Value>,
+    ) -> Result<(), String> {
         for p in &patterns {
             let known = match p.strip_suffix('*') {
                 Some(prefix) => EVENTS.iter().any(|e| e.starts_with(prefix)),
                 None => EVENTS.contains(&p.as_str()),
             };
             if !known {
-                return Err(format!("unknown event `{p}`; events are {}", EVENTS.join(", ")));
+                return Err(format!(
+                    "unknown event `{p}`; events are {}",
+                    EVENTS.join(", ")
+                ));
             }
         }
         let mut subscribers = self.subscribers.lock().unwrap();
         subscribers.retain(|s| s.connection != connection);
         if !patterns.is_empty() {
-            subscribers.push(Subscriber { connection, patterns, to });
+            subscribers.push(Subscriber {
+                connection,
+                patterns,
+                to,
+            });
         }
         self.any.store(!subscribers.is_empty(), Ordering::Relaxed);
         Ok(())
@@ -97,10 +109,20 @@ impl Events {
         if !subscribers.iter().any(|s| s.wants(event)) {
             return;
         }
-        let message = Value::object([("jsonrpc", "2.0".into()), ("method", event.into()), ("params", params())]);
+        let message = Value::object([
+            ("jsonrpc", "2.0".into()),
+            ("method", event.into()),
+            ("params", params()),
+        ]);
         // A connection that has gone away stops listening; one that has
         // fallen behind misses the event.
-        subscribers.retain(|s| !s.wants(event) || !matches!(s.to.try_send(message.clone()), Err(TrySendError::Disconnected(_))));
+        subscribers.retain(|s| {
+            !s.wants(event)
+                || !matches!(
+                    s.to.try_send(message.clone()),
+                    Err(TrySendError::Disconnected(_))
+                )
+        });
         self.any.store(!subscribers.is_empty(), Ordering::Relaxed);
     }
 }

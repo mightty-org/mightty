@@ -13,7 +13,12 @@ use mightty_mux::{Headless, Mux, SpawnOptions};
 use mightty_pty::{Pty, WindowSize};
 use mightty_term::Term;
 
-const SIZE: WindowSize = WindowSize { cols: 120, rows: 40, pixel_width: 0, pixel_height: 0 };
+const SIZE: WindowSize = WindowSize {
+    cols: 120,
+    rows: 40,
+    pixel_width: 0,
+    pixel_height: 0,
+};
 
 /// `cat file` in a PTY; `parse` decides what happens to each read.
 fn direct(file: &str, mut parse: impl FnMut(&[u8])) -> Duration {
@@ -60,7 +65,10 @@ fn median(mut f: impl FnMut() -> Duration) -> f64 {
 }
 
 fn main() {
-    println!("{:14} {:>12} {:>14} {:>12}", "workload", "raw ceiling", "single thread", "mux");
+    println!(
+        "{:14} {:>12} {:>14} {:>12}",
+        "workload", "raw ceiling", "single thread", "mux"
+    );
     for file in std::env::args().skip(1) {
         let mib = std::fs::metadata(&file).unwrap().len() as f64 / 1048576.0;
         let raw = median(|| direct(&file, |_| {}));
@@ -70,6 +78,11 @@ fn main() {
         });
         let muxed = median(|| mux(&file));
         let name = Path::new(&file).file_stem().unwrap().to_string_lossy();
-        println!("{name:14} {:>8.0} MiB/s {:>10.0} MiB/s {:>8.0} MiB/s", mib / raw, mib / single, mib / muxed);
+        println!(
+            "{name:14} {:>8.0} MiB/s {:>10.0} MiB/s {:>8.0} MiB/s",
+            mib / raw,
+            mib / single,
+            mib / muxed
+        );
     }
 }

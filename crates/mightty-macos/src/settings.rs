@@ -150,9 +150,12 @@ fn keys(bytes: &[u8]) -> Vec<Key> {
 /// A setting's section, by its name.
 fn section(name: &str) -> &'static str {
     match name {
-        "theme" | "background" | "foreground" | "cursor-color" | "cursor-text" | "palette" | "window-colorspace" => "Colours",
+        "theme" | "background" | "foreground" | "cursor-color" | "cursor-text" | "palette"
+        | "window-colorspace" => "Colours",
         n if n.starts_with("selection-") || n.starts_with("search-") => "Colours",
-        n if n.starts_with("font") || n.starts_with("adjust-cell") || n == "grapheme-width" => "Font",
+        n if n.starts_with("font") || n.starts_with("adjust-cell") || n == "grapheme-width" => {
+            "Font"
+        }
         n if n.starts_with("quick-terminal") => "Quick terminal",
         n if n.starts_with("bell") => "Bell",
         "keybind" | "macos-option-as-alt" => "Keys",
@@ -165,21 +168,38 @@ fn section(name: &str) -> &'static str {
         {
             "Window"
         }
-        n if n.starts_with("clipboard") || n.starts_with("mouse-") || n == "copy-on-select" || n == "password-mask" || n == "macos-auto-secure-input" => {
+        n if n.starts_with("clipboard")
+            || n.starts_with("mouse-")
+            || n == "copy-on-select"
+            || n == "password-mask"
+            || n == "macos-auto-secure-input" =>
+        {
             "Behaviour"
         }
         _ => "General",
     }
 }
 
-const SECTIONS: &[&str] = &["Colours", "Font", "Window", "General", "Behaviour", "Keys", "Bell", "Quick terminal"];
+const SECTIONS: &[&str] = &[
+    "Colours",
+    "Font",
+    "Window",
+    "General",
+    "Behaviour",
+    "Keys",
+    "Bell",
+    "Quick terminal",
+];
 
 /// What a picker picks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pick {
     Theme,
     /// For `font-family` (or a bold or italic one); monospaced ones only unless `all`.
-    Font { setting: &'static str, all: bool },
+    Font {
+        setting: &'static str,
+        all: bool,
+    },
 }
 
 enum Mode {
@@ -187,9 +207,16 @@ enum Mode {
     /// Typing a search.
     Search,
     /// Typing a value for the selected setting, and the suggestion picked.
-    Edit { buffer: String, pick: usize },
+    Edit {
+        buffer: String,
+        pick: usize,
+    },
     /// Choosing a theme or a font: the filter typed, the one selected.
-    Pick { what: Pick, filter: String, selected: usize },
+    Pick {
+        what: Pick,
+        filter: String,
+        selected: usize,
+    },
 }
 
 struct App {
@@ -237,14 +264,20 @@ fn monospaced(fonts: &[String]) -> Vec<String> {
 
 /// The font families installed, sorted.
 fn font_families() -> Vec<String> {
-    use crate::ffi::{CFArrayGetCount, CFArrayGetValueAtIndex, CFRelease, CTFontManagerCopyAvailableFontFamilyNames, string_from_ns};
+    use crate::ffi::{
+        CFArrayGetCount, CFArrayGetValueAtIndex, CFRelease,
+        CTFontManagerCopyAvailableFontFamilyNames, string_from_ns,
+    };
     // SAFETY: a CFArray of CFStrings (bridged to NSString), released after.
     unsafe {
         let names = CTFontManagerCopyAvailableFontFamilyNames();
         if names.is_null() {
             return Vec::new();
         }
-        let mut out: Vec<String> = (0..CFArrayGetCount(names)).map(|i| string_from_ns(CFArrayGetValueAtIndex(names, i) as _)).filter(|n| !n.starts_with('.')).collect();
+        let mut out: Vec<String> = (0..CFArrayGetCount(names))
+            .map(|i| string_from_ns(CFArrayGetValueAtIndex(names, i) as _))
+            .filter(|n| !n.starts_with('.'))
+            .collect();
         CFRelease(names);
         out.sort_by_key(|n| n.to_lowercase());
         out.dedup();
@@ -263,7 +296,10 @@ pub fn export() -> String {
         .settings()
         .into_iter()
         .map(|s| {
-            let choices: Vec<Value> = config::choices(s.name).iter().map(|c| Value::from(*c)).collect();
+            let choices: Vec<Value> = config::choices(s.name)
+                .iter()
+                .map(|c| Value::from(*c))
+                .collect();
             Value::object([
                 ("name", Value::from(s.name)),
                 ("section", Value::from(section(s.name))),
@@ -279,8 +315,15 @@ pub fn export() -> String {
     let actions: Vec<Value> = ACTIONS
         .iter()
         .map(|&(name, help)| {
-            let key = Action::parse(name).ok().and_then(|a| bindings.trigger_for(&a)).map(crate::palette::symbols);
-            Value::object([("name", Value::from(name)), ("key", Value::from(key)), ("help", Value::from(help))])
+            let key = Action::parse(name)
+                .ok()
+                .and_then(|a| bindings.trigger_for(&a))
+                .map(crate::palette::symbols);
+            Value::object([
+                ("name", Value::from(name)),
+                ("key", Value::from(key)),
+                ("help", Value::from(help)),
+            ])
         })
         .collect();
     let sections: Vec<Value> = SECTIONS.iter().map(|s| Value::from(*s)).collect();
@@ -294,7 +337,9 @@ pub fn export() -> String {
 }
 
 pub fn main() -> io::Result<()> {
-    let path = config::config_dir().ok_or_else(|| io::Error::other("HOME is unset"))?.join("config");
+    let path = config::config_dir()
+        .ok_or_else(|| io::Error::other("HOME is unset"))?
+        .join("config");
     let mut app = App {
         path,
         settings: Vec::new(),
@@ -360,7 +405,10 @@ impl App {
             .flat_map(|&sect| {
                 let query = &query;
                 self.settings.iter().enumerate().filter(move |(_, s)| {
-                    section(s.name) == sect && (query.is_empty() || s.name.contains(query.as_str()) || s.help.to_lowercase().contains(query.as_str()))
+                    section(s.name) == sect
+                        && (query.is_empty()
+                            || s.name.contains(query.as_str())
+                            || s.help.to_lowercase().contains(query.as_str()))
                 })
             })
             .map(|(i, _)| i)
@@ -390,7 +438,10 @@ impl App {
     /// Those holding `filter`, ignoring case.
     fn matching(&mut self, what: Pick, filter: &str) -> Vec<String> {
         let filter = filter.to_lowercase();
-        self.items(what).into_iter().filter(|i| i.to_lowercase().contains(&filter)).collect()
+        self.items(what)
+            .into_iter()
+            .filter(|i| i.to_lowercase().contains(&filter))
+            .collect()
     }
 
     /// Handles `key`; true to quit.
@@ -399,9 +450,13 @@ impl App {
             Mode::List => match key {
                 Key::Char('q') | Key::Escape | Key::Ctrl('c') => return true,
                 Key::Up | Key::Char('k') => self.selected = self.selected.saturating_sub(1),
-                Key::Down | Key::Char('j') => self.selected = (self.selected + 1).min(self.shown.len().saturating_sub(1)),
+                Key::Down | Key::Char('j') => {
+                    self.selected = (self.selected + 1).min(self.shown.len().saturating_sub(1))
+                }
                 Key::PageUp => self.selected = self.selected.saturating_sub(10),
-                Key::PageDown => self.selected = (self.selected + 10).min(self.shown.len().saturating_sub(1)),
+                Key::PageDown => {
+                    self.selected = (self.selected + 10).min(self.shown.len().saturating_sub(1))
+                }
                 Key::Home => self.selected = 0,
                 Key::End => self.selected = self.shown.len().saturating_sub(1),
                 Key::Tab => self.next_section(),
@@ -457,17 +512,23 @@ impl App {
                     let (buffer, pick) = (buffer.clone(), *pick);
                     let (head, _, matches) = self.suggest(&buffer);
                     if let Some(found) = matches.get(pick.min(matches.len().saturating_sub(1))) {
-                        self.mode = Mode::Edit { buffer: format!("{head}{found}"), pick: 0 };
+                        self.mode = Mode::Edit {
+                            buffer: format!("{head}{found}"),
+                            pick: 0,
+                        };
                     }
                 }
                 Key::Enter => {
                     let value = buffer.trim().to_owned();
-                    let Some(name) = self.current().map(|s| s.name) else { return false };
+                    let Some(name) = self.current().map(|s| s.name) else {
+                        return false;
+                    };
                     // A font that isn't installed would only fall back to the default.
                     if name.starts_with("font-family") && !value.is_empty() {
                         let fonts = self.fonts.get_or_insert_with(font_families);
                         if !fonts.iter().any(|f| f.eq_ignore_ascii_case(&value)) {
-                            self.status = format!("{name}: no font family named {value} is installed");
+                            self.status =
+                                format!("{name}: no font family named {value} is installed");
                             return false;
                         }
                     }
@@ -476,7 +537,11 @@ impl App {
                 }
                 _ => {}
             },
-            Mode::Pick { what, filter, selected } => {
+            Mode::Pick {
+                what,
+                filter,
+                selected,
+            } => {
                 let what_now = *what;
                 match key {
                     Key::Escape | Key::Ctrl('c') => {
@@ -520,7 +585,14 @@ impl App {
                     }
                     _ => {}
                 }
-                let Mode::Pick { what, filter, selected } = &self.mode else { return false };
+                let Mode::Pick {
+                    what,
+                    filter,
+                    selected,
+                } = &self.mode
+                else {
+                    return false;
+                };
                 let (what, filter, at) = (*what, filter.clone(), *selected);
                 let matching = self.matching(what, &filter);
                 let at = at.min(matching.len().saturating_sub(1));
@@ -535,8 +607,13 @@ impl App {
     }
 
     fn next_section(&mut self) {
-        let Some(here) = self.current().map(|s| section(s.name)) else { return };
-        let next = self.shown.iter().position(|&i| section(self.settings[i].name) != here && self.shown.iter().position(|&j| j == i) > Some(self.selected));
+        let Some(here) = self.current().map(|s| section(s.name)) else {
+            return;
+        };
+        let next = self.shown.iter().position(|&i| {
+            section(self.settings[i].name) != here
+                && self.shown.iter().position(|&j| j == i) > Some(self.selected)
+        });
         self.selected = next.unwrap_or(0);
     }
 
@@ -547,10 +624,16 @@ impl App {
         }
         if s.name.starts_with("font-family") {
             let setting = s.name;
-            return self.open_picker(Pick::Font { setting, all: false });
+            return self.open_picker(Pick::Font {
+                setting,
+                all: false,
+            });
         }
         if s.many {
-            self.status = format!("{} can be given many times: edit it in the file (e)", s.name);
+            self.status = format!(
+                "{} can be given many times: edit it in the file (e)",
+                s.name
+            );
             return;
         }
         if s.value == "BOOL" {
@@ -558,20 +641,28 @@ impl App {
             let name = s.name;
             return self.save(name, Some(if on { "false" } else { "true" }));
         }
-        self.mode = Mode::Edit { buffer: s.current.clone().unwrap_or_default(), pick: 0 };
+        self.mode = Mode::Edit {
+            buffer: s.current.clone().unwrap_or_default(),
+            pick: 0,
+        };
     }
 
     /// The values the selected setting can take, if from a few: its
     /// choices, the themes, or the fonts installed.
     fn options(&mut self) -> Vec<String> {
-        let Some(name) = self.current().map(|s| s.name) else { return Vec::new() };
+        let Some(name) = self.current().map(|s| s.name) else {
+            return Vec::new();
+        };
         if name == "theme" {
             return self.themes.clone();
         }
         if name.starts_with("font-family") {
             return self.fonts.get_or_insert_with(font_families).clone();
         }
-        config::choices(name).iter().map(|c| (*c).to_owned()).collect()
+        config::choices(name)
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect()
     }
 
     /// For what's typed: the part kept (before the last comma, in a comma
@@ -581,7 +672,10 @@ impl App {
         let options = self.options();
         let list = self.current().is_some_and(|s| s.name == "bell-features");
         let (head, word) = match buffer.rfind(',').filter(|_| list) {
-            Some(at) => (buffer[..=at].to_owned(), buffer[at + 1..].trim_start().to_owned()),
+            Some(at) => (
+                buffer[..=at].to_owned(),
+                buffer[at + 1..].trim_start().to_owned(),
+            ),
             None => (String::new(), buffer.to_owned()),
         };
         let lower = word.to_lowercase();
@@ -604,10 +698,20 @@ impl App {
             Pick::Theme => "theme",
             Pick::Font { setting, .. } => setting,
         };
-        let current = self.settings.iter().find(|s| s.name == setting).and_then(|s| s.current.clone());
+        let current = self
+            .settings
+            .iter()
+            .find(|s| s.name == setting)
+            .and_then(|s| s.current.clone());
         let items = self.items(what);
-        let selected = current.and_then(|c| items.iter().position(|t| t.eq_ignore_ascii_case(&c))).unwrap_or(0);
-        self.mode = Mode::Pick { what, filter: String::new(), selected };
+        let selected = current
+            .and_then(|c| items.iter().position(|t| t.eq_ignore_ascii_case(&c)))
+            .unwrap_or(0);
+        self.mode = Mode::Pick {
+            what,
+            filter: String::new(),
+            selected,
+        };
         let name = items.get(selected).cloned();
         self.preview_pick(what, name.as_deref());
     }
@@ -652,8 +756,16 @@ impl App {
         print!("\x1b[0m\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let quoted = format!("'{}'", self.path.display().to_string().replace('\'', "'\\''"));
-        let status = Command::new(shell).args(["-lic", &format!("exec ${{VISUAL:-${{EDITOR:-vi}}}} {quoted}")]).status();
+        let quoted = format!(
+            "'{}'",
+            self.path.display().to_string().replace('\'', "'\\''")
+        );
+        let status = Command::new(shell)
+            .args([
+                "-lic",
+                &format!("exec ${{VISUAL:-${{EDITOR:-vi}}}} {quoted}"),
+            ])
+            .status();
         print!("\x1b[?1049h\x1b[?25l");
         let _ = io::stdout().flush();
         self.status = match status {
@@ -674,9 +786,14 @@ impl App {
             out += "\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07";
             self.previewing = false;
         }
-        if let Some(text) = name.and_then(config::theme_path).and_then(|p| std::fs::read_to_string(p).ok()) {
+        if let Some(text) = name
+            .and_then(config::theme_path)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+        {
             for line in text.lines() {
-                let Some((key, value)) = line.split_once('=') else { continue };
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
                 let value = value.trim();
                 match key.trim() {
                     "palette" => {
@@ -717,19 +834,38 @@ impl App {
             Some(rest) if !home.is_empty() => format!("~{rest}"),
             _ => shown,
         };
-        line(&mut out, &format!("\x1b[1m Mightty settings\x1b[0m\x1b[2m  {}", fit(&shown, cols.saturating_sub(20))));
+        line(
+            &mut out,
+            &format!(
+                "\x1b[1m Mightty settings\x1b[0m\x1b[2m  {}",
+                fit(&shown, cols.saturating_sub(20))
+            ),
+        );
         line(&mut out, "");
         let body = rows.saturating_sub(7);
         match &self.mode {
-            Mode::Pick { what, filter, selected } => {
+            Mode::Pick {
+                what,
+                filter,
+                selected,
+            } => {
                 let (what, filter, selected) = (*what, filter.clone(), &selected.clone());
                 let matching = self.matching(what, &filter);
                 let title = match what {
                     Pick::Theme => format!("Theme  {} themes", matching.len()),
-                    Pick::Font { setting, all } => format!("{setting}  {} {}fonts", matching.len(), if all { "" } else { "monospaced " }),
+                    Pick::Font { setting, all } => format!(
+                        "{setting}  {} {}fonts",
+                        matching.len(),
+                        if all { "" } else { "monospaced " }
+                    ),
                 };
-                line(&mut out, &format!(" \x1b[1m{title}\x1b[0m   filter: {filter}\x1b[7m \x1b[0m"));
-                let top = selected.saturating_sub(body.saturating_sub(1) / 2).min(matching.len().saturating_sub(body.saturating_sub(1)));
+                line(
+                    &mut out,
+                    &format!(" \x1b[1m{title}\x1b[0m   filter: {filter}\x1b[7m \x1b[0m"),
+                );
+                let top = selected
+                    .saturating_sub(body.saturating_sub(1) / 2)
+                    .min(matching.len().saturating_sub(body.saturating_sub(1)));
                 let list = 34.min(cols / 2);
                 for r in 0..body.saturating_sub(1) {
                     let name = matching.get(top + r).map(String::as_str).unwrap_or("");
@@ -749,11 +885,20 @@ impl App {
                         9 => "\x1b[1mbold\x1b[0m \x1b[2mdim\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m".into(),
                         _ => String::new(),
                     };
-                    line(&mut out, &format!(" {mark}{}\x1b[0m   {sample}", fit(name, list)));
+                    line(
+                        &mut out,
+                        &format!(" {mark}{}\x1b[0m   {sample}", fit(name, list)),
+                    );
                 }
             }
             _ => {
-                let Self { shown, settings, selected, top, .. } = &mut *self;
+                let Self {
+                    shown,
+                    settings,
+                    selected,
+                    top,
+                    ..
+                } = &mut *self;
                 // Rows: section headings, then settings; scrolled to keep the selection in view.
                 let mut lines: Vec<(Option<usize>, String)> = Vec::new();
                 let mut last = "";
@@ -769,10 +914,17 @@ impl App {
                         (Some(v), _) => v.clone(),
                         (None, _) => "\x1b[2m—".to_owned(),
                     };
-                    let row = format!("  {}  {}", fit(s.name, 28), fit(&value, cols.saturating_sub(34)));
+                    let row = format!(
+                        "  {}  {}",
+                        fit(s.name, 28),
+                        fit(&value, cols.saturating_sub(34))
+                    );
                     lines.push((Some(k), row));
                 }
-                let at = lines.iter().position(|l| l.0 == Some(*selected)).unwrap_or(0);
+                let at = lines
+                    .iter()
+                    .position(|l| l.0 == Some(*selected))
+                    .unwrap_or(0);
                 if at < *top {
                     *top = at.saturating_sub(1);
                 } else if at >= *top + body {
@@ -780,7 +932,10 @@ impl App {
                 }
                 for r in 0..body {
                     match lines.get(*top + r) {
-                        Some((Some(k), row)) if *k == *selected => line(&mut out, &format!("\x1b[7m {}", fit(row, cols.saturating_sub(1)))),
+                        Some((Some(k), row)) if *k == *selected => line(
+                            &mut out,
+                            &format!("\x1b[7m {}", fit(row, cols.saturating_sub(1))),
+                        ),
                         Some((_, row)) => line(&mut out, &format!(" {row}")),
                         None => line(&mut out, ""),
                     }
@@ -789,11 +944,22 @@ impl App {
         }
         // The selected setting's help, then what was done, then the keys.
         let help = match &self.mode {
-            Mode::Pick { what: Pick::Theme, .. } => "↑↓ preview   type to filter   ↵ use this theme   esc back".to_owned(),
-            Mode::Pick { .. } => "↑↓ preview   type to filter   tab monospaced/all   ↵ use this font   esc back".to_owned(),
-            _ => self.current().map(|s| format!("{}: {}", s.name, s.help)).unwrap_or_default(),
+            Mode::Pick {
+                what: Pick::Theme, ..
+            } => "↑↓ preview   type to filter   ↵ use this theme   esc back".to_owned(),
+            Mode::Pick { .. } => {
+                "↑↓ preview   type to filter   tab monospaced/all   ↵ use this font   esc back"
+                    .to_owned()
+            }
+            _ => self
+                .current()
+                .map(|s| format!("{}: {}", s.name, s.help))
+                .unwrap_or_default(),
         };
-        line(&mut out, &format!("\x1b[2m{}", fit(&help, cols.saturating_sub(1))));
+        line(
+            &mut out,
+            &format!("\x1b[2m{}", fit(&help, cols.saturating_sub(1))),
+        );
         let editing = match &self.mode {
             Mode::Edit { buffer, pick } => Some((buffer.clone(), *pick)),
             _ => None,
@@ -818,9 +984,17 @@ impl App {
                         break;
                     }
                     used += m.chars().count() + 2;
-                    candidates += &if i == pick { format!("\x1b[7m {m} \x1b[0m") } else { format!(" {m} ") };
+                    candidates += &if i == pick {
+                        format!("\x1b[7m {m} \x1b[0m")
+                    } else {
+                        format!(" {m} ")
+                    };
                 }
-                let keys = if matches.is_empty() { "↵ save  esc cancel  ^U clear" } else { "→ complete  ↑↓ choose  ↵ save  esc cancel" };
+                let keys = if matches.is_empty() {
+                    "↵ save  esc cancel  ^U clear"
+                } else {
+                    "→ complete  ↑↓ choose  ↵ save  esc cancel"
+                };
                 // The suggestions on the help line, above the value being typed.
                 if !matches.is_empty() {
                     let at = out.rfind("\r\n").unwrap_or(0);
@@ -838,7 +1012,13 @@ impl App {
             _ => format!("\x1b[33m{}", self.status),
         };
         line(&mut out, &prompt);
-        out += &format!("\x1b[2m{}\x1b[0m\x1b[K", fit(" ↵ edit   / search   t themes   d default   e edit file   tab next section   q quit", cols.saturating_sub(1)));
+        out += &format!(
+            "\x1b[2m{}\x1b[0m\x1b[K",
+            fit(
+                " ↵ edit   / search   t themes   d default   e edit file   tab next section   q quit",
+                cols.saturating_sub(1)
+            )
+        );
         out += "\x1b[J";
         print!("{out}");
         let _ = io::stdout().flush();
