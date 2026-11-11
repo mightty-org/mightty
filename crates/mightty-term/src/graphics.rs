@@ -8,11 +8,12 @@
 //! not (`o=z`), in chunks (`m=1`); `a=t/T/p/q/d` with every delete
 //! specifier; source rectangles, cell offsets, cell sizes and z-index;
 //! Unicode placeholders (`U=1`); animation: frames (`a=f`), playing them
-//! (`a=a`) and composing them (`a=c`). Not yet: shared memory (`t=s`) and
-//! relative placements, which are refused with an error.
+//! (`a=a`) and composing them (`a=c`); relative placements (`P=`, `Q=`),
+//! which follow their parent, grid or virtual, and go with it. Not yet:
+//! shared memory (`t=s`), which is refused with an error.
 
-use std::collections::HashSet;
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::{fs, mem};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -36,6 +37,9 @@ const MAX_CELLS: u32 = 1000;
 /// Lookups scan, and every placement is drawn each frame.
 const MAX_IMAGES: usize = 4096;
 const MAX_PLACEMENTS: usize = 4096;
+/// Placements above a relative one: its parent, the parent's parent and
+/// so on (the protocol asks for at least 8).
+const MAX_DEPTH: usize = 8;
 /// Frames an image may have; their pixels count toward `MAX_STORED` too.
 const MAX_FRAMES: usize = 10_000;
 /// A frame's gap when none is given, in milliseconds, as in kitty.
@@ -151,9 +155,23 @@ pub struct Placement {
     pub cells: [u32; 2],
     /// Drawn below the text when negative.
     pub z: i32,
+    /// For a relative placement: its parent's image and placement ids,
+    /// and its offset from the parent's top-left cell, columns and rows.
+    parent: Option<(u32, u32)>,
+    shift: [i32; 2],
 }
 
 impl Placement {
+    fn key(&self) -> (u32, u32) {
+        (self.image_id, self.id)
+    }
+
+    /// Places a relative placement by its parent's top-left cell.
+    fn hang(&mut self, line: i64, col: usize) {
+        self.line = line + i64::from(self.shift[1]);
+        self.col = (col as i64 + i64::from(self.shift[0])).max(0) as usize;
+    }
+
     fn covers(&self, line: i64, col: usize) -> bool {
         (self.line..self.line + self.cells[1] as i64).contains(&line) && (self.col..self.col + self.cells[0] as usize).contains(&col)
     }
@@ -167,6 +185,9 @@ pub(crate) struct Graphics {
     placements: Vec<Placement>,
     /// Placed with `U=1`: shown only where text holds [`PLACEHOLDER`]s.
     virtuals: Vec<Placement>,
+    /// Relative placements down from a virtual one: placed where its
+    /// placeholders show, as the screen is drawn.
+    floating: Vec<Placement>,
     /// A transmission arriving in chunks.
     loading: Option<Loading>,
     stored: usize,
@@ -234,7 +255,10 @@ struct Command {
     rows: u32,
     cursor_stays: bool,
     unicode: bool,
-    relative: bool,
+    /// `P`, `Q`: the image and placement a placement is relative to.
+    parent: [u32; 2],
+    /// `H`, `V`: its offset from the parent, in cells.
+    shift: [i32; 2],
     z: i32,
     delete: u8,
 }
@@ -261,7 +285,8 @@ impl Default for Command {
             rows: 0,
             cursor_stays: false,
             unicode: false,
-            relative: false,
+            parent: [0; 2],
+            shift: [0; 2],
             z: 0,
             delete: b'a',
         }
@@ -277,6 +302,7 @@ impl Command {
             let [key, b'=', value @ ..] = pair else { return None };
             let number = || -> Option<u32> { std::str::from_utf8(value).ok()?.parse().ok() };
             let letter = || -> Option<u8> { (value.len() == 1).then(|| value[0]) };
+            let signed = || -> Option<i32> { std::str::from_utf8(value).ok()?.parse().ok() };
             match *key {
                 b'a' => c.action = letter()?,
                 b'q' => c.quiet = number()? as u8,
@@ -301,8 +327,11 @@ impl Command {
                 b'r' => c.rows = number()?,
                 b'C' => c.cursor_stays = number()? == 1,
                 b'U' => c.unicode = number()? == 1,
-                b'P' | b'Q' => c.relative = true,
-                b'z' => c.z = std::str::from_utf8(value).ok()?.parse().ok()?,
+                b'P' => c.parent[0] = number()?,
+                b'Q' => c.parent[1] = number()?,
+                b'H' => c.shift[0] = signed()?,
+                b'V' => c.shift[1] = signed()?,
+                b'z' => c.z = signed()?,
                 b'd' => c.delete = letter()?,
                 _ => {}
             }
@@ -341,7 +370,7 @@ impl Graphics {
     fn make_room(&mut self, keep: u32) {
         let over = |g: &Self| g.stored > MAX_STORED || g.images.len() > MAX_IMAGES;
         if over(self) {
-            let mut placed: HashSet<u32> = self.placements.iter().chain(&self.virtuals).map(|p| p.image_id).collect();
+            let mut placed: HashSet<u32> = self.all_placements().map(|p| p.image_id).collect();
             placed.insert(keep);
             while over(self) && self.images.len() > 1 {
                 let unplaced = self.images.iter().position(|i| !placed.contains(&i.id));
@@ -360,6 +389,67 @@ impl Graphics {
         }
         self.placements.retain(|p| p.image_id != id);
         self.virtuals.retain(|p| p.image_id != id);
+        self.floating.retain(|p| p.image_id != id);
+        self.settle();
+    }
+
+    fn all_placements(&self) -> impl Iterator<Item = &Placement> {
+        self.placements.iter().chain(&self.virtuals).chain(&self.floating)
+    }
+
+    /// The placement `[image, placement]` names (any of the image's when 0),
+    /// for `child` to be placed relative to: its ids, unless that would make
+    /// a loop or a chain too long.
+    fn parent_for(&self, [image, placement]: [u32; 2], child: (u32, u32)) -> Result<(u32, u32), &'static str> {
+        let found = self.all_placements().find(|p| p.image_id == image && (placement == 0 || p.id == placement));
+        let Some(mut p) = found else { return Err("ENOPARENT:no such parent placement") };
+        let parent = p.key();
+        for _ in 0..MAX_DEPTH {
+            if p.key() == child {
+                return Err("ECYCLE:the placement would be its own parent");
+            }
+            // An orphan goes when placements settle, and its children with it.
+            let Some(up) = p.parent.and_then(|up| self.all_placements().find(|q| q.key() == up)) else { return Ok(parent) };
+            p = up;
+        }
+        Err("ETOODEEP:too many parents")
+    }
+
+    /// Moves relative placements to where their parents are, and drops
+    /// those whose parent is gone, down the chain, with their images when
+    /// left without placements. One whose chain starts at a virtual
+    /// placement floats until the screen is drawn.
+    fn settle(&mut self) {
+        if self.floating.is_empty() && !self.placements.iter().any(|p| p.parent.is_some()) {
+            return;
+        }
+        let (mut pending, grid): (Vec<_>, Vec<_>) = mem::take(&mut self.placements).into_iter().partition(|p| p.parent.is_some());
+        self.placements = grid;
+        pending.append(&mut self.floating);
+        loop {
+            let before = pending.len();
+            for mut p in mem::take(&mut pending) {
+                let up = p.parent;
+                let is_parent = |q: &&Placement| Some(q.key()) == up;
+                if let Some(parent) = self.placements.iter().find(is_parent) {
+                    p.hang(parent.line, parent.col);
+                    self.placements.push(p);
+                } else if self.virtuals.iter().chain(&self.floating).any(|q| is_parent(&q)) {
+                    self.floating.push(p);
+                } else {
+                    pending.push(p);
+                }
+            }
+            if pending.len() == before {
+                break;
+            }
+        }
+        let orphans: HashSet<u32> = pending.iter().map(|p| p.image_id).collect();
+        for id in orphans {
+            if !self.all_placements().any(|p| p.image_id == id) {
+                self.remove_image(id);
+            }
+        }
     }
 
     /// Counting down from the top, clear of the small ids clients pick.
@@ -375,7 +465,7 @@ impl Graphics {
     /// Placements of image `id` show its current frame.
     fn show_frame(&mut self, id: u32) {
         let Some(data) = self.image(id).map(|i| i.shown().clone()) else { return };
-        for p in self.placements.iter_mut().chain(&mut self.virtuals).filter(|p| p.image_id == id) {
+        for p in self.placements.iter_mut().chain(&mut self.virtuals).chain(&mut self.floating).filter(|p| p.image_id == id) {
             p.image = data.clone();
         }
     }
@@ -529,24 +619,28 @@ impl Graphics {
     /// rows, as the text there scrolls; those that leave the region go.
     pub(crate) fn scroll(&mut self, lines_scrolled: u64, top: usize, bottom: usize, delta: i64) {
         let (top, bottom) = (lines_scrolled as i64 + top as i64, lines_scrolled as i64 + bottom as i64);
+        // Relative placements follow their parents.
         self.placements.retain_mut(|p| {
-            if !(top..=bottom).contains(&p.line) {
+            if p.parent.is_some() || !(top..=bottom).contains(&p.line) {
                 return true;
             }
             p.line += delta;
             p.line + p.cells[1] as i64 > top && p.line <= bottom
         });
+        self.settle();
     }
 
     /// Drops placements wholly above `line`: history that's gone.
     pub(crate) fn forget_above(&mut self, line: u64) {
-        self.placements.retain(|p| p.line + p.cells[1] as i64 > line as i64);
+        self.placements.retain(|p| p.parent.is_some() || p.line + p.cells[1] as i64 > line as i64);
+        self.settle();
     }
 
     /// Drops placements that touch lines `from..to`.
     pub(crate) fn clear_lines(&mut self, from: u64, to: u64) {
         let (from, to) = (from as i64, to as i64);
         self.placements.retain(|p| p.line + p.cells[1] as i64 <= from || p.line >= to);
+        self.settle();
     }
 }
 
@@ -789,6 +883,8 @@ pub struct PlaceholderRun {
     /// The part of the image shown: x, y, width, height in its pixels.
     pub source: [u32; 4],
     pub z: i32,
+    /// The virtual placement's image and placement ids.
+    pub owner: (u32, u32),
 }
 
 impl Term {
@@ -843,7 +939,7 @@ impl Term {
                     Some(run)
                         if run.line == line
                             && run.col + run.len == col
-                            && Arc::ptr_eq(&run.image, &p.image)
+                            && run.owner == p.key()
                             && c.checked_sub(run.len as u32) == Some(run.at[0])
                             && r == run.at[1]
                             && run.cells == p.cells =>
@@ -859,11 +955,43 @@ impl Term {
                         cells: p.cells,
                         source: p.source,
                         z: p.z,
+                        owner: p.key(),
                     }),
                 }
             }
         }
         runs
+    }
+
+    /// Relative placements down from virtual ones, placed by `runs`: the
+    /// virtual placement's top-left is the topmost row and leftmost column
+    /// its placeholders show in. Those not on screen are left out.
+    pub fn floating_placements(&self, runs: &[PlaceholderRun]) -> Vec<Placement> {
+        let graphics = &self.graphics[usize::from(self.alt_active)];
+        let mut shown = Vec::new();
+        if graphics.floating.is_empty() {
+            return shown;
+        }
+        let mut at: HashMap<(u32, u32), (i64, usize)> = HashMap::new();
+        for run in runs {
+            let corner = at.entry(run.owner).or_insert((run.line as i64, run.col));
+            *corner = (corner.0.min(run.line as i64), corner.1.min(run.col));
+        }
+        let mut pending: Vec<&Placement> = graphics.floating.iter().collect();
+        loop {
+            let before = pending.len();
+            pending.retain(|p| {
+                let Some(&(line, col)) = p.parent.and_then(|up| at.get(&up)) else { return true };
+                let mut p = (*p).clone();
+                p.hang(line, col);
+                at.insert(p.key(), (p.line, p.col));
+                shown.push(p);
+                false
+            });
+            if pending.len() == before {
+                return shown;
+            }
+        }
     }
 }
 
@@ -988,10 +1116,12 @@ impl Term {
         }
     }
 
-    /// Shows image `id` at the cursor, which then moves past it unless `C=1`.
+    /// Shows image `id` at the cursor, which then moves past it unless `C=1`;
+    /// or relative to another placement (`P=`), and the cursor stays.
     fn place(&mut self, c: &Command, id: u32) {
-        if c.relative {
-            return self.graphics_reply(c, "EINVAL:relative placements aren't supported");
+        let relative = c.parent[0] != 0;
+        if relative && c.unicode {
+            return self.graphics_reply(c, "EINVAL:a virtual placement can't be relative");
         }
         let (cw, ch) = self.cell_pixels;
         let (cursor_row, cursor_col, lines_scrolled) = (self.cursor.row, self.cursor.col, self.lines_scrolled);
@@ -1024,8 +1154,17 @@ impl Term {
             }
             p => p,
         };
+        let parent = match relative.then(|| graphics.parent_for(c.parent, (id, placement_id))).transpose() {
+            Ok(parent) => parent,
+            Err(error) => return self.graphics_reply(c, error),
+        };
+        if c.unicode {
+            graphics.virtuals.retain(|p| p.key() != (id, placement_id));
+        } else {
+            graphics.placements.retain(|p| p.key() != (id, placement_id));
+            graphics.floating.retain(|p| p.key() != (id, placement_id));
+        }
         let placements = if c.unicode { &mut graphics.virtuals } else { &mut graphics.placements };
-        placements.retain(|p| !(p.image_id == id && p.id == placement_id));
         if placements.len() >= MAX_PLACEMENTS {
             placements.remove(0);
         }
@@ -1040,10 +1179,14 @@ impl Term {
             size: [asked_cols, asked_rows],
             cells: [cols, rows],
             z: c.z,
+            parent,
+            shift: c.shift,
         });
+        // Children of a placement replaced follow it to its new place.
+        graphics.settle();
         self.graphics_reply(c, "OK");
         // Placeholders take the room, as the program prints them.
-        if !c.cursor_stays && !c.unicode {
+        if !c.cursor_stays && !c.unicode && !relative {
             for _ in 1..rows {
                 self.index();
             }
@@ -1080,18 +1223,22 @@ impl Term {
         };
         let mut touched: HashSet<u32> = graphics.placements.iter().filter(|p| doomed(p)).map(|p| p.image_id).collect();
         graphics.placements.retain(|p| !doomed(p));
-        // Virtual placements have no place on the grid to match.
+        // Virtual placements have no place on the grid to match, nor
+        // those placed relative to them.
         if matches!(c.delete.to_ascii_lowercase(), b'a' | b'i' | b'n' | b'r' | b'z') {
             let gone = |p: &Placement| c.delete.eq_ignore_ascii_case(&b'a') || doomed(p);
-            touched.extend(graphics.virtuals.iter().filter(|p| gone(p)).map(|p| p.image_id));
+            touched.extend(graphics.virtuals.iter().chain(&graphics.floating).filter(|p| gone(p)).map(|p| p.image_id));
             graphics.virtuals.retain(|p| !gone(p));
+            graphics.floating.retain(|p| !gone(p));
         }
+        // Children go with their parents.
+        graphics.settle();
         if c.delete.is_ascii_uppercase() {
             if matches!(c.delete, b'I' | b'N') {
                 touched.extend(target);
             }
             for id in touched {
-                if !graphics.placements.iter().chain(&graphics.virtuals).any(|p| p.image_id == id) {
+                if !graphics.all_placements().any(|p| p.image_id == id) {
                     graphics.remove_image(id);
                 }
             }
@@ -1316,6 +1463,63 @@ mod tests {
         // Deleting the image takes the virtual placement with it.
         send(&mut t, "a=d,d=I,i=7", b"");
         assert!(t.placeholder_runs(0, 3).is_empty());
+    }
+
+    #[test]
+    fn relative_placements() {
+        let mut t = term();
+        let at = |t: &Term| t.image_placements().iter().map(|p| (p.image_id, p.id, p.line, p.col)).collect::<Vec<_>>();
+        send(&mut t, "a=t,f=32,s=1,v=1,i=1", &rgba(1, 1));
+        send(&mut t, "a=t,f=32,s=1,v=1,i=2", &rgba(1, 1));
+        t.feed(b"\x1b[3;5H");
+        send(&mut t, "a=p,i=1,p=1,C=1", b"");
+        // Offset from the parent's top-left; the cursor stays, C= or not.
+        assert_eq!(send(&mut t, "a=p,i=2,p=1,P=1,Q=1,H=2,V=-1", b""), "\x1b_Gi=2,p=1;OK\x1b\\");
+        assert_eq!(t.cursor(), (2, 4));
+        assert_eq!(at(&t), [(1, 1, 2, 4), (2, 1, 1, 6)]);
+        assert_eq!(send(&mut t, "a=p,i=2,p=2,P=1,Q=9", b""), "\x1b_Gi=2,p=2;ENOPARENT:no such parent placement\x1b\\");
+        assert_eq!(send(&mut t, "a=p,i=2,p=2,P=1,U=1", b""), "\x1b_Gi=2,p=2;EINVAL:a virtual placement can't be relative\x1b\\");
+        assert_eq!(send(&mut t, "a=p,i=1,p=1,P=2,Q=1", b""), "\x1b_Gi=1,p=1;ECYCLE:the placement would be its own parent\x1b\\");
+        // Chains have a limit.
+        for p in 2..=MAX_DEPTH {
+            send(&mut t, &format!("a=p,i=2,p={p},P=2,Q={},H=-1", p - 1), b"");
+        }
+        assert_eq!(t.image_placements().len(), MAX_DEPTH + 1);
+        assert_eq!(send(&mut t, "a=p,i=2,p=99,P=2,Q=8", b""), "\x1b_Gi=2,p=99;ETOODEEP:too many parents\x1b\\");
+        // Clipped at the left edge.
+        assert_eq!(t.image_placements()[MAX_DEPTH].col, 0);
+        // The chain follows its parent as it moves and scrolls.
+        t.feed(b"\x1b[5;9H");
+        send(&mut t, "a=p,i=1,p=1,C=1", b"");
+        t.feed(b"\x1b[10;1H\n");
+        assert_eq!(&at(&t)[..3], [(1, 1, 4, 8), (2, 1, 3, 10), (2, 2, 3, 9)]);
+        assert_eq!(t.image_placements().iter().map(|p| p.line - t.lines_scrolled() as i64).take(2).collect::<Vec<_>>(), [3, 2]);
+        // And goes with it, with its image when that has no other placement.
+        send(&mut t, "a=t,f=32,s=1,v=1,i=3", &rgba(1, 1));
+        send(&mut t, "a=p,i=3,P=2,Q=1", b"");
+        send(&mut t, "a=p,i=3,C=1", b"");
+        send(&mut t, "a=d,d=i,i=1", b"");
+        assert_eq!(at(&t).iter().map(|p| p.0).collect::<Vec<_>>(), [3]);
+        assert_eq!(send(&mut t, "a=p,i=1,C=1", b""), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(send(&mut t, "a=p,i=2", b""), "\x1b_Gi=2;ENOENT:no such image\x1b\\");
+    }
+
+    #[test]
+    fn relative_to_virtual_placements() {
+        let mut t = term();
+        send(&mut t, "a=t,f=32,s=1,v=1,i=1", &rgba(1, 1));
+        send(&mut t, "a=T,U=1,f=32,s=4,v=4,c=2,r=2,i=7,p=1", &rgba(4, 4));
+        send(&mut t, "a=p,i=1,p=1,P=7,Q=1,H=3", b"");
+        send(&mut t, "a=p,i=1,p=2,P=1,Q=1,V=1", b"");
+        // Floating until drawn, where the placeholders are.
+        assert!(t.image_placements().is_empty());
+        assert!(t.floating_placements(&t.placeholder_runs(0, 10)).is_empty());
+        t.feed("\x1b[3;5H\x1b[38;5;7m\u{10EEEE}\u{305}\u{30D}\x1b[4;4H\u{10EEEE}\u{30D}\u{305}".as_bytes());
+        let shown = t.floating_placements(&t.placeholder_runs(0, 10));
+        assert_eq!(shown.iter().map(|p| (p.id, p.line, p.col)).collect::<Vec<_>>(), [(1, 2, 6), (2, 3, 6)]);
+        // Gone with the virtual placement.
+        send(&mut t, "a=d,d=i,i=7", b"");
+        assert!(t.graphics[0].floating.is_empty());
     }
 
     #[test]

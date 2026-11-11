@@ -247,8 +247,10 @@ impl Snapshot {
         self.cursor = visible.then_some((cursor_row, cursor_col, term.modes().cursor_shape));
         let (top, bottom) = (self.first_line as i64, (self.first_line + rows as u64) as i64);
         self.images.clear();
-        self.images.extend(term.image_placements().iter().filter(|p| p.line + p.cells[1] as i64 > top && p.line < bottom).cloned());
         self.placeholders = term.placeholder_runs(self.first_line, rows);
+        let floating = term.floating_placements(&self.placeholders);
+        let shown = |p: &Placement| p.line + p.cells[1] as i64 > top && p.line < bottom;
+        self.images.extend(term.image_placements().iter().cloned().chain(floating).filter(shown));
     }
 }
 
@@ -1218,7 +1220,7 @@ mod tests {
     fn placeholders_fit_their_image_in_the_box() {
         // A 4×2 image in a 2×2 box of 10×20 cells: 20×10 pixels, centred down.
         let image = Arc::new(ImageData { serial: 0, width: 4, height: 2, pixels: vec![0; 32] });
-        let run = |row: u32| PlaceholderRun { image: image.clone(), line: 0, col: 0, len: 2, at: [0, row], cells: [2, 2], source: [0, 0, 4, 2], z: 0 };
+        let run = |row: u32| PlaceholderRun { image: image.clone(), line: 0, col: 0, len: 2, at: [0, row], cells: [2, 2], source: [0, 0, 4, 2], z: 0, owner: (1, 1) };
         let parts: Vec<_> = (0..2).map(|r| placeholder_quad(&run(r), 10.0, 20.0).map(|q| (q.pos, q.size, q.uv, q.uv_size))).collect();
         assert_eq!(parts, [Some(([0.0, 15.0], [20.0, 5.0], [0.0, 0.0], [4.0, 1.0])), Some(([0.0, 0.0], [20.0, 5.0], [0.0, 1.0], [4.0, 1.0]))]);
         // A run in the margin beside a tall image shows nothing.
