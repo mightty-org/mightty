@@ -15,6 +15,7 @@ mod latency;
 mod linkhint;
 mod notify;
 mod open;
+mod palette;
 mod renderer;
 mod session;
 mod snapshot;

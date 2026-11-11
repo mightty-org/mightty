@@ -27,6 +27,7 @@ use crate::hotkey;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
 use crate::open;
+use crate::palette::{self, Palette};
 use crate::linkhint::{self, LinkHint};
 use crate::notify;
 use crate::session::{self, Layout, Session};
@@ -144,6 +145,8 @@ struct Surface {
     /// Keys whose presses the program was told of, so it hears their releases.
     keys_down: Vec<u16>,
     search: Option<Search>,
+    /// The command palette, while open.
+    palette: Option<Palette>,
     /// The link under the pointer while Cmd is held, and where it goes.
     hover: Option<(HoveredLink, String)>,
     /// The pointer's shape a program asked for (OSC 22), shown over the
@@ -845,6 +848,7 @@ impl App {
                 typed: None,
                 keys_down: Vec::new(),
                 search: None,
+                palette: None,
                 hover: None,
                 pointer: PointerShape::Default,
                 hint: None,
@@ -2205,6 +2209,26 @@ impl Surface {
         }
     }
 
+    /// Opens the command palette with `entries`, or closes it.
+    fn toggle_palette(&mut self, entries: Vec<palette::Entry>) {
+        if self.palette.is_some() {
+            return self.close_palette();
+        }
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            let palette = Palette::open(self.container, self.view, self.dark(), entries);
+            call!(self.window, c"makeFirstResponder:", palette.field);
+            self.palette = Some(palette);
+        }
+    }
+
+    fn close_palette(&mut self) {
+        if self.palette.take().is_some() {
+            // SAFETY: main thread; documented signature.
+            unsafe { call!(self.window, c"makeFirstResponder:", self.view) };
+        }
+    }
+
     fn close_search(&mut self) {
         if self.search.take().is_none() {
             return;
@@ -2594,14 +2618,24 @@ unsafe fn register_view_class() -> Id {
         with_surface(view, Surface::close_search);
     }
 
-    /// The search bar's text changed (the view is its delegate).
-    extern "C" fn search_changed(view: Id, _: Sel, _notification: Id) {
-        with_surface(view, |w| w.search(None));
+    /// The search bar's or the palette's text changed (the view is the
+    /// delegate of both).
+    extern "C" fn search_changed(view: Id, _: Sel, notification: Id) {
+        // SAFETY: an NSNotification about a text field.
+        let field: Id = unsafe { msg!(notification, c"object") };
+        with_surface(view, |w| match &mut w.palette {
+            Some(palette) if palette.field == field => palette.update(),
+            _ => w.search(None),
+        });
     }
 
     /// Keys in the search bar: Return steps to older matches (with Shift,
     /// newer), Escape closes it.
-    extern "C" fn search_command(view: Id, _: Sel, _control: Id, _text_view: Id, command: Sel) -> Bool {
+    extern "C" fn search_command(view: Id, _: Sel, control: Id, _text_view: Id, command: Sel) -> Bool {
+        let palette = with_surface(view, |w| w.palette.as_ref().is_some_and(|p| p.field == control)).unwrap_or(false);
+        if palette {
+            return palette_command(view, command);
+        }
         if command == sel(c"insertNewline:") {
             // SAFETY: documented signatures.
             let shift = unsafe {
@@ -2613,6 +2647,33 @@ unsafe fn register_view_class() -> Id {
             find_step(view, if shift { 1 } else { -1 });
         } else if command == sel(c"cancelOperation:") {
             with_surface(view, Surface::close_search);
+        } else {
+            return NO;
+        }
+        YES
+    }
+
+    /// Keys in the palette: the arrows move the selection, Return runs
+    /// it, Escape closes.
+    fn palette_command(view: Id, command: Sel) -> Bool {
+        if command == sel(c"moveUp:") || command == sel(c"moveDown:") {
+            let step = if command == sel(c"moveUp:") { -1 } else { 1 };
+            with_surface(view, |w| w.palette.as_mut().map(|p| p.step(step)));
+        } else if command == sel(c"insertNewline:") {
+            let chosen = with_surface(view, |w| {
+                let chosen = w.palette.as_ref().and_then(Palette::chosen);
+                w.close_palette();
+                chosen
+            })
+            .flatten();
+            match chosen {
+                // Once closed, so the action finds the pane as it was.
+                Some(action) => perform(view, &action),
+                // SAFETY: plain AppKit call.
+                None => unsafe { NSBeep() },
+            }
+        } else if command == sel(c"cancelOperation:") {
+            with_surface(view, Surface::close_palette);
         } else {
             return NO;
         }
@@ -3259,6 +3320,10 @@ fn perform(view: Id, action: &Action) {
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
+        Action::ToggleCommandPalette => drop(with_app(|app| {
+            let entries = palette::entries(&app.config.keybinds);
+            app.surfaces.iter_mut().find(|s| s.view == view).map(|s| s.toggle_palette(entries))
+        })),
         Action::ChangeFontSize(points) => drop(with_app(|app| app.change_font_size(view, Some(points)))),
         Action::ResetFontSize => drop(with_app(|app| app.change_font_size(view, None))),
         Action::ClearScreen => drop(with_surface(view, Surface::clear_screen)),
@@ -3363,6 +3428,8 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         add_item(edit_menu, "Find Next", c"findNext:", Action::NavigateSearch(1));
         add_item(edit_menu, "Find Previous", c"findPrevious:", Action::NavigateSearch(-1));
         let view_menu = submenu(bar, "View");
+        add_action(view_menu, "Command Palette", Action::ToggleCommandPalette);
+        separator(view_menu);
         add_action(view_menu, "Increase Font Size", Action::ChangeFontSize(1.0));
         add_action(view_menu, "Decrease Font Size", Action::ChangeFontSize(-1.0));
         add_action(view_menu, "Reset Font Size", Action::ResetFontSize);

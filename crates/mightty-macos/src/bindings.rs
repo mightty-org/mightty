@@ -113,6 +113,8 @@ pub enum Action {
     ToggleSecureInput,
     /// The quick terminal: a window dropping down from the top of the screen.
     ToggleQuickTerminal,
+    /// The command palette: actions by name.
+    ToggleCommandPalette,
     /// Points; `increase_font_size:N` and `decrease_font_size:N`.
     ChangeFontSize(f64),
     ResetFontSize,
@@ -184,6 +186,7 @@ impl Action {
             ("reload_config", _) => bare(Self::ReloadConfig),
             ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
             ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
+            ("toggle_command_palette", _) => bare(Self::ToggleCommandPalette),
             ("increase_font_size", _) => Ok(Self::ChangeFontSize(points(arg)?)),
             ("decrease_font_size", _) => Ok(Self::ChangeFontSize(-points(arg)?)),
             ("reset_font_size", _) => bare(Self::ResetFontSize),
@@ -385,6 +388,7 @@ impl Default for Bindings {
             ("cmd+9", LastTab),
             ("cmd+,", OpenConfig),
             ("cmd+shift+,", ReloadConfig),
+            ("cmd+shift+p", ToggleCommandPalette),
             ("cmd+=", ChangeFontSize(1.0)),
             ("cmd+shift+=", ChangeFontSize(1.0)),
             ("cmd+-", ChangeFontSize(-1.0)),
