@@ -38,6 +38,17 @@ pub enum Node<T> {
     Split { axis: Axis, ratio: f64, first: Box<Node<T>>, second: Box<Node<T>> },
 }
 
+/// Where a pane sat, to put it back after it's removed: beside the part
+/// holding `sibling`'s panes, split as it was.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place<T> {
+    pub sibling: Vec<T>,
+    pub axis: Axis,
+    pub ratio: f64,
+    /// It was the split's first part: left or above.
+    pub first: bool,
+}
+
 /// The line between a split's two parts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Divider {
@@ -81,6 +92,44 @@ impl<T: Copy + PartialEq> Node<T> {
         let keep = std::mem::replace(&mut **keep, Node::Leaf(leaf));
         *self = keep;
         true
+    }
+
+    /// Where `leaf` sits, if not alone.
+    pub fn place_of(&self, leaf: T) -> Option<Place<T>> {
+        let Node::Split { axis, ratio, first, second } = self else { return None };
+        let place = |sibling: &Node<T>, first| Place { sibling: sibling.leaves(), axis: *axis, ratio: *ratio, first };
+        match (&**first, &**second) {
+            (Node::Leaf(l), _) if *l == leaf => Some(place(second, true)),
+            (_, Node::Leaf(l)) if *l == leaf => Some(place(first, false)),
+            _ => first.place_of(leaf).or_else(|| second.place_of(leaf)),
+        }
+    }
+
+    /// Puts `leaf` back at `place`: beside the part holding just the
+    /// sibling's panes still here, or, the layout having changed since,
+    /// beside the first of them. False if none is left.
+    pub fn put_back(&mut self, leaf: T, place: &Place<T>) -> bool {
+        let here = self.leaves();
+        let wanted: Vec<T> = place.sibling.iter().copied().filter(|t| here.contains(t)).collect();
+        let Some(&anchor) = wanted.first() else { return false };
+        let target = self.find(&wanted).is_some();
+        let node = if target { self.find(&wanted) } else { self.find(&[anchor]) };
+        let Some(node) = node else { return false };
+        let sibling = std::mem::replace(node, Node::Leaf(leaf));
+        let (a, b) = if place.first { (Node::Leaf(leaf), sibling) } else { (sibling, Node::Leaf(leaf)) };
+        *node = Node::Split { axis: place.axis, ratio: place.ratio, first: Box::new(a), second: Box::new(b) };
+        true
+    }
+
+    /// The part holding exactly `leaves`, in order.
+    fn find(&mut self, leaves: &[T]) -> Option<&mut Node<T>> {
+        if self.leaves() == leaves {
+            return Some(self);
+        }
+        match self {
+            Node::Leaf(_) => None,
+            Node::Split { first, second, .. } => first.find(leaves).or_else(move || second.find(leaves)),
+        }
     }
 
     /// Where each pane goes in `bounds`, with `gap` points between them.
@@ -249,6 +298,34 @@ mod tests {
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
         Rect { x, y, width, height }
+    }
+
+    #[test]
+    fn panes_go_back_where_they_were() {
+        // 1 | (2 / 3)
+        let mut tree = Node::Leaf(1);
+        tree.split(1, 2, Axis::Row);
+        tree.split(2, 3, Axis::Column);
+        let place = tree.place_of(1).unwrap();
+        assert_eq!(place, Place { sibling: vec![2, 3], axis: Axis::Row, ratio: 0.5, first: true });
+        assert!(tree.remove(1));
+        assert!(tree.put_back(1, &place));
+        assert_eq!(tree.leaves(), [1, 2, 3]);
+        // 3 below 2, as it was.
+        let place = tree.place_of(3).unwrap();
+        tree.remove(3);
+        tree.put_back(3, &place);
+        assert_eq!(tree.leaves(), [1, 2, 3]);
+        assert!(tree.place_of(3).is_some_and(|p| p.axis == Axis::Column && !p.first && p.sibling == [2]));
+        // Its sibling split since: beside the first of its panes.
+        let place = tree.place_of(1).unwrap();
+        tree.remove(1);
+        tree.split(3, 4, Axis::Row);
+        assert!(tree.put_back(1, &Place { sibling: vec![2, 9], ..place.clone() }));
+        assert_eq!(tree.leaves(), [1, 2, 3, 4]);
+        // Nothing of it left: not put back.
+        assert!(!tree.put_back(5, &Place { sibling: vec![9], ..place }));
+        assert_eq!(Node::Leaf(1).place_of(1), None);
     }
 
     #[test]

@@ -77,6 +77,7 @@ cursor-color = #ff79c6
 | `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
 | `scrollback-lines` | `10000` | Lines kept above the screen |
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
+| `undo-timeout` | `5s` | How long a closed tab, pane or window keeps running, hidden, so undo (⌘Z) brings it back as it was: `500ms`, `1m`, or `0` for not at all, as in Ghostty |
 | `quick-terminal-position` | `top` | `top`, `bottom`, `left`, `right` or `center`: where the quick terminal appears, on the screen with the mouse, sliding in from that edge |
 | `quick-terminal-size` | `40%` | How far the quick terminal comes in from its edge, then how much of the edge it runs along (all of it when left out), as a share of the screen (`40%`) or points (`500px`), as in Ghostty: `30%,1200px`. Centred: its width, then height |
 | `quick-terminal-autohide` | `true` | Hide the quick terminal when another window or app takes the keys |
@@ -158,6 +159,8 @@ keybind = global:ctrl+grave_accent=toggle_quick_terminal
 | `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
 | `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
 | `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `undo` | ⌘Z | Undo Close (Edit menu): brings back the last tab, pane or window closed, as it was, within `undo-timeout`, as in Ghostty: its shell kept running meanwhile, hidden |
+| `reopen_closed` | ⌘⇧T | Reopen Closed (Shell menu): the last tab, pane or window closed, back in its place; still running within `undo-timeout`, else new shells in the same folders, with the same splits and titles (the last 20 closes) |
 | `prompt_surface_title` | | Change Title… (Shell menu, command palette): a title for the pane, shown in its tab and the window instead of its program's, and kept when windows are restored; empty goes back to the program's |
 | `toggle_command_palette` | ⌘⇧P | Actions by name, as in Ghostty: type to filter (`nt` finds New Tab), ↑↓ to choose, Return to run, Esc to close; each shows its key |
 | `toggle_quick_terminal` | | The quick terminal (Window → Quick Terminal): a window that drops from the top of the screen over any app, on every Space; again to hide it. Bind it globally: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` |

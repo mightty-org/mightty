@@ -33,7 +33,7 @@ use crate::linkhint::{self, LinkHint};
 use crate::notify;
 use crate::session::{self, Layout, Session};
 use crate::renderer::{self, Highlights, HoveredLink, Renderer, Snapshot};
-use crate::split::{self, Axis, Direction, Divider, Node, Rect};
+use crate::split::{self, Axis, Direction, Divider, Node, Place, Rect};
 
 struct App {
     mux: Arc<Mux>,
@@ -55,11 +55,33 @@ struct App {
     /// Secure Keyboard Entry: asked for from the menu, and whether it's on.
     secure_input: bool,
     secure_input_on: bool,
+    /// Tabs, panes and windows closed, oldest first, to undo or reopen.
+    closed: Vec<Closed>,
     /// The quick terminal's window, once opened; and the app (retained)
     /// to give the keys back to when it hides.
     quick: Option<Id>,
     quick_return: Id,
 }
+
+/// A tab, pane or window closed, to bring back.
+struct Closed {
+    /// Its panes still running, hidden, until `until` (see `undo-timeout`),
+    /// in the order their layout lists them; none after.
+    live: Vec<Arc<Pane>>,
+    until: Instant,
+    what: Reopen,
+}
+
+enum Reopen {
+    /// A pane of `window`, at `place` in its splits.
+    Pane { window: Id, place: Place<Id>, cwd: Option<String>, title: Option<String> },
+    /// A tab or window laid out as `tab`: a tab of `tab_of` if that's still
+    /// open, else a window at `frame`.
+    Tab { tab: session::Tab, tab_of: Id, frame: CGRect },
+}
+
+/// Closes remembered for reopening at most.
+const CLOSED_KEPT: usize = 20;
 
 /// Points between split panes, drawn as a divider.
 const GAP: f64 = 1.0;
@@ -615,6 +637,7 @@ pub fn run(config: Config) -> io::Result<()> {
             attention_count: 0,
             secure_input: false,
             secure_input_on: false,
+            closed: Vec::new(),
             quick: None,
             quick_return: NIL,
             banners: Vec::new(),
@@ -1172,6 +1195,7 @@ impl App {
         let window = self.surfaces[i].window;
         let w = self.windows.iter_mut().find(|w| w.window == window)?;
         let order = w.tree.leaves();
+        let place = w.tree.place_of(view);
         if !w.tree.remove(view) {
             return Some(window);
         }
@@ -1180,6 +1204,11 @@ impl App {
         let surface = self.surfaces.remove(i);
         // SAFETY: main thread; the window's content view holds the container.
         unsafe { call!(surface.container, c"removeFromSuperview") };
+        if let Some(place) = place {
+            let cwd = self.cwd_of(&surface).map(|d| d.display().to_string());
+            let what = Reopen::Pane { window, place, cwd, title: surface.title_override.clone() };
+            self.keep_closed(vec![surface.pane.clone()], what);
+        }
         self.release_pane(&surface);
         if was_active {
             // The pane before it, as in Ghostty.
@@ -1325,11 +1354,20 @@ impl App {
 
     /// A window (a tab of `tab_of` unless nil) laid out as `tab`. Returns it.
     fn restore_tab(&mut self, tab: &session::Tab, tab_of: Id) -> Option<Id> {
-        let pane = self.spawn_shell(tab.layout.first_cwd())?;
+        self.restore_tab_with(tab, tab_of, &[])
+    }
+
+    /// `restore_tab`, its panes being `live` (in layout order) as far as
+    /// they go, new shells for the rest.
+    fn restore_tab_with(&mut self, tab: &session::Tab, tab_of: Id, live: &[Arc<Pane>]) -> Option<Id> {
+        let pane = match live.first() {
+            Some(pane) => pane.clone(),
+            None => self.spawn_shell(tab.layout.first_cwd())?,
+        };
         self.open_window_in(pane, false, tab_of, tab_of.is_null());
         let (window, first) = self.windows.last().map(|w| (w.window, w.active))?;
         self.started_in(first, tab.layout.first_cwd());
-        self.restore_split(&tab.layout, first);
+        self.restore_split(&tab.layout, first, 0, live);
         let w = self.windows.iter_mut().find(|w| w.window == window)?;
         copy_ratios(&mut w.tree, &tab.layout);
         let order = w.tree.leaves();
@@ -1345,14 +1383,115 @@ impl App {
         Some(window)
     }
 
-    /// Splits `view`'s space as `layout` says, a new shell in each new pane.
-    fn restore_split(&mut self, layout: &Layout, view: Id) {
+    /// Splits `view`'s space as `layout` says, a new shell in each new pane
+    /// unless `live` has the pane: `layout`'s first is its pane `at`.
+    fn restore_split(&mut self, layout: &Layout, view: Id, at: usize, live: &[Arc<Pane>]) {
         let Layout::Split { axis, first, second, .. } = layout else { return };
-        let Some(pane) = self.spawn_shell(second.first_cwd()) else { return };
+        let second_at = at + first.titles().len();
+        let pane = match live.get(second_at) {
+            Some(pane) => pane.clone(),
+            None => {
+                let Some(pane) = self.spawn_shell(second.first_cwd()) else { return };
+                pane
+            }
+        };
         let Some(new) = self.insert_split(view, pane, *axis, false, false) else { return };
         self.started_in(new, second.first_cwd());
-        self.restore_split(first, view);
-        self.restore_split(second, new);
+        self.restore_split(first, view, at, live);
+        self.restore_split(second, new, second_at, live);
+    }
+
+    /// Remembers what was closed. Its panes not shown elsewhere and still
+    /// running are kept running, hidden, for `undo-timeout`; those of the
+    /// oldest close past `CLOSED_KEPT` end.
+    fn keep_closed(&mut self, panes: Vec<Arc<Pane>>, what: Reopen) {
+        // Nothing to bring back from a shell that exited.
+        if !panes.is_empty() && panes.iter().all(|p| p.exit_status().is_some()) {
+            return;
+        }
+        let timeout = self.config.undo_timeout;
+        let live: Vec<Arc<Pane>> = if timeout.is_zero() {
+            Vec::new()
+        } else {
+            panes.into_iter().filter(|p| p.exit_status().is_none() && !self.surfaces.iter().any(|s| s.pane.id == p.id)).collect()
+        };
+        for pane in &live {
+            pane.set_visible(false);
+        }
+        self.closed.push(Closed { live, until: Instant::now() + timeout, what });
+        if self.closed.len() > CLOSED_KEPT {
+            let oldest = self.closed.remove(0);
+            self.end_panes(oldest.live);
+        }
+        if !timeout.is_zero() {
+            run_on_main_after(timeout + Duration::from_millis(10), on_undo_expiry);
+        }
+    }
+
+    /// Ends panes kept for undo.
+    fn end_panes(&self, panes: Vec<Arc<Pane>>) {
+        for pane in panes {
+            if !self.surfaces.iter().any(|s| s.pane.id == pane.id) {
+                self.mux.close(pane.id);
+            }
+        }
+    }
+
+    /// Brings back the last close: with `live_only` (undo), only while its
+    /// panes still run; else (reopen) with new shells for those that don't.
+    fn reopen_closed(&mut self, live_only: bool) {
+        let ready = self.closed.last().is_some_and(|c| !live_only || !c.live.is_empty());
+        let Some(Closed { live, what, .. }) = ready.then(|| self.closed.pop()).flatten() else {
+            // SAFETY: plain AppKit call.
+            return unsafe { NSBeep() };
+        };
+        match what {
+            Reopen::Pane { window, place, cwd, title } => {
+                let pane = match live.into_iter().next() {
+                    Some(pane) => pane,
+                    None => {
+                        let Some(pane) = self.spawn_shell(cwd.as_deref()) else { return };
+                        pane
+                    }
+                };
+                let fits = self.windows.iter().any(|w| w.window == window && w.tree.leaves().iter().any(|v| place.sibling.contains(v)));
+                let view = if fits {
+                    // SAFETY: main thread; documented signatures.
+                    let (frame, scale): (CGRect, f64) =
+                        unsafe { (send_rect(msg!(window, c"contentView"), c"bounds"), msg!(window, c"backingScaleFactor")) };
+                    let renderer = self.new_renderer(scale);
+                    let view = self.add_surface(window, frame, renderer, pane, false, true);
+                    if let Some(w) = self.windows.iter_mut().find(|w| w.window == window) {
+                        w.tree.put_back(view, &place);
+                        w.zoomed = false;
+                    }
+                    self.focus(view);
+                    // SAFETY: main thread; a live NSWindow.
+                    unsafe { call!(window, c"makeKeyAndOrderFront:", NIL) };
+                    self.layout(window, false);
+                    Some(view)
+                } else {
+                    // Its window is gone: a window of its own.
+                    self.open_window_in(pane, false, NIL, true);
+                    self.windows.last().map(|w| w.active)
+                };
+                if let Some(surface) = view.and_then(|v| self.surfaces.iter_mut().find(|s| s.view == v)) {
+                    surface.title_override = title;
+                    surface.start_dir = cwd.map(PathBuf::from);
+                }
+            }
+            Reopen::Tab { tab, tab_of, frame } => {
+                let tab_of = if self.windows.iter().any(|w| w.window == tab_of) { tab_of } else { NIL };
+                let window = self.restore_tab_with(&tab, tab_of, &live);
+                if let Some(window) = window.filter(|_| tab_of.is_null()) {
+                    // SAFETY: main thread; documented signatures.
+                    unsafe {
+                        call!(window, c"setFrame:display:", frame, YES);
+                        call!(window, c"makeKeyAndOrderFront:", NIL);
+                    }
+                }
+            }
+        }
     }
 
     /// A login shell in `cwd` if it still exists, else home.
@@ -1398,7 +1537,8 @@ impl App {
 
     /// Ends `closed`'s pane unless another surface shows it.
     fn release_pane(&self, closed: &Surface) {
-        if !self.surfaces.iter().any(|s| s.pane.id == closed.pane.id) {
+        let held = self.closed.iter().any(|c| c.live.iter().any(|p| p.id == closed.pane.id));
+        if !held && !self.surfaces.iter().any(|s| s.pane.id == closed.pane.id) {
             closed.pane.set_visible(false);
             self.mux.close(closed.pane.id);
         }
@@ -1406,12 +1546,30 @@ impl App {
 
     /// Forgets a closed window, ending its panes.
     fn window_closed(&mut self, window: Id) {
+        let mut reopen = None;
         if self.quick == Some(window) {
             self.quick = None;
+        } else if let Some(tab) = self.capture_tab(window) {
+            // SAFETY: main thread; documented signatures.
+            let (tab_of, frame) = unsafe {
+                let group: Id = msg!(window, c"tabbedWindows");
+                let count: usize = if group.is_null() { 0 } else { msg!(group, c"count") };
+                let others = (0..count).map(|i| -> Id { msg!(group, c"objectAtIndex:", i) }).find(|&w| w != window);
+                (others.unwrap_or(NIL), send_rect(window, c"frame"))
+            };
+            let panes = match self.windows.iter().find(|w| w.window == window) {
+                Some(w) => w.tree.leaves().iter().filter_map(|v| self.surfaces.iter().find(|s| s.view == *v)).map(|s| s.pane.clone()).collect(),
+                None => Vec::new(),
+            };
+            reopen = Some((panes, Reopen::Tab { tab, tab_of, frame }));
         }
         self.windows.retain(|w| w.window != window);
         let (closed, kept) = mem::take(&mut self.surfaces).into_iter().partition(|s| s.window == window);
         self.surfaces = kept;
+        // Once its panes aren't counted as shown.
+        if let Some((panes, what)) = reopen {
+            self.keep_closed(panes, what);
+        }
         for surface in closed {
             self.release_pane(&surface);
         }
@@ -1998,6 +2156,16 @@ fn quick_frames(position: QuickPosition, (deep, along): (Extent, Option<Extent>)
 thread_local! {
     /// `on_scrollbar_fade` is scheduled.
     static FADE_SCHEDULED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Ends the panes kept for undo past `undo-timeout`; what was closed can
+/// still be reopened, with new shells.
+extern "C" fn on_undo_expiry(_: *mut c_void) {
+    let now = Instant::now();
+    with_app(|app| {
+        let due: Vec<Arc<Pane>> = app.closed.iter_mut().filter(|c| c.until <= now).flat_map(|c| mem::take(&mut c.live)).collect();
+        app.end_panes(due);
+    });
 }
 
 /// The mouse on a pane's scrollbar.
@@ -3502,6 +3670,8 @@ fn perform(view: Id, action: &Action) {
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
+        Action::Undo => drop(with_app(|app| app.reopen_closed(true))),
+        Action::ReopenClosed => drop(with_app(|app| app.reopen_closed(false))),
         Action::PromptSurfaceTitle => {
             let current = |s: &mut Surface| {
                 let program = || s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned();
@@ -3611,7 +3781,10 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         add_action(shell_menu, "Change Title…", Action::PromptSurfaceTitle);
         add_item(shell_menu, "Close", c"closeSplit:", Action::CloseSurface);
         add_item(shell_menu, "Close Window", c"performClose:", Action::CloseWindow);
+        add_action(shell_menu, "Reopen Closed", Action::ReopenClosed);
         let edit_menu = submenu(bar, "Edit");
+        add_action(edit_menu, "Undo Close", Action::Undo);
+        separator(edit_menu);
         add_item(edit_menu, "Copy", c"copy:", Action::Copy);
         add_item(edit_menu, "Paste", c"paste:", Action::Paste);
         add_action(edit_menu, "Clear Screen", Action::ClearScreen);

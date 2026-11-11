@@ -117,6 +117,10 @@ pub enum Action {
     ToggleCommandPalette,
     /// Asks for a title for the pane, shown in its tab and window.
     PromptSurfaceTitle,
+    /// Brings back the last tab, pane or window closed, still running (see `undo-timeout`).
+    Undo,
+    /// Reopens the last closed: running still, or new shells where they were.
+    ReopenClosed,
     /// Points; `increase_font_size:N` and `decrease_font_size:N`.
     ChangeFontSize(f64),
     ResetFontSize,
@@ -190,6 +194,8 @@ impl Action {
             ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
             ("toggle_command_palette", _) => bare(Self::ToggleCommandPalette),
             ("prompt_surface_title", _) => bare(Self::PromptSurfaceTitle),
+            ("undo", _) => bare(Self::Undo),
+            ("reopen_closed", _) => bare(Self::ReopenClosed),
             ("increase_font_size", _) => Ok(Self::ChangeFontSize(points(arg)?)),
             ("decrease_font_size", _) => Ok(Self::ChangeFontSize(-points(arg)?)),
             ("reset_font_size", _) => bare(Self::ResetFontSize),
@@ -392,6 +398,8 @@ impl Default for Bindings {
             ("cmd+,", OpenConfig),
             ("cmd+shift+,", ReloadConfig),
             ("cmd+shift+p", ToggleCommandPalette),
+            ("cmd+z", Undo),
+            ("cmd+shift+t", ReopenClosed),
             ("cmd+=", ChangeFontSize(1.0)),
             ("cmd+shift+=", ChangeFontSize(1.0)),
             ("cmd+-", ChangeFontSize(-1.0)),

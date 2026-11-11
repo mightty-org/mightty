@@ -25,6 +25,8 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Split Down", NewSplit(Direction::Down)),
         ("Change Title…", PromptSurfaceTitle),
         ("Close Pane", CloseSurface),
+        ("Undo Close", Undo),
+        ("Reopen Closed", ReopenClosed),
         ("Close Window", CloseWindow),
         ("Minimize Window", MinimizeWindow),
         ("Copy", Copy),

@@ -45,6 +45,8 @@ pub struct Config {
     pub ligatures: bool,
     /// `macos-auto-secure-input`: Secure Keyboard Entry at password prompts.
     pub auto_secure_input: bool,
+    /// `undo-timeout`: how long a closed pane's shell keeps running, for ⌘Z to bring it back.
+    pub undo_timeout: std::time::Duration,
     /// `quick-terminal-position`: the screen edge the quick terminal drops from.
     pub quick_position: QuickPosition,
     /// `quick-terminal-autohide`: the quick terminal hides when another app or window takes the keys.
@@ -437,6 +439,7 @@ impl Default for Config {
             colorspace: Colorspace::Srgb,
             ligatures: true,
             auto_secure_input: true,
+            undo_timeout: std::time::Duration::from_secs(5),
             quick_position: QuickPosition::Top,
             quick_autohide: true,
             quick_size: (Extent::Percent(40.0), None),
@@ -653,6 +656,30 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.auto_secure_input.to_string()),
+    },
+    Setting {
+        name: "undo-timeout",
+        value: "TIME",
+        help: "how long a closed tab or pane keeps running, hidden, so undo (⌘Z) brings it back as it was: \
+               5s, 500ms, 1m; 0 for never, as in Ghostty. Reopening (⌘⇧T) works after, with new shells",
+        color: false,
+        set: |c, v| {
+            let v = v.trim();
+            let (number, unit) = match (v.strip_suffix("ms"), v.strip_suffix('s'), v.strip_suffix('m')) {
+                (Some(n), ..) => (n, 0.001),
+                (None, Some(n), _) => (n, 1.0),
+                (None, None, Some(n)) => (n, 60.0),
+                _ if v == "0" => ("0", 1.0),
+                _ => return Err("expects a time: 5s, 500ms or 1m".into()),
+            };
+            let n: f64 = number.trim().parse().map_err(|_| "expects a time: 5s, 500ms or 1m")?;
+            if !(0.0..=3600.0).contains(&(n * unit)) {
+                return Err("expects a time up to an hour".into());
+            }
+            c.undo_timeout = std::time::Duration::from_secs_f64(n * unit);
+            Ok(())
+        },
+        get: |c| Some(format!("{}ms", c.undo_timeout.as_millis())),
     },
     Setting {
         name: "quick-terminal-position",
@@ -1724,8 +1751,15 @@ mod tests {
             "--quick-terminal-position=bottom",
             "--quick-terminal-autohide=false",
             "--quick-terminal-size=30%,800px",
+            "--undo-timeout=1.5s",
         ]))
         .unwrap();
+        assert_eq!(c.undo_timeout, std::time::Duration::from_millis(1500));
+        let mut d = Config::default();
+        d.apply_args(&args(&["--undo-timeout=250ms"])).unwrap();
+        assert_eq!(d.undo_timeout, std::time::Duration::from_millis(250));
+        d.apply_args(&args(&["--undo-timeout=0"])).unwrap();
+        assert_eq!(d.undo_timeout, std::time::Duration::ZERO);
         assert_eq!((c.quick_position, c.quick_autohide), (QuickPosition::Bottom, false));
         assert_eq!(c.quick_size, (Extent::Percent(30.0), Some(Extent::Points(800.0))));
         assert_eq!((Extent::Percent(30.0).of(1000.0), Extent::Points(800.0).of(600.0)), (300.0, 600.0));
@@ -1738,7 +1772,7 @@ mod tests {
         assert_eq!(Adjust::Points(-1.0).apply(16, 2.0), 14);
         assert_eq!(Adjust::Points(-50.0).apply(16, 2.0), 1);
         assert_eq!(Config::default().colorspace, Colorspace::Srgb);
-        for bad in ["--background-opacity=1.5", "--window-colorspace=p3", "--quick-terminal-position=middle", "--quick-terminal-size=0%", "--quick-terminal-size=40", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
+        for bad in ["--background-opacity=1.5", "--undo-timeout=5", "--undo-timeout=2h", "--window-colorspace=p3", "--quick-terminal-position=middle", "--quick-terminal-size=0%", "--quick-terminal-size=40", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }
