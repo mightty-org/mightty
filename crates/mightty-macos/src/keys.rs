@@ -369,6 +369,31 @@ pub fn visible_controls(text: &str, max: usize) -> String {
     out
 }
 
+/// How many characters a password prompt holds after `count` and then
+/// `bytes` typed, as the terminal's line editing counts them: backspace
+/// takes one away, Ctrl-U and Ctrl-W clear the line, and Return, Ctrl-C
+/// and Ctrl-D end it. Escape sequences (arrows, paste brackets) and other
+/// control characters add nothing.
+pub fn password_length(mut count: usize, bytes: &[u8]) -> usize {
+    let mut bytes = bytes.iter().copied();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'\r' | b'\n' | 0x03 | 0x04 | 0x15 | 0x17 => count = 0,
+            0x7f | 0x08 => count = count.saturating_sub(1),
+            // CSI and SS3 up to the final byte; else ESC and the next byte.
+            0x1b => {
+                if let Some(b'[' | b'O') = bytes.next() {
+                    bytes.by_ref().find(|b| (0x40..=0x7e).contains(b));
+                }
+            }
+            // UTF-8 continuation bytes are part of a character counted already.
+            0x00..=0x1f | 0x80..=0xbf => {}
+            _ => count += 1,
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,4 +551,17 @@ mod tests {
         assert_eq!(paste("a\nb", false), b"a\rb");
         assert_eq!(paste("x\x1b[201~y", true), b"\x1b[200~x[201~y\x1b[201~");
     }
+
+    #[test]
+    fn password_lengths() {
+        assert_eq!(password_length(0, "pässwörd".as_bytes()), 8);
+        assert_eq!(password_length(3, b"ab\x7f"), 4);
+        assert_eq!(password_length(1, b"\x7f\x7f"), 0);
+        assert_eq!(password_length(5, b"\x15x"), 1);
+        assert_eq!(password_length(5, b"\r"), 0);
+        // Arrows and paste brackets count for nothing; what's pasted does.
+        assert_eq!(password_length(2, b"\x1b[D\x1bOA\x1b[200~xyz\x1b[201~"), 5);
+        assert_eq!(password_length(0, b"\x1bb"), 0);
+    }
+
 }

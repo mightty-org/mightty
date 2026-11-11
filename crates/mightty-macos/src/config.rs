@@ -162,6 +162,9 @@ pub struct Behaviour {
     pub paste_protection: bool,
     /// `mouse-hide-while-typing`.
     pub hide_mouse: bool,
+    /// `password-mask`: a `*` at the cursor for each character typed at a
+    /// password prompt, drawn by mightty and sent nowhere.
+    pub password_mask: bool,
     /// `mouse-scroll-multiplier`: lines scrolled per line the wheel or
     /// trackpad reports.
     pub scroll_multiplier: f64,
@@ -175,6 +178,7 @@ impl Default for Behaviour {
             copy_on_select: false,
             paste_protection: true,
             hide_mouse: false,
+            password_mask: true,
             scroll_multiplier: 1.0,
         }
     }
@@ -892,6 +896,18 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.behaviour.hide_mouse.to_string()),
+    },
+    Setting {
+        name: "password-mask",
+        value: "BOOL",
+        help: "show a * for each character typed at a password prompt (a program reading a line without echoing \
+               it, as sudo and ssh do), drawn at the cursor by mightty only, so typing can be seen to work",
+        color: false,
+        set: |c, v| {
+            c.behaviour.password_mask = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.password_mask.to_string()),
     },
     Setting {
         name: "mouse-scroll-multiplier",

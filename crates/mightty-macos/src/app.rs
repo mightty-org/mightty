@@ -126,6 +126,9 @@ struct Surface {
     /// Text an input method is composing (marked text), drawn at the
     /// cursor until it's committed.
     preedit: String,
+    /// Characters typed at the password prompt the program shows, drawn
+    /// as `*` (see `password-mask`).
+    password: usize,
     /// The input method used the key being handled (inserted or composed text).
     ime_used_key: bool,
     /// While handling a key for a program using the kitty keyboard
@@ -748,6 +751,7 @@ impl App {
                 animation_due: None,
                 start_dir: None,
                 preedit: String::new(),
+                password: 0,
                 ime_used_key: false,
                 capture: false,
                 typed: None,
@@ -1820,6 +1824,13 @@ impl Surface {
                     self.snapshot.capture(&term, self.scroll_offset);
                     if !self.preedit.is_empty() {
                         self.snapshot.overlay(&self.preedit, term.cursor());
+                    } else if self.password > 0 {
+                        // Gone once the program reads the line, echoing again.
+                        if self.pane.hides_input() {
+                            self.snapshot.overlay(&"*".repeat(self.password), term.cursor());
+                        } else {
+                            self.password = 0;
+                        }
                     }
                     Some(selection_range(self.selection, &term))
                 };
@@ -1915,6 +1926,14 @@ impl Surface {
     /// Sends input to the pane and jumps back to the live screen.
     fn write(&mut self, bytes: &[u8]) {
         let _ = self.pane.write(bytes);
+        if BEHAVIOUR.get().password_mask {
+            let before = self.password;
+            self.password = if self.pane.hides_input() { keys::password_length(self.password, bytes) } else { 0 };
+            // Nothing is echoed to draw it otherwise.
+            if self.password != before {
+                self.render();
+            }
+        }
         if self.scroll_offset != 0 || self.selection.is_some() {
             self.scroll_offset = 0;
             self.selection = None;
