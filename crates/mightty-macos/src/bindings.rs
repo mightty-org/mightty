@@ -364,6 +364,56 @@ impl Trigger {
     }
 }
 
+/// Every action, as a `keybind` names it (with an example argument where
+/// it takes one), and what it does: for `mightty config --export` and so
+/// the docs.
+pub const ACTIONS: &[(&str, &str)] = &[
+    ("new_window", "A new window, its shell where the current one is"),
+    ("new_tab", "A new tab, its shell where the current one is"),
+    ("new_split:right", "Splits the pane, the new one to the right"),
+    ("new_split:down", "Splits the pane, the new one below"),
+    ("close_surface", "Closes the pane, or its tab or window with its last pane"),
+    ("close_window", "Closes the window"),
+    ("minimize_window", "Minimizes the window"),
+    ("quit", "Quits Mightty"),
+    ("copy_to_clipboard", "Copies the selection"),
+    ("paste_from_clipboard", "Pastes, asking first when it could run commands"),
+    ("start_search", "Finds text in the pane and its history"),
+    ("navigate_search:next", "The next match (or previous)"),
+    ("goto_split:next", "The next pane (or previous)"),
+    ("goto_split:left", "The pane to the left (or right, up, down)"),
+    ("resize_split:left,10", "Moves the nearest divider, in points"),
+    ("toggle_split_zoom", "The pane alone fills the window, or not"),
+    ("equalize_splits", "Shares the window evenly between its panes"),
+    ("goto_tab:1", "Tab N, from 1"),
+    ("previous_tab", "The tab to the left"),
+    ("next_tab", "The tab to the right"),
+    ("last_tab", "The last tab"),
+    ("move_tab_to_new_window", "The tab out into a window of its own"),
+    ("close_other_tabs", "Closes the window's other tabs"),
+    ("undo", "Brings back the last tab, pane or window closed, still running, within undo-timeout"),
+    ("reopen_closed", "Reopens the last tab, pane or window closed, running still or with new shells"),
+    ("prompt_surface_title", "A title for the pane, shown in its tab and window"),
+    ("jump_to_attention", "The pane that has waited longest for you"),
+    ("toggle_command_palette", "Every action by name, filtered as you type"),
+    ("toggle_quick_terminal", "A terminal that drops from the top of the screen, over any app"),
+    ("toggle_secure_input", "Secure Keyboard Entry: other apps can't read what you type"),
+    ("open_settings", "The settings, in a window of their own"),
+    ("open_config", "The config file in your $EDITOR, in a new tab"),
+    ("reload_config", "Applies the config file now"),
+    ("increase_font_size:1", "A bigger font in the pane, by points (or smaller)"),
+    ("reset_font_size", "The pane's font back to font-size"),
+    ("clear_screen", "Clears history and the screen above the prompt"),
+    ("scroll_to_top", "To the top of the history"),
+    ("scroll_to_bottom", "Back to the prompt"),
+    ("scroll_page_up", "A page up the history"),
+    ("scroll_page_down", "A page down the history"),
+    ("text:hello\\n", "Sends text to the program (\\n, \\r, \\t, \\e, \\xHH)"),
+    ("csi:2J", "Sends ESC [ and the text"),
+    ("esc:d", "Sends ESC and the text"),
+    ("ignore", "The key does nothing, not even reach the program"),
+];
+
 /// The bindings in effect: defaults, then `keybind` settings in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bindings {
@@ -542,4 +592,12 @@ mod tests {
         b.apply("clear").unwrap();
         assert_eq!(b.find(trigger("cmd+w")), None);
     }
+
+    #[test]
+    fn documented_actions_parse() {
+        for (name, _) in ACTIONS {
+            assert!(Action::parse(name).is_ok(), "{name}");
+        }
+    }
+
 }

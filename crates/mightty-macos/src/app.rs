@@ -734,7 +734,7 @@ impl App {
                 2usize,
                 NO
             );
-            call!(window, c"setTitle:", nsstring("mightty"));
+            call!(window, c"setTitle:", nsstring("Mightty"));
             call!(window, c"setDelegate:", self.delegate);
             call!(window, c"setReleasedWhenClosed:", NO);
             if quick {
@@ -4202,7 +4202,7 @@ unsafe fn register_delegate_class() -> Id {
         let Some(running) = question.flatten() else { return TERMINATE_NOW };
         // SAFETY: main thread; documented signatures.
         unsafe {
-            let alert = close_alert("Quit mightty?", &running.replace("Closing", "Quitting"));
+            let alert = close_alert("Quit Mightty?", &running.replace("Closing", "Quitting"));
             let response: isize = msg!(alert, c"runModal");
             if response == ALERT_FIRST_BUTTON { TERMINATE_NOW } else { TERMINATE_CANCEL }
         }
@@ -4507,14 +4507,14 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
 
     unsafe {
         let bar = new_object(c"NSMenu");
-        let app_menu = submenu(bar, "mightty");
+        let app_menu = submenu(bar, "Mightty");
         add_action(app_menu, "Settings…", Action::OpenSettings);
         add_item(app_menu, "Open Config File", c"openConfig:", Action::OpenConfig);
         add_item(app_menu, "Reload Configuration", c"reloadConfig:", Action::ReloadConfig);
         separator(app_menu);
         add_action(app_menu, "Secure Keyboard Entry", Action::ToggleSecureInput);
         separator(app_menu);
-        add_item(app_menu, "Quit mightty", c"terminate:", Action::Quit);
+        add_item(app_menu, "Quit Mightty", c"terminate:", Action::Quit);
         let shell_menu = submenu(bar, "Shell");
         add_item(shell_menu, "New Window", c"newWindow:", Action::NewWindow);
         add_item(shell_menu, "New Tab", c"newTab:", Action::NewTab);

@@ -252,6 +252,47 @@ fn font_families() -> Vec<String> {
     }
 }
 
+/// `mightty config --export`: every setting (its section, value kind,
+/// default, choices and help) and every action (its default key and what
+/// it does), as JSON, for the docs.
+pub fn export() -> String {
+    use crate::bindings::{ACTIONS, Action, Bindings};
+    use mightty_json::Value;
+    let defaults = Config::default();
+    let settings: Vec<Value> = defaults
+        .settings()
+        .into_iter()
+        .map(|s| {
+            let choices: Vec<Value> = config::choices(s.name).iter().map(|c| Value::from(*c)).collect();
+            Value::object([
+                ("name", Value::from(s.name)),
+                ("section", Value::from(section(s.name))),
+                ("value", Value::from(s.value)),
+                ("default", Value::from(s.current)),
+                ("choices", Value::from(choices)),
+                ("many", Value::from(s.many)),
+                ("help", Value::from(s.help)),
+            ])
+        })
+        .collect();
+    let bindings = Bindings::default();
+    let actions: Vec<Value> = ACTIONS
+        .iter()
+        .map(|&(name, help)| {
+            let key = Action::parse(name).ok().and_then(|a| bindings.trigger_for(&a)).map(crate::palette::symbols);
+            Value::object([("name", Value::from(name)), ("key", Value::from(key)), ("help", Value::from(help))])
+        })
+        .collect();
+    let sections: Vec<Value> = SECTIONS.iter().map(|s| Value::from(*s)).collect();
+    Value::object([
+        ("version", Value::from(env!("CARGO_PKG_VERSION"))),
+        ("sections", Value::from(sections)),
+        ("settings", Value::from(settings)),
+        ("actions", Value::from(actions)),
+    ])
+    .to_string()
+}
+
 pub fn main() -> io::Result<()> {
     let path = config::config_dir().ok_or_else(|| io::Error::other("HOME is unset"))?.join("config");
     let mut app = App {
@@ -676,7 +717,7 @@ impl App {
             Some(rest) if !home.is_empty() => format!("~{rest}"),
             _ => shown,
         };
-        line(&mut out, &format!("\x1b[1m mightty settings\x1b[0m\x1b[2m  {}", fit(&shown, cols.saturating_sub(20))));
+        line(&mut out, &format!("\x1b[1m Mightty settings\x1b[0m\x1b[2m  {}", fit(&shown, cols.saturating_sub(20))));
         line(&mut out, "");
         let body = rows.saturating_sub(7);
         match &self.mode {

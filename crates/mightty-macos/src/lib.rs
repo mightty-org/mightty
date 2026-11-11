@@ -26,4 +26,4 @@ mod tabbar;
 
 pub use app::run;
 pub use config::Config;
-pub use settings::main as settings_main;
+pub use settings::{export as settings_export, main as settings_main};

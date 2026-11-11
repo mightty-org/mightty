@@ -45,7 +45,7 @@ As an app, with an icon in the Dock and banners when a pane needs you while
 you're elsewhere (macOS delivers notifications only to app bundles):
 
 ```sh
-scripts/bundle.sh                       # target/release/mightty.app, signed ad hoc
+scripts/bundle.sh                       # target/release/Mightty.app, signed ad hoc
 scripts/bundle.sh --install             # copied to ~/Applications
 ```
 

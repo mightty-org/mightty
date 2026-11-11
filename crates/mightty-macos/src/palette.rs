@@ -54,7 +54,7 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Settings", OpenSettings),
         ("Open Config File", OpenConfig),
         ("Reload Configuration", ReloadConfig),
-        ("Quit mightty", Quit),
+        ("Quit Mightty", Quit),
     ]
 }
 
@@ -74,7 +74,7 @@ pub fn entries(bindings: &Bindings) -> Vec<Entry> {
 }
 
 /// A trigger as menus show it: `⌃⌥⇧⌘P`.
-fn symbols(trigger: Trigger) -> String {
+pub(crate) fn symbols(trigger: Trigger) -> String {
     let mut out: String = [(CTRL, '⌃'), (ALT, '⌥'), (SHIFT, '⇧'), (CMD, '⌘')]
         .into_iter()
         .filter(|&(bit, _)| trigger.mods & bit != 0)
