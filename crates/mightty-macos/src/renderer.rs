@@ -115,6 +115,8 @@ pub type Selection = ((u64, usize), (u64, usize));
 #[derive(Clone, Copy, Default)]
 pub struct Highlights<'a> {
     pub selection: Option<Selection>,
+    /// The selection is a block: its columns on each of its lines (⌥-drag).
+    pub block: bool,
     /// In order, start first; only those on screen matter.
     pub matches: &'a [Selection],
     pub current: Option<Selection>,
@@ -819,8 +821,11 @@ impl Renderer {
 
     /// The frame's quads, and where those drawn over cell backgrounds start.
     fn build_quads(&mut self, snapshot: &Snapshot, highlights: Highlights) -> (Vec<Quad>, usize) {
-        let Highlights { selection, matches, current, link } = highlights;
+        let Highlights { selection, block, matches, current, link } = highlights;
         let within = |(start, end): Selection, at| start <= at && at <= end;
+        let in_block = |((l0, c0), (l1, c1)): Selection, (line, col): (u64, usize)| {
+            (l0.min(l1)..=l0.max(l1)).contains(&line) && (c0.min(c1)..=c0.max(c1)).contains(&col)
+        };
         // Cells go in order, so matches ending before the current cell are
         // skipped once: `matches[next..]` is what's left.
         let mut next = matches.partition_point(|m| m.1.0 < snapshot.first_line);
@@ -855,7 +860,7 @@ impl Renderer {
                     mem::swap(&mut fg, &mut bg);
                 }
                 let at = (line, c);
-                let selected = selection.is_some_and(|s| within(s, at));
+                let selected = selection.is_some_and(|s| if block { in_block(s, at) } else { within(s, at) });
                 while matches.get(next).is_some_and(|m| m.1 < at) {
                     next += 1;
                 }

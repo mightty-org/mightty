@@ -458,7 +458,7 @@ checks the header compiles as C++.
 
 1. ✅ VT parser, terminal state, PTY, headless runner
 2. ✅ macOS window: Cocoa via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas, keyboard input
-   - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line) + copy, mouse reporting
+   - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line, ⌥-drag a block of columns) + copy, mouse reporting
    - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters. Character widths follow Unicode 17 (East Asian Width and combining marks), so CJK text and new emoji line up. Emoji written with VS16 (`❤️`, `☀️`, keycaps) take two cells, as in Ghostty and kitty: that's mode 2027, which programs can query and reset (`CSI ? 2027 l`) to count widths as `wcwidth` does, and `grapheme-width = legacy` starts reset. Programs can ask about any mode with DECRQM (`CSI ? n $ p`)
    - ✅ Nerd Font icons built in (Symbols Nerd Font Mono, as in Ghostty and kitty): prompt, `eza` and editor icons show with any font, fitted to the cell, or to two when a space follows
    - ✅ Bold and italic for families without them: made from the regular face (grown outlines, 12° slant)

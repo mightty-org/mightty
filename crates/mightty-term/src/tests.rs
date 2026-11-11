@@ -153,6 +153,19 @@ fn absolute_lines_survive_scrolling() {
 }
 
 #[test]
+fn text_blocks_are_columns() {
+    let mut t = Term::new(12, 4);
+    t.feed("name  size\r\nfoo   12\r\nbar   3456\r\n中文x".as_bytes());
+    // Columns 6..=9, either corner first; lines keep their place even when blank.
+    assert_eq!(t.text_block((0, 6), (2, 9)), "size\n12\n3456");
+    assert_eq!(t.text_block((2, 9), (0, 6)), "size\n12\n3456");
+    assert_eq!(t.text_block((0, 0), (1, 2)), "nam\nfoo");
+    // Wide characters starting inside count; trailing blanks trimmed.
+    assert_eq!(t.text_block((3, 0), (3, 4)), "中文x");
+    assert_eq!(t.text_block((3, 1), (3, 3)), "文");
+}
+
+#[test]
 fn text_range_joins_soft_wraps() {
     let t = term(5, 4, "hello world\r\nnext  ");
     // "hello" / " worl" / "d" are one logical line.

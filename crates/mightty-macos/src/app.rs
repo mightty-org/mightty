@@ -235,6 +235,8 @@ struct Selection {
     head: (u64, usize),
     /// A single click only becomes a selection once the mouse moves.
     dragged: bool,
+    /// Columns between the ends, on every line between (⌥-drag), as in Ghostty.
+    block: bool,
 }
 
 /// The selected range, expanded to words or lines, start first.
@@ -2125,9 +2127,10 @@ impl Surface {
                     search.update_count();
                 }
                 let link = self.hover.as_ref().map(|h| h.0);
+                let block = self.selection.is_some_and(|s| s.block);
                 let highlights = match &self.search {
-                    Some(search) => Highlights { selection, matches: &search.matches, current: search.current, link },
-                    None => Highlights { selection, link, ..Highlights::default() },
+                    Some(search) => Highlights { selection, block, matches: &search.matches, current: search.current, link },
+                    None => Highlights { selection, block, link, ..Highlights::default() },
                 };
                 self.renderer.blink_off = BLINK.get().0;
                 let frame = self.renderer.prepare(&self.snapshot, highlights);
@@ -2247,7 +2250,8 @@ impl Surface {
                     2 => Granularity::Word,
                     _ => Granularity::Line,
                 };
-                self.selection = Some(Selection { granularity, anchor: point, head: point, dragged: false });
+                let block = mods.alt && granularity == Granularity::Cell;
+                self.selection = Some(Selection { granularity, anchor: point, head: point, dragged: false, block });
                 self.dragging = true;
             }
             MouseAction::Motion => {}
@@ -2398,7 +2402,11 @@ impl Surface {
         let text = {
             let term = self.pane.term.lock().unwrap();
             let Some((start, end)) = selection_range(self.selection, &term) else { return };
-            term.text_range(start, end)
+            match self.selection {
+                // The ends as dragged: a block's corners, not its text's start and end.
+                Some(s) if s.block => term.text_block(s.anchor, s.head),
+                _ => term.text_range(start, end),
+            }
         };
         // SAFETY: main thread; documented signatures.
         unsafe {

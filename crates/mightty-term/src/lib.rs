@@ -820,6 +820,30 @@ impl Term {
         out
     }
 
+    /// The text in a block: columns `a.1..=b.1` (either way round) of lines
+    /// `a.0..=b.0`, a line each, trailing spaces trimmed. A wide character
+    /// counts when its first cell is inside.
+    pub fn text_block(&self, a: (u64, usize), b: (u64, usize)) -> String {
+        let (lines, cols) = (a.0.min(b.0)..=a.0.max(b.0), a.1.min(b.1)..=a.1.max(b.1));
+        let mut out = String::new();
+        for line in lines {
+            if !out.is_empty() || line != a.0.min(b.0) {
+                out.push('\n');
+            }
+            let Some(row) = self.line(line) else { continue };
+            let begin = out.len();
+            let end = (*cols.end()).saturating_add(1).min(row.cells.len());
+            for cell in row.cells.get(*cols.start()..end).unwrap_or_default() {
+                if !cell.flags().contains(Flags::WIDE_SPACER) && !cell.flags().contains(Flags::WRAP_SPACER) {
+                    self.push_cell(&mut out, *cell);
+                }
+            }
+            let len = out[begin..].trim_end_matches(' ').len();
+            out.truncate(begin + len);
+        }
+        out
+    }
+
     /// Where `query` occurs in scrollback and on screen (only on screen
     /// while the alternate screen is active), oldest first, as inclusive
     /// `(line, column)` ranges like [`Term::text_range`] takes. A match may
