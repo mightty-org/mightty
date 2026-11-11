@@ -13,6 +13,10 @@ app=target/release/mightty.app
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/mightty "$app/Contents/MacOS/mightty"
 cp assets/mightty.icns "$app/Contents/Resources/mightty.icns"
+# The themes (iTerm2-Color-Schemes, as Ghostty bundles them), and their licence.
+mkdir -p "$app/Contents/Resources/themes"
+cp assets/themes/* "$app/Contents/Resources/themes/"
+cp assets/THEMES-LICENSE "$app/Contents/Resources/THEMES-LICENSE"
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
