@@ -116,6 +116,8 @@ struct Surface {
     /// After a key press, the next output redraw comes this early instead,
     /// so the echo doesn't wait out the refresh.
     echo_frame: Option<Instant>,
+    /// When an animated image's next frame is due, to draw it then.
+    animation_due: Option<Instant>,
     /// Where the pane's shell started, for new tabs until it reports one (OSC 7).
     start_dir: Option<PathBuf>,
     /// Text an input method is composing (marked text), drawn at the
@@ -374,6 +376,39 @@ extern "C" fn on_blink_tick(_: *mut c_void) {
         }
     });
     run_on_main_after(BLINK_INTERVAL, on_blink_tick);
+}
+
+thread_local! {
+    /// When `on_animation_tick` is next scheduled to run.
+    static ANIMATION_TICK: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Has `on_animation_tick` run by `due`, unless it already will sooner.
+fn schedule_animation(due: Instant) {
+    if ANIMATION_TICK.get().is_some_and(|at| at <= due) {
+        return;
+    }
+    ANIMATION_TICK.set(Some(due));
+    run_on_main_after(due.saturating_duration_since(Instant::now()), on_animation_tick);
+}
+
+/// Draws the panes whose animated images have a frame due, then waits for the next.
+extern "C" fn on_animation_tick(_: *mut c_void) {
+    let now = Instant::now();
+    // Superseded by a sooner tick, which scheduled this one's successor.
+    if ANIMATION_TICK.get().is_none_or(|at| at > now + Duration::from_millis(1)) {
+        return;
+    }
+    ANIMATION_TICK.set(None);
+    with_app(|app| {
+        let soon = now + Duration::from_millis(1);
+        for surface in app.surfaces.iter_mut().filter(|s| s.animation_due.is_some_and(|due| due <= soon)) {
+            surface.render();
+        }
+        if let Some(next) = app.surfaces.iter().filter_map(|s| s.animation_due).min() {
+            schedule_animation(next);
+        }
+    });
 }
 
 thread_local! {
@@ -700,6 +735,7 @@ impl App {
                 autoscroll: 0,
                 next_frame: Instant::now(),
                 echo_frame: None,
+                animation_due: None,
                 start_dir: None,
                 preedit: String::new(),
                 ime_used_key: false,
@@ -1671,6 +1707,10 @@ impl Surface {
             let pool = objc_autoreleasePoolPush();
             let (frame, clipboard) = {
                 let mut term = self.pane.term.lock().unwrap();
+                self.animation_due = term.animate(Instant::now());
+                if let Some(due) = self.animation_due {
+                    schedule_animation(due);
+                }
                 if term.take_bell() {
                     NSBeep();
                 }

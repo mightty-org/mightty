@@ -7,8 +7,9 @@
 //! file (`t=t`), as RGB, RGBA or PNG (`f=24/32/100`), zlib-compressed or
 //! not (`o=z`), in chunks (`m=1`); `a=t/T/p/q/d` with every delete
 //! specifier; source rectangles, cell offsets, cell sizes and z-index;
-//! Unicode placeholders (`U=1`). Not yet: shared memory (`t=s`), animation and relative
-//! placements, which are refused with an error.
+//! Unicode placeholders (`U=1`); animation: frames (`a=f`), playing them
+//! (`a=a`) and composing them (`a=c`). Not yet: shared memory (`t=s`) and
+//! relative placements, which are refused with an error.
 
 use std::collections::HashSet;
 use std::fs;
@@ -17,6 +18,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::cell::{Color, Flags};
 use crate::{Term, base64};
@@ -34,6 +36,10 @@ const MAX_CELLS: u32 = 1000;
 /// Lookups scan, and every placement is drawn each frame.
 const MAX_IMAGES: usize = 4096;
 const MAX_PLACEMENTS: usize = 4096;
+/// Frames an image may have; their pixels count toward `MAX_STORED` too.
+const MAX_FRAMES: usize = 10_000;
+/// A frame's gap when none is given, in milliseconds, as in kitty.
+const DEFAULT_GAP: i32 = 40;
 
 /// Pixels of a transmitted image: premultiplied RGBA, top row first.
 #[derive(Debug)]
@@ -51,7 +57,78 @@ struct Image {
     id: u32,
     /// `I=`: a number the client chose, answered with the id assigned.
     number: u32,
+    /// The image as transmitted, then frames added with `a=f`, each whole.
+    frames: Vec<Frame>,
+    animation: Animation,
+}
+
+struct Frame {
     data: Arc<ImageData>,
+    /// Milliseconds shown before the next; negative for a gapless frame,
+    /// which is skipped.
+    gap: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Playing {
+    #[default]
+    Stopped,
+    /// Running, but waiting at the last frame for more to arrive.
+    Loading,
+    Running,
+}
+
+#[derive(Default)]
+struct Animation {
+    playing: Playing,
+    /// The frame shown: an index into `frames`.
+    current: usize,
+    /// `v`: times to play, or 0 for ever (kitty's 1).
+    plays: u32,
+    played: u32,
+    /// When the next frame is due; set on the first tick after starting.
+    due: Option<Instant>,
+}
+
+impl Image {
+    fn new(id: u32, number: u32, data: ImageData) -> Self {
+        Self { id, number, frames: vec![Frame { data: Arc::new(data), gap: DEFAULT_GAP }], animation: Animation::default() }
+    }
+
+    fn shown(&self) -> &Arc<ImageData> {
+        &self.frames[self.animation.current].data
+    }
+
+    fn bytes(&self) -> usize {
+        self.frames.iter().map(|f| f.data.pixels.len()).sum()
+    }
+
+    /// Moves to the next frame to show, skipping gapless ones, looping or
+    /// stopping at the end. False when there's nowhere to go: waiting for
+    /// frames, played out, or every frame gapless.
+    fn step(&mut self) -> bool {
+        let a = &mut self.animation;
+        for _ in 0..self.frames.len() {
+            if a.current + 1 < self.frames.len() {
+                a.current += 1;
+            } else if a.playing == Playing::Loading {
+                return false;
+            } else {
+                a.played += 1;
+                if a.plays != 0 && a.played >= a.plays {
+                    (a.playing, a.played) = (Playing::Stopped, 0);
+                    return false;
+                }
+                a.current = 0;
+            }
+            if self.frames[a.current].gap >= 0 {
+                return true;
+            }
+        }
+        // Every frame gapless: nothing to show for any time.
+        a.playing = Playing::Stopped;
+        false
+    }
 }
 
 /// An image placed on the grid.
@@ -254,15 +331,22 @@ impl Graphics {
 
     fn store(&mut self, image: Image) {
         self.remove_image(image.id);
-        self.stored += image.data.pixels.len();
+        self.stored += image.bytes();
+        let id = image.id;
         self.images.push(image);
-        // Over quota: the oldest images not on screen go first, then any.
+        self.make_room(id);
+    }
+
+    /// Over quota: the oldest images not on screen go first, then any but `keep`.
+    fn make_room(&mut self, keep: u32) {
         let over = |g: &Self| g.stored > MAX_STORED || g.images.len() > MAX_IMAGES;
         if over(self) {
             let mut placed: HashSet<u32> = self.placements.iter().chain(&self.virtuals).map(|p| p.image_id).collect();
+            placed.insert(keep);
             while over(self) && self.images.len() > 1 {
                 let unplaced = self.images.iter().position(|i| !placed.contains(&i.id));
-                let id = self.images[unplaced.unwrap_or(0)].id;
+                let at = unplaced.or_else(|| self.images.iter().position(|i| i.id != keep)).unwrap_or(0);
+                let id = self.images[at].id;
                 placed.remove(&id);
                 self.remove_image(id);
             }
@@ -272,7 +356,7 @@ impl Graphics {
     fn remove_image(&mut self, id: u32) {
         if let Some(at) = self.images.iter().position(|i| i.id == id) {
             let image = self.images.remove(at);
-            self.stored -= image.data.pixels.len();
+            self.stored -= image.bytes();
         }
         self.placements.retain(|p| p.image_id != id);
         self.virtuals.retain(|p| p.image_id != id);
@@ -286,6 +370,159 @@ impl Graphics {
                 return self.next_id;
             }
         }
+    }
+
+    /// Placements of image `id` show its current frame.
+    fn show_frame(&mut self, id: u32) {
+        let Some(data) = self.image(id).map(|i| i.shown().clone()) else { return };
+        for p in self.placements.iter_mut().chain(&mut self.virtuals).filter(|p| p.image_id == id) {
+            p.image = data.clone();
+        }
+    }
+
+    /// Advances animations whose next frame is due by `now`; returns when
+    /// the next one will be.
+    pub(crate) fn animate(&mut self, now: Instant) -> Option<Instant> {
+        let mut next: Option<Instant> = None;
+        let mut changed = Vec::new();
+        for image in &mut self.images {
+            if image.animation.playing == Playing::Stopped {
+                continue;
+            }
+            let gap = |image: &Image| Duration::from_millis(image.frames[image.animation.current].gap.max(0) as u64);
+            let due = match image.animation.due {
+                Some(due) if due <= now => {
+                    if !image.step() {
+                        image.animation.due = None;
+                        changed.push(image.id);
+                        continue;
+                    }
+                    changed.push(image.id);
+                    // Far behind (nothing drew for a while): from now, not
+                    // a burst of catching up.
+                    let due = due + gap(image);
+                    if due <= now { now + gap(image) } else { due }
+                }
+                Some(due) => due,
+                // Waiting at the last frame for more (`s=2`).
+                None if image.animation.playing == Playing::Loading && image.animation.current + 1 == image.frames.len() => continue,
+                None if image.frames.len() > 1 => now + gap(image),
+                None => continue,
+            };
+            image.animation.due = Some(due);
+            next = Some(next.map_or(due, |n| n.min(due)));
+        }
+        for id in changed {
+            self.show_frame(id);
+        }
+        next
+    }
+
+    /// `a=f`: `frame` drawn at `x`,`y` (blended, or replacing with `X=1`)
+    /// over frame `c=` or the `Y=` colour, as a new frame or replacing frame
+    /// `r=`; `z=` its gap.
+    fn add_frame(&mut self, c: &Command, id: u32, frame: ImageData) -> Result<(), &'static str> {
+        let (base, edit, replace, background) = (c.cols as usize, c.rows as usize, c.offset[0] == 1, c.offset[1]);
+        let image = self.images.iter_mut().find(|i| i.id == id).expect("found by the caller");
+        let (width, height) = (image.frames[0].data.width, image.frames[0].data.height);
+        let frame_of = |n: usize| n.checked_sub(1).and_then(|i| image.frames.get(i)).ok_or("ENOENT:no such frame");
+        let mut canvas = if edit != 0 {
+            frame_of(edit)?.data.pixels.clone()
+        } else if base != 0 {
+            frame_of(base)?.data.pixels.clone()
+        } else {
+            let [r, g, b, a] = background.to_be_bytes();
+            let pre = |v: u8| ((v as u32 * a as u32 + 127) / 255) as u8;
+            [pre(r), pre(g), pre(b), a].repeat(width as usize * height as usize)
+        };
+        if edit == 0 && (image.frames.len() >= MAX_FRAMES || image.bytes() + canvas.len() > MAX_STORED) {
+            return Err("ENOSPC:too many frames");
+        }
+        let at = [c.source[0], c.source[1]];
+        blit(&mut canvas, width, &frame.pixels, frame.width, [0, 0, frame.width, frame.height], at, replace, height);
+        let data = Arc::new(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels: canvas });
+        if edit != 0 {
+            let frame = &mut image.frames[edit - 1];
+            frame.data = data;
+            if c.z != 0 {
+                frame.gap = c.z;
+            }
+        } else {
+            self.stored += data.pixels.len();
+            image.frames.push(Frame { data, gap: if c.z != 0 { c.z } else { DEFAULT_GAP } });
+        }
+        let current = image.animation.current;
+        self.make_room(id);
+        if edit == current + 1 {
+            self.show_frame(id);
+        }
+        Ok(())
+    }
+
+    /// `a=a`: `s=` stops (1), runs waiting for frames (2) or runs (3); `v=`
+    /// how often; `c=` the frame shown; `r=` and `z=` a frame's gap.
+    fn control(&mut self, c: &Command, id: u32) -> Result<(), &'static str> {
+        let (state, plays, current, frame) = (c.width, c.height, c.cols as usize, c.rows as usize);
+        let image = self.images.iter_mut().find(|i| i.id == id).expect("found by the caller");
+        let count = image.frames.len();
+        if (frame != 0 && frame > count) || current > count {
+            return Err("ENOENT:no such frame");
+        }
+        if frame != 0 && c.z != 0 {
+            image.frames[frame - 1].gap = c.z;
+        }
+        let a = &mut image.animation;
+        match state {
+            1 => (a.playing, a.played, a.due) = (Playing::Stopped, 0, None),
+            2 | 3 => {
+                let playing = if state == 2 { Playing::Loading } else { Playing::Running };
+                if a.playing == Playing::Stopped {
+                    a.due = None;
+                }
+                a.playing = playing;
+            }
+            _ => {}
+        }
+        // `v=1` plays for ever; `v=n` n times (once, then n - 1 loops).
+        if plays != 0 {
+            a.plays = if plays == 1 { 0 } else { plays };
+            a.played = 0;
+        }
+        if current != 0 {
+            (a.current, a.due) = (current - 1, None);
+            self.show_frame(id);
+        }
+        Ok(())
+    }
+
+    /// `a=c`: a `w`×`h` rectangle at `X`,`Y` in frame `r=` drawn at `x`,`y`
+    /// in frame `c=`, blended or (`C=1`) replacing.
+    fn compose(&mut self, c: &Command, id: u32) -> Result<(), &'static str> {
+        let (from, to, replace) = (c.rows as usize, c.cols as usize, c.cursor_stays);
+        let image = self.images.iter_mut().find(|i| i.id == id).expect("found by the caller");
+        let (width, height) = (image.frames[0].data.width, image.frames[0].data.height);
+        let (Some(source), Some(_)) = (from.checked_sub(1).and_then(|i| image.frames.get(i)), to.checked_sub(1).and_then(|i| image.frames.get(i))) else {
+            return Err("ENOENT:no such frame");
+        };
+        let [dx, dy, w, h] = c.source;
+        let (w, h) = (if w == 0 { width } else { w }, if h == 0 { height } else { h });
+        let [sx, sy] = c.offset;
+        let fits = |x: u32, y: u32| x.checked_add(w).is_some_and(|r| r <= width) && y.checked_add(h).is_some_and(|b| b <= height);
+        if !fits(sx, sy) || !fits(dx, dy) {
+            return Err("EINVAL:rectangle out of bounds");
+        }
+        if from == to && sx < dx + w && dx < sx + w && sy < dy + h && dy < sy + h {
+            return Err("EINVAL:source and destination overlap");
+        }
+        let source = source.data.clone();
+        let target = &mut image.frames[to - 1];
+        let mut pixels = target.data.pixels.clone();
+        blit(&mut pixels, width, &source.pixels, width, [sx, sy, w, h], [dx, dy], replace, height);
+        target.data = Arc::new(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels });
+        if image.animation.current + 1 == to {
+            self.show_frame(id);
+        }
+        Ok(())
     }
 
     /// Moves placements anchored in screen rows `top..=bottom` by `delta`
@@ -469,6 +706,34 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
     Ok(ImageData { serial: SERIAL.fetch_add(1, Ordering::Relaxed), width, height, pixels })
 }
 
+/// Draws the `[x, y, w, h]` part of `src` (`src_width` wide) onto `dst`
+/// (`width` × `height`) at `at`, clipped to it: over it by alpha, or in
+/// place of it. Both are premultiplied RGBA.
+#[allow(clippy::too_many_arguments)]
+fn blit(dst: &mut [u8], width: u32, src: &[u8], src_width: u32, [x, y, w, h]: [u32; 4], [dx, dy]: [u32; 2], replace: bool, height: u32) {
+    let w = w.min(width.saturating_sub(dx)) as usize;
+    let h = h.min(height.saturating_sub(dy)) as usize;
+    if w == 0 {
+        return;
+    }
+    let [x, y, dx, dy, src_width, width] = [x, y, dx, dy, src_width, width].map(|v| v as usize);
+    for row in 0..h {
+        let from = ((y + row) * src_width + x) * 4;
+        let to = ((dy + row) * width + dx) * 4;
+        let (from, to) = (&src[from..from + w * 4], &mut dst[to..to + w * 4]);
+        if replace {
+            to.copy_from_slice(from);
+            continue;
+        }
+        for (d, s) in to.chunks_exact_mut(4).zip(from.chunks_exact(4)) {
+            let keep = 255 - s[3] as u32;
+            for i in 0..4 {
+                d[i] = (s[i] as u32 + (d[i] as u32 * keep + 127) / 255).min(255) as u8;
+            }
+        }
+    }
+}
+
 /// U+10EEEE: a cell showing part of an image placed with `U=1`. Its
 /// foreground colour is the image id and its underline colour, if any,
 /// the placement id; diacritics after it give the row, the column and the
@@ -622,7 +887,7 @@ impl Term {
             Some(loading) => (loading, parsed.is_some_and(|c| c.more)),
             None => {
                 let Some(command) = parsed else { return };
-                let more = command.more && matches!(command.action, b't' | b'T' | b'q');
+                let more = command.more && matches!(command.action, b't' | b'T' | b'q' | b'f');
                 (Loading { command, data: Vec::new(), carry: Vec::new(), too_big: false }, more)
             }
         };
@@ -645,21 +910,21 @@ impl Term {
     }
 
     fn graphics_command(&mut self, mut c: Command, data: Vec<u8>) {
+        let pixels = |c: &Command, data: Vec<u8>| match c.medium {
+            b'd' => decode(c, data),
+            // Any file can be named, so only as a whole, uncompressed
+            // PNG: raw pixels, offsets and zlib would tell a remote
+            // program about the file by whether they decode.
+            b'f' if c.format != 100 || c.compressed || c.read_offset != 0 || c.read_size != 0 => {
+                Err("EINVAL:a file must be sent as a whole, uncompressed PNG")
+            }
+            b'f' | b't' => read_file(c, &data).and_then(|data| decode(c, data).ok()).ok_or(FILE_ERROR),
+            b's' => Err("EINVAL:shared memory isn't supported"),
+            _ => Err("EINVAL:unknown transmission medium"),
+        };
         match c.action {
             b't' | b'T' | b'q' => {
-                let pixels = match c.medium {
-                    b'd' => decode(&c, data),
-                    // Any file can be named, so only as a whole, uncompressed
-                    // PNG: raw pixels, offsets and zlib would tell a remote
-                    // program about the file by whether they decode.
-                    b'f' if c.format != 100 || c.compressed || c.read_offset != 0 || c.read_size != 0 => {
-                        Err("EINVAL:a file must be sent as a whole, uncompressed PNG")
-                    }
-                    b'f' | b't' => read_file(&c, &data).and_then(|data| decode(&c, data).ok()).ok_or(FILE_ERROR),
-                    b's' => Err("EINVAL:shared memory isn't supported"),
-                    _ => Err("EINVAL:unknown transmission medium"),
-                };
-                let image = match pixels {
+                let image = match pixels(&c, data) {
                     Ok(image) => image,
                     Err(error) => return self.graphics_reply(&c, error),
                 };
@@ -674,7 +939,7 @@ impl Term {
                 if c.id == 0 && c.number != 0 {
                     c.id = id;
                 }
-                graphics.store(Image { id, number: c.number, data: Arc::new(image) });
+                graphics.store(Image::new(id, c.number, image));
                 if c.action == b'T' {
                     self.place(&c, id);
                 } else {
@@ -697,7 +962,28 @@ impl Term {
                 }
             }
             b'd' => self.delete_images(&c),
-            b'f' | b'a' | b'c' => self.graphics_reply(&c, "EINVAL:animation isn't supported"),
+            b'f' | b'a' | b'c' => {
+                let graphics = &self.graphics[usize::from(self.alt_active)];
+                let found = match (c.id, c.number) {
+                    (0, 0) => None,
+                    (0, number) => graphics.numbered(number),
+                    (id, _) => graphics.image(id),
+                };
+                let Some(id) = found.map(|i| i.id) else { return self.graphics_reply(&c, "ENOENT:no such image") };
+                c.id = id;
+                let done = match c.action {
+                    b'f' => pixels(&c, data).and_then(|frame| self.graphics_mut().add_frame(&c, id, frame)),
+                    b'a' => self.graphics_mut().control(&c, id),
+                    _ => self.graphics_mut().compose(&c, id),
+                };
+                // As in kitty, controlling and composing only answer errors:
+                // `kitten icat` doesn't wait for an OK, which would reach the shell.
+                match done {
+                    Err(error) => self.graphics_reply(&c, error),
+                    Ok(()) if c.action == b'f' => self.graphics_reply(&c, "OK"),
+                    Ok(()) => {}
+                }
+            }
             _ => self.graphics_reply(&c, "EINVAL:unknown action"),
         }
     }
@@ -710,7 +996,7 @@ impl Term {
         let (cw, ch) = self.cell_pixels;
         let (cursor_row, cursor_col, lines_scrolled) = (self.cursor.row, self.cursor.col, self.lines_scrolled);
         let graphics = self.graphics_mut();
-        let Some(image) = graphics.image(id).map(|i| i.data.clone()) else {
+        let Some(image) = graphics.image(id).map(|i| i.shown().clone()) else {
             return self.graphics_reply(c, "ENOENT:no such image");
         };
         let [x, y, w, h] = c.source;
@@ -877,6 +1163,89 @@ mod tests {
         assert_eq!(send(&mut t, "a=q,f=100,i=31", b"not a png"), "\x1b_Gi=31;EBADPNG:can't decode the PNG\x1b\\");
         // A query stores nothing.
         assert_eq!(send(&mut t, "a=p,i=31", &[]), "\x1b_Gi=31;ENOENT:no such image\x1b\\");
+    }
+
+    /// The first pixel of what image 1's placement shows.
+    fn shown(t: &Term) -> [u8; 4] {
+        t.image_placements()[0].image.pixels[..4].try_into().unwrap()
+    }
+
+    #[test]
+    fn animation_frames_play_in_turn() {
+        let mut t = term();
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255].repeat(2);
+        assert_eq!(send(&mut t, "a=T,f=32,s=2,v=1,i=1", &rgba(2, 1)), "\x1b_Gi=1;OK\x1b\\");
+        // Frame 2: blue over a transparent canvas, shown for 100 ms.
+        assert_eq!(send(&mut t, "a=f,f=32,s=2,v=1,i=1,z=100", &blue), "\x1b_Gi=1;OK\x1b\\");
+        // Frame 3: frame 2 with its second pixel green.
+        assert_eq!(send(&mut t, "a=f,f=32,s=1,v=1,i=1,c=2,x=1", &[0, 255, 0, 255]), "\x1b_Gi=1;OK\x1b\\");
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        // Stopped until told to run.
+        assert_eq!(t.animate(t0), None);
+        assert_eq!(shown(&t), red);
+        assert_eq!(send(&mut t, "a=a,i=1,s=3,v=2", &[]), "");
+        // Frame 1 shows for the default 40 ms, frame 2 for 100.
+        assert_eq!(t.animate(t0), Some(ms(40)));
+        assert_eq!(t.animate(ms(40)), Some(ms(140)));
+        assert_eq!(shown(&t), [0, 0, 255, 255]);
+        assert_eq!(t.animate(ms(140)), Some(ms(180)));
+        assert_eq!(t.image_placements()[0].image.pixels[4..], [0, 255, 0, 255]);
+        assert_eq!(&t.image_placements()[0].image.pixels[..4], &[0, 0, 255, 255]);
+        // Twice through (v=2), then it stops on the last frame.
+        assert_eq!(t.animate(ms(180)), Some(ms(220)));
+        assert_eq!(shown(&t), red);
+        t.animate(ms(220));
+        t.animate(ms(320));
+        assert_eq!(t.animate(ms(360)), None);
+        assert_eq!(t.image_placements()[0].image.pixels[4..], [0, 255, 0, 255]);
+        // Shown on demand (c=), with frame 1's gap changed.
+        send(&mut t, "a=a,i=1,c=1,r=1,z=10", &[]);
+        assert_eq!(shown(&t), red);
+        send(&mut t, "a=a,i=1,s=3,v=1", &[]);
+        assert_eq!(t.animate(ms(400)), Some(ms(410)));
+        // Far behind: picks up from now, not in a burst.
+        assert_eq!(t.animate(ms(5000)), Some(ms(5100)));
+        send(&mut t, "a=a,i=1,s=1", &[]);
+        assert_eq!(t.animate(ms(6000)), None);
+    }
+
+    #[test]
+    fn animation_waits_skips_and_composes() {
+        let mut t = term();
+        send(&mut t, "a=T,f=32,s=2,v=1,i=1", &rgba(2, 1));
+        // Loading (s=2): waits at the last frame for more.
+        send(&mut t, "a=a,i=1,s=2", &[]);
+        let t0 = Instant::now();
+        assert_eq!(t.animate(t0), None);
+        send(&mut t, "a=f,f=32,s=1,v=1,i=1,X=1,Y=255", &[0, 0, 0, 0]);
+        assert!(t.animate(t0).is_some());
+        t.animate(t0 + Duration::from_millis(40));
+        // Frame 2: replaced, not blended, with Y's opaque black elsewhere.
+        assert_eq!(t.image_placements()[0].image.pixels, [0, 0, 0, 0, 0, 0, 0, 255]);
+        assert_eq!(t.animate(t0 + Duration::from_millis(80)), None);
+        // A gapless frame is never shown.
+        send(&mut t, "a=f,f=32,s=1,v=1,i=1,z=-1", &[9, 9, 9, 255]);
+        send(&mut t, "a=a,i=1,s=3", &[]);
+        let t1 = t0 + Duration::from_secs(1);
+        t.animate(t1);
+        t.animate(t1 + Duration::from_millis(40));
+        assert_eq!(shown(&t), [255, 0, 0, 255]);
+        // Compose: frame 1's first pixel into frame 2's second, replacing.
+        assert_eq!(send(&mut t, "a=c,i=1,r=1,c=2,w=1,h=1,x=1,C=1", &[]), "");
+        send(&mut t, "a=a,i=1,s=1,c=2", &[]);
+        assert_eq!(t.image_placements()[0].image.pixels, [0, 0, 0, 0, 255, 0, 0, 255]);
+        // Errors.
+        assert_eq!(send(&mut t, "a=c,i=1,r=1,c=2,w=2,h=1,x=1", &[]), "\x1b_Gi=1;EINVAL:rectangle out of bounds\x1b\\");
+        assert_eq!(send(&mut t, "a=c,i=1,r=2,c=2,w=2,h=1", &[]), "\x1b_Gi=1;EINVAL:source and destination overlap\x1b\\");
+        assert_eq!(send(&mut t, "a=c,i=1,r=9,c=2", &[]), "\x1b_Gi=1;ENOENT:no such frame\x1b\\");
+        assert_eq!(send(&mut t, "a=f,f=32,s=1,v=1,i=1,c=9", &[0; 4]), "\x1b_Gi=1;ENOENT:no such frame\x1b\\");
+        assert_eq!(send(&mut t, "a=a,i=1,c=9", &[]), "\x1b_Gi=1;ENOENT:no such frame\x1b\\");
+        assert_eq!(send(&mut t, "a=f,i=5", &[]), "\x1b_Gi=5;ENOENT:no such image\x1b\\");
+        // Frames count toward the quota.
+        let stored = t.graphics_mut().stored;
+        assert_eq!(stored, 3 * 8);
     }
 
     #[test]

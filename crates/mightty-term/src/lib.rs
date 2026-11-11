@@ -384,6 +384,17 @@ impl Term {
 
     /// Images placed on the active screen (kitty graphics), in the order
     /// sent; `Placement::line` says where.
+    /// Advances kitty graphics animations, on both screens, whose next
+    /// frame is due by `now`. Returns when the next frame will be, to draw
+    /// again then.
+    pub fn animate(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let [primary, alternate] = &mut self.graphics;
+        match (primary.animate(now), alternate.animate(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     pub fn image_placements(&self) -> &[Placement] {
         self.graphics[usize::from(self.alt_active)].placements()
     }
