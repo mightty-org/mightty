@@ -23,6 +23,7 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("New Tab", NewTab),
         ("Split Right", NewSplit(Direction::Right)),
         ("Split Down", NewSplit(Direction::Down)),
+        ("Change Title…", PromptSurfaceTitle),
         ("Close Pane", CloseSurface),
         ("Close Window", CloseWindow),
         ("Minimize Window", MinimizeWindow),

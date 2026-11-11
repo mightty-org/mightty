@@ -115,6 +115,8 @@ pub enum Action {
     ToggleQuickTerminal,
     /// The command palette: actions by name.
     ToggleCommandPalette,
+    /// Asks for a title for the pane, shown in its tab and window.
+    PromptSurfaceTitle,
     /// Points; `increase_font_size:N` and `decrease_font_size:N`.
     ChangeFontSize(f64),
     ResetFontSize,
@@ -187,6 +189,7 @@ impl Action {
             ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
             ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
             ("toggle_command_palette", _) => bare(Self::ToggleCommandPalette),
+            ("prompt_surface_title", _) => bare(Self::PromptSurfaceTitle),
             ("increase_font_size", _) => Ok(Self::ChangeFontSize(points(arg)?)),
             ("decrease_font_size", _) => Ok(Self::ChangeFontSize(-points(arg)?)),
             ("reset_font_size", _) => bare(Self::ResetFontSize),

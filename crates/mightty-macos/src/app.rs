@@ -147,6 +147,8 @@ struct Surface {
     search: Option<Search>,
     /// The command palette, while open.
     palette: Option<Palette>,
+    /// A title the user gave the pane (Change Title…), shown instead of its program's.
+    title_override: Option<String>,
     /// What the container's background was last set to (see `Renderer::backing`).
     backing: Option<(Rgb, f64, Colorspace)>,
     /// The link under the pointer while Cmd is held, and where it goes.
@@ -863,6 +865,7 @@ impl App {
                 keys_down: Vec::new(),
                 search: None,
                 palette: None,
+                title_override: None,
                 backing: None,
                 hover: None,
                 pointer: PointerShape::Default,
@@ -1271,8 +1274,9 @@ impl App {
     fn capture_layout(&self, node: &Node<Id>) -> Layout {
         match node {
             Node::Leaf(view) => {
-                let cwd = self.surfaces.iter().find(|s| s.view == *view).and_then(|s| self.cwd_of(s));
-                Layout::Pane { cwd: cwd.map(|d| d.display().to_string()) }
+                let surface = self.surfaces.iter().find(|s| s.view == *view);
+                let cwd = surface.and_then(|s| self.cwd_of(s));
+                Layout::Pane { cwd: cwd.map(|d| d.display().to_string()), title: surface.and_then(|s| s.title_override.clone()) }
             }
             Node::Split { axis, ratio, first, second } => Layout::Split {
                 axis: *axis,
@@ -1322,6 +1326,11 @@ impl App {
         let w = self.windows.iter_mut().find(|w| w.window == window)?;
         copy_ratios(&mut w.tree, &tab.layout);
         let order = w.tree.leaves();
+        for (view, title) in order.iter().zip(tab.layout.titles()) {
+            if let Some(surface) = self.surfaces.iter_mut().find(|s| s.view == *view) {
+                surface.title_override = title.map(str::to_owned);
+            }
+        }
         let focused = order[tab.focused.min(order.len() - 1)];
         w.zoomed = tab.zoomed && order.len() > 1;
         self.focus(focused);
@@ -1811,6 +1820,54 @@ fn ask_paste(window: Id, view: Id, text: &str, bytes: Vec<u8>) {
     }
 }
 
+/// Asks on a sheet over `window` for a title for the pane `view`, starting
+/// from `current`. Empty goes back to the program's title.
+fn ask_title(window: Id, view: Id, current: &str) {
+    thread_local! {
+        /// The pane being renamed, and the field (retained) its title is typed in.
+        static RENAMING: Cell<Option<(Id, Id)>> = const { Cell::new(None) };
+    }
+    static ANSWERED: Block = Block::with_response(answered);
+    unsafe extern "C" fn answered(_: *const Block, response: isize) {
+        let Some((view, field)) = RENAMING.take() else { return };
+        // SAFETY: main thread; the field was retained when the sheet opened.
+        let text = unsafe {
+            let text = string_from_ns(msg!(field, c"stringValue"));
+            call!(field, c"release");
+            text
+        };
+        if response == ALERT_FIRST_BUTTON {
+            let title = text.trim();
+            with_surface(view, |s| {
+                s.title_override = (!title.is_empty()).then(|| title.to_owned());
+                s.render();
+            });
+        }
+    }
+    // SAFETY: main thread; documented signatures; the handler is a global block.
+    unsafe {
+        let sheet: Id = msg!(window, c"attachedSheet");
+        if !sheet.is_null() {
+            return;
+        }
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(alert, c"setMessageText:", nsstring("Change Title"));
+        call!(alert, c"setInformativeText:", nsstring("Shown in the tab and the window. Leave it empty for the program's own title."));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("OK"));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
+        let frame = CGRect { origin: CGPoint::default(), size: CGSize { width: 300.0, height: 24.0 } };
+        let field: Id = msg!(msg!(class(c"NSTextField"), c"alloc"), c"initWithFrame:", frame);
+        call!(field, c"setStringValue:", nsstring(current));
+        call!(alert, c"setAccessoryView:", field);
+        RENAMING.set(Some((view, field)));
+        call!(alert, c"beginSheetModalForWindow:completionHandler:", window, &ANSWERED);
+        // Typing goes straight into the field, its text selected.
+        let sheet: Id = msg!(alert, c"window");
+        call!(sheet, c"makeFirstResponder:", field);
+        call!(field, c"selectText:", NIL);
+    }
+}
+
 /// Where a divider can be grabbed: wider than it's drawn.
 fn grab_area(divider: &Divider) -> Rect {
     let r = divider.rect;
@@ -2014,7 +2071,10 @@ impl Surface {
                 let clipboard = term.take_clipboard_requests();
                 let pointer = term.pointer_shape();
                 // A program can't set the attention marker itself.
-                let own = term.title().trim_start_matches(['●', ' ']);
+                let own = match &self.title_override {
+                    Some(title) => title.as_str(),
+                    None => term.title().trim_start_matches(['●', ' ']),
+                };
                 let mut title = if own.is_empty() { self.pane.command.clone() } else { own.to_owned() };
                 if let Some(code) = self.pane.exit_status() {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
@@ -3382,6 +3442,15 @@ fn perform(view: Id, action: &Action) {
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
+        Action::PromptSurfaceTitle => {
+            let current = |s: &mut Surface| {
+                let program = || s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned();
+                (s.window, s.title_override.clone().unwrap_or_else(program))
+            };
+            if let Some((window, current)) = with_surface(view, current) {
+                ask_title(window, view, &current);
+            }
+        }
         Action::ToggleCommandPalette => drop(with_app(|app| {
             let entries = palette::entries(&app.config.keybinds);
             app.surfaces.iter_mut().find(|s| s.view == view).map(|s| s.toggle_palette(entries))
@@ -3479,6 +3548,7 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         add_item(shell_menu, "Split Right", c"splitRight:", Action::NewSplit(Direction::Right));
         add_item(shell_menu, "Split Down", c"splitDown:", Action::NewSplit(Direction::Down));
         separator(shell_menu);
+        add_action(shell_menu, "Change Title…", Action::PromptSurfaceTitle);
         add_item(shell_menu, "Close", c"closeSplit:", Action::CloseSurface);
         add_item(shell_menu, "Close Window", c"performClose:", Action::CloseWindow);
         let edit_menu = submenu(bar, "Edit");

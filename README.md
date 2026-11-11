@@ -157,6 +157,7 @@ keybind = global:ctrl+grave_accent=toggle_quick_terminal
 | `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
 | `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
 | `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `prompt_surface_title` | | Change Title… (Shell menu, command palette): a title for the pane, shown in its tab and the window instead of its program's, and kept when windows are restored; empty goes back to the program's |
 | `toggle_command_palette` | ⌘⇧P | Actions by name, as in Ghostty: type to filter (`nt` finds New Tab), ↑↓ to choose, Return to run, Esc to close; each shows its key |
 | `toggle_quick_terminal` | | The quick terminal (Window → Quick Terminal): a window that drops from the top of the screen over any app, on every Space; again to hide it. Bind it globally: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` |
 | `toggle_secure_input` | | Secure Keyboard Entry (mightty → Secure Keyboard Entry): other apps can't read the keys typed |

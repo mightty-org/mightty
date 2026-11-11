@@ -40,7 +40,8 @@ pub struct Tab {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Layout {
-    Pane { cwd: Option<String> },
+    /// `title`: one the user gave it (Change Title…), if any.
+    Pane { cwd: Option<String>, title: Option<String> },
     Split { axis: Axis, ratio: f64, first: Box<Layout>, second: Box<Layout> },
 }
 
@@ -48,14 +49,22 @@ impl Layout {
     /// The first pane's directory: where the space's first shell starts.
     pub fn first_cwd(&self) -> Option<&str> {
         match self {
-            Layout::Pane { cwd } => cwd.as_deref(),
+            Layout::Pane { cwd, .. } => cwd.as_deref(),
             Layout::Split { first, .. } => first.first_cwd(),
+        }
+    }
+
+    /// The panes' titles, first to last as `Node::leaves` lists them.
+    pub fn titles(&self) -> Vec<Option<&str>> {
+        match self {
+            Layout::Pane { title, .. } => vec![title.as_deref()],
+            Layout::Split { first, second, .. } => [first.titles(), second.titles()].concat(),
         }
     }
 
     fn to_json(&self) -> Value {
         match self {
-            Layout::Pane { cwd } => Value::object([("cwd", cwd.clone().into())]),
+            Layout::Pane { cwd, title } => Value::object([("cwd", cwd.clone().into()), ("title", title.clone().into())]),
             Layout::Split { axis, ratio, first, second } => Value::object([
                 ("axis", if *axis == Axis::Row { "row" } else { "column" }.into()),
                 ("ratio", (*ratio).into()),
@@ -71,7 +80,8 @@ impl Layout {
             return None;
         }
         if v.get("axis").is_none() {
-            return Some(Layout::Pane { cwd: v["cwd"].as_str().map(str::to_owned) });
+            let text = |key: &str| v[key].as_str().map(str::to_owned);
+            return Some(Layout::Pane { cwd: text("cwd"), title: text("title") });
         }
         let axis = match v["axis"].as_str()? {
             "row" => Axis::Row,
@@ -162,7 +172,7 @@ mod tests {
     use super::*;
 
     fn pane(cwd: &str) -> Box<Layout> {
-        Box::new(Layout::Pane { cwd: Some(cwd.into()) })
+        Box::new(Layout::Pane { cwd: Some(cwd.into()), title: None })
     }
 
     #[test]
@@ -171,7 +181,7 @@ mod tests {
             axis: Axis::Row,
             ratio: 0.25,
             first: pane("/a"),
-            second: Box::new(Layout::Split { axis: Axis::Column, ratio: 0.5, first: pane("/b c"), second: Box::new(Layout::Pane { cwd: None }) }),
+            second: Box::new(Layout::Split { axis: Axis::Column, ratio: 0.5, first: pane("/b c"), second: Box::new(Layout::Pane { cwd: None, title: Some("logs".into()) }) }),
         };
         let session = Session {
             groups: vec![
@@ -185,6 +195,7 @@ mod tests {
         };
         assert_eq!(Session::from_json(&session.to_json()), Some(session.clone()));
         assert_eq!(session.groups[0].tabs[0].layout.first_cwd(), Some("/a"));
+        assert_eq!(session.groups[0].tabs[0].layout.titles(), [None, None, Some("logs")]);
     }
 
     #[test]
