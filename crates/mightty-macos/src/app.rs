@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
-use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Term, clipboard_reply};
+use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Rgb, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
 use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
@@ -147,6 +147,8 @@ struct Surface {
     search: Option<Search>,
     /// The command palette, while open.
     palette: Option<Palette>,
+    /// What the container's background was last set to (see `Renderer::backing`).
+    backing: Option<(Rgb, f64, Colorspace)>,
     /// The link under the pointer while Cmd is held, and where it goes.
     hover: Option<(HoveredLink, String)>,
     /// The pointer's shape a program asked for (OSC 22), shown over the
@@ -854,6 +856,7 @@ impl App {
                 keys_down: Vec::new(),
                 search: None,
                 palette: None,
+                backing: None,
                 hover: None,
                 pointer: PointerShape::Default,
                 hint: None,
@@ -1473,8 +1476,7 @@ impl App {
         for surface in &mut self.surfaces {
             let size = if font_changed { config.font_size } else { surface.renderer.font_size() };
             surface.renderer.configure(&config, size);
-            // SAFETY: main thread; documented signature.
-            unsafe { call!(msg!(surface.container, c"layer"), c"setBackgroundColor:", pane_background(&config)) };
+            surface.sync_backing();
             // The cell size may have changed, so the grid too; hidden panes as well.
             surface.resize();
         }
@@ -2062,6 +2064,7 @@ impl Surface {
                 };
                 self.renderer.blink_off = BLINK.get().0;
                 let frame = self.renderer.prepare(&self.snapshot, highlights);
+                self.sync_backing();
                 let presented = latency::frame(self.window, &self.snapshot);
                 self.renderer.present(frame, presented);
                 let screen: Id = msg!(self.window, c"screen");
@@ -2259,6 +2262,18 @@ impl Surface {
             let palette = Palette::open(self.container, self.view, self.dark(), entries);
             call!(self.window, c"makeFirstResponder:", palette.field);
             self.palette = Some(palette);
+        }
+    }
+
+    /// Shows the background drawn behind a translucent pane too, when a
+    /// program changed it (OSC 11) or the config did.
+    fn sync_backing(&mut self) {
+        let backing = self.renderer.backing();
+        if self.backing != Some(backing) {
+            self.backing = Some(backing);
+            let (rgb, opacity, space) = backing;
+            // SAFETY: main thread; documented signature.
+            unsafe { call!(msg!(self.container, c"layer"), c"setBackgroundColor:", color_alpha(rgb, opacity, space)) };
         }
     }
 

@@ -398,6 +398,7 @@ pub struct Renderer {
     scale: f64,
     theme: Theme,
     look: Look,
+    colorspace: Colorspace,
     /// A blinking cursor is in its off phase (set by the app before drawing).
     pub blink_off: bool,
     /// Quad lists kept between frames, so drawing doesn't allocate.
@@ -453,6 +454,7 @@ impl Renderer {
                 scale,
                 theme: config.theme.clone(),
                 look: config.look,
+                colorspace: config.colorspace,
                 blink_off: false,
                 spare: Vec::new(),
                 front: Vec::new(),
@@ -472,6 +474,12 @@ impl Renderer {
 
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// What goes behind a translucent pane: the background drawn (a
+    /// program's, if it set one), at `background-opacity`, in its colour space.
+    pub fn backing(&self) -> (Rgb, f64, Colorspace) {
+        (self.theme.background, self.look.background_opacity, self.colorspace)
     }
 
     /// The `CAMetalLayer` drawn into.
@@ -496,6 +504,7 @@ impl Renderer {
             call!(self.layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
             set_colorspace(self.layer, config.colorspace);
         }
+        self.colorspace = config.colorspace;
         let font = |r: &Self| (r.fonts.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
         let before = (font(self), self.look.padding);
         self.fonts = config.fonts.clone();
