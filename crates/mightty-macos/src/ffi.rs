@@ -316,6 +316,9 @@ unsafe extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     pub fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
+    pub fn CGColorSpaceCreateWithName(name: CFStringRef) -> CGColorSpaceRef;
+    pub static kCGColorSpaceSRGB: CFStringRef;
+    pub static kCGColorSpaceDisplayP3: CFStringRef;
     pub fn CGColorSpaceRelease(space: CGColorSpaceRef);
     pub fn CGBitmapContextCreate(
         data: *mut c_void,

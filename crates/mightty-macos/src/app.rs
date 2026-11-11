@@ -20,7 +20,7 @@ use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, St
 use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Behaviour, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, SaveState};
+use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
@@ -1666,12 +1666,16 @@ fn from_rect(r: Rect) -> CGRect {
     CGRect { origin: CGPoint { x: r.x, y: r.y }, size: CGSize { width: r.width, height: r.height } }
 }
 
-/// A `CGColor` (autoreleased with its `NSColor`).
-fn color_alpha((r, g, b): (u8, u8, u8), alpha: f64) -> Id {
+/// A `CGColor` in `space` (autoreleased with its `NSColor`).
+fn color_alpha((r, g, b): (u8, u8, u8), alpha: f64, space: Colorspace) -> Id {
     let c = |v: u8| v as f64 / 255.0;
+    let make = match space {
+        Colorspace::Srgb => c"colorWithSRGBRed:green:blue:alpha:",
+        Colorspace::DisplayP3 => c"colorWithDisplayP3Red:green:blue:alpha:",
+    };
     // SAFETY: documented signatures.
     unsafe {
-        let color: Id = msg!(class(c"NSColor"), c"colorWithSRGBRed:green:blue:alpha:", c(r), c(g), c(b), alpha);
+        let color: Id = msg!(class(c"NSColor"), make, c(r), c(g), c(b), alpha);
         msg!(color, c"CGColor")
     }
 }
@@ -1679,7 +1683,7 @@ fn color_alpha((r, g, b): (u8, u8, u8), alpha: f64) -> Id {
 /// Behind each pane's terminal: the default background, at
 /// `background-opacity`. It also shows through a dimmed pane.
 fn pane_background(config: &Config) -> Id {
-    color_alpha(config.theme.background, config.look.background_opacity)
+    color_alpha(config.theme.background, config.look.background_opacity, config.colorspace)
 }
 
 /// `background-opacity` and `background-blur` for a window, whose split
@@ -1693,7 +1697,7 @@ fn style_window(window: Id, root: Id, config: &Config) {
         call!(window, c"setBackgroundColor:", background);
         // Translucent dividers would show the pane backgrounds through twice: clear instead.
         let divider = renderer::mix(config.theme.background, config.theme.foreground, 0.25);
-        call!(msg!(root, c"layer"), c"setBackgroundColor:", color_alpha(divider, if translucent { 0.0 } else { 1.0 }));
+        call!(msg!(root, c"layer"), c"setBackgroundColor:", color_alpha(divider, if translucent { 0.0 } else { 1.0 }, config.colorspace));
         let number: isize = msg!(window, c"windowNumber");
         let radius = if translucent { config.background_blur } else { 0 };
         CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number as i32, radius);

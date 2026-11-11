@@ -40,6 +40,7 @@ pub struct Config {
     pub font_backend: FontBackend,
     /// `grapheme-width`: whether VS16 emoji take two cells (unicode) or one (legacy).
     pub wide_emoji: bool,
+    pub colorspace: Colorspace,
     /// Draw the font's ligatures and contextual alternates (`->` as an arrow).
     pub ligatures: bool,
     /// `keybind`: the defaults, changed by each setting in order.
@@ -281,6 +282,14 @@ impl Adjust {
     }
 }
 
+/// `window-colorspace`: what colours (theme, images) are taken to be in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Colorspace {
+    Srgb,
+    /// Wide gamut: the same numbers, more saturated on a P3 display.
+    DisplayP3,
+}
+
 /// `font-backend`: who reads fonts and draws glyphs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontBackend {
@@ -360,6 +369,7 @@ impl Default for Config {
             save_state: SaveState::Default,
             font_backend: FontBackend::CoreText,
             wide_emoji: true,
+            colorspace: Colorspace::Srgb,
             ligatures: true,
             keybinds: Bindings::default(),
             look: Look::default(),
@@ -647,6 +657,22 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(if c.wide_emoji { "unicode" } else { "legacy" }.into()),
+    },
+    Setting {
+        name: "window-colorspace",
+        value: "SPACE",
+        help: "srgb or display-p3: the colour space colours and images are taken to be in, as in Ghostty; \
+               display-p3 shows them more saturated on a wide-gamut display",
+        color: false,
+        set: |c, v| {
+            c.colorspace = match v {
+                "srgb" => Colorspace::Srgb,
+                "display-p3" => Colorspace::DisplayP3,
+                _ => return Err("expects srgb or display-p3".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(if c.colorspace == Colorspace::DisplayP3 { "display-p3" } else { "srgb" }.into()),
     },
     Setting {
         name: "window-save-state",
@@ -1529,8 +1555,10 @@ mod tests {
             "--adjust-cell-height=10%",
             "--adjust-cell-width=-1",
             "--unfocused-split-opacity=0.5",
+            "--window-colorspace=display-p3",
         ]))
         .unwrap();
+        assert_eq!(c.colorspace, Colorspace::DisplayP3);
         assert_eq!((c.look.background_opacity, c.background_blur, c.look.padding), (0.85, 20, (12.0, 6.0)));
         assert_eq!((c.look.cursor_style, c.look.cursor_blink), (CursorStyle::Bar, Some(true)));
         assert_eq!(c.look.cell_adjust, (Adjust::Points(-1.0), Adjust::Percent(10.0)));
@@ -1538,7 +1566,8 @@ mod tests {
         assert_eq!(Adjust::Percent(10.0).apply(30, 2.0), 33);
         assert_eq!(Adjust::Points(-1.0).apply(16, 2.0), 14);
         assert_eq!(Adjust::Points(-50.0).apply(16, 2.0), 1);
-        for bad in ["--background-opacity=1.5", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
+        assert_eq!(Config::default().colorspace, Colorspace::Srgb);
+        for bad in ["--background-opacity=1.5", "--window-colorspace=p3", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use mightty_render::{Rgb, Theme, boxdraw};
 use mightty_term::{Color, Flags, ImageData, PLACEHOLDER, Placement, PlaceholderRun, Row, StyledCell, Term, Underline, char_width};
 
-use crate::config::{Adjust, Config, CursorStyle, FontBackend, Fonts, Look};
+use crate::config::{Adjust, Colorspace, Config, CursorStyle, FontBackend, Fonts, Look};
 use crate::ffi::*;
 use crate::font::{self, Font, Ligature, RasterGlyph, Style};
 use crate::snapshot;
@@ -254,6 +254,22 @@ impl Snapshot {
     }
 }
 
+/// Has `layer`'s pixels shown as in `space`.
+///
+/// # Safety
+/// `layer` must be a `CAMetalLayer`.
+unsafe fn set_colorspace(layer: Id, space: Colorspace) {
+    // SAFETY: documented signatures; the layer retains the space.
+    unsafe {
+        let space = CGColorSpaceCreateWithName(match space {
+            Colorspace::Srgb => kCGColorSpaceSRGB,
+            Colorspace::DisplayP3 => kCGColorSpaceDisplayP3,
+        });
+        call!(layer, c"setColorspace:", space);
+        CGColorSpaceRelease(space);
+    }
+}
+
 /// A cell-sized coverage mask holding one wave per `period` pixels below
 /// `baseline`, so waves join across cells.
 fn undercurl(period: u32, width: u32, height: u32, baseline: f32, thickness: f32) -> Vec<u8> {
@@ -401,6 +417,7 @@ impl Renderer {
             assert!(!device.is_null(), "no Metal device");
             call!(layer, c"setDevice:", device);
             call!(layer, c"setPixelFormat:", PIXEL_FORMAT_BGRA8);
+            set_colorspace(layer, config.colorspace);
             let snapshot = env::var_os("MIGHTTY_SNAPSHOT").map(PathBuf::from);
             // Snapshots read the drawable back, which framebuffer-only textures forbid.
             call!(layer, c"setFramebufferOnly:", if snapshot.is_some() { NO } else { YES });
@@ -470,6 +487,7 @@ impl Renderer {
         unsafe {
             call!(self.layer, c"setDisplaySyncEnabled:", if config.vsync { YES } else { NO });
             call!(self.layer, c"setOpaque:", if config.look.background_opacity < 1.0 { NO } else { YES });
+            set_colorspace(self.layer, config.colorspace);
         }
         let font = |r: &Self| (r.fonts.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
         let before = (font(self), self.look.padding);
