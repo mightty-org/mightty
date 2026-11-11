@@ -1852,7 +1852,7 @@ fn ask_title(window: Id, view: Id, current: &str) {
         }
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring("Change Title"));
-        call!(alert, c"setInformativeText:", nsstring("Shown in the tab and the window. Leave it empty for the program's own title."));
+        call!(alert, c"setInformativeText:", nsstring("Leave blank to use the title the running program sets."));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("OK"));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
         let frame = CGRect { origin: CGPoint::default(), size: CGSize { width: 300.0, height: 24.0 } };
