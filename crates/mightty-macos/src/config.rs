@@ -173,6 +173,8 @@ pub struct Behaviour {
     pub hide_mouse: bool,
     /// `scrollbar`: system (an overlay scroller while scrolling) or never.
     pub scrollbar: bool,
+    /// `macos-titlebar-style`.
+    pub titlebar: Titlebar,
     /// `password-mask`: a `*` at the cursor for each character typed at a
     /// password prompt, drawn by mightty and sent nowhere.
     pub password_mask: bool,
@@ -190,6 +192,7 @@ impl Default for Behaviour {
             paste_protection: true,
             hide_mouse: false,
             scrollbar: true,
+            titlebar: Titlebar::Native,
             password_mask: true,
             scroll_multiplier: 1.0,
         }
@@ -298,6 +301,17 @@ impl Adjust {
             Self::Percent(p) => format!("{p}%"),
         }
     }
+}
+
+/// `macos-titlebar-style`, as in Ghostty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Titlebar {
+    /// The system's.
+    Native,
+    /// In the terminal's background colour, the window one surface.
+    Transparent,
+    /// None: the terminal reaches the top; its top padding drags the window.
+    Hidden,
 }
 
 /// `quick-terminal-position`, as in Ghostty.
@@ -1037,6 +1051,24 @@ const SETTINGS: &[Setting] = &[
         get: |c| Some(c.behaviour.hide_mouse.to_string()),
     },
     Setting {
+        name: "macos-titlebar-style",
+        value: "STYLE",
+        help: "native, transparent (in the terminal's background colour) or hidden (none, the window dragged by \
+               its top padding), as in Ghostty",
+        color: false,
+        set: |c, v| {
+            c.behaviour.titlebar = match v {
+                "native" => Titlebar::Native,
+                "transparent" => Titlebar::Transparent,
+                "hidden" => Titlebar::Hidden,
+                "tabs" => return Err("tabs isn't supported yet: native, transparent or hidden".into()),
+                _ => return Err("expects native, transparent or hidden".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(format!("{:?}", c.behaviour.titlebar).to_lowercase()),
+    },
+    Setting {
         name: "scrollbar",
         value: "WHEN",
         help: "system or never: system shows macOS's overlay scrollbar at a pane's right edge while scrolling \
@@ -1662,13 +1694,15 @@ mod tests {
             "--mouse-hide-while-typing=true",
             "--mouse-scroll-multiplier=3",
             "--scrollbar=never",
+            "--macos-titlebar-style=hidden",
         ]))
         .unwrap();
         let b = c.behaviour;
         assert!(!b.paste_protection && Config::default().behaviour.paste_protection);
         assert!(!b.scrollbar && Config::default().behaviour.scrollbar);
+        assert_eq!((b.titlebar, Config::default().behaviour.titlebar), (Titlebar::Hidden, Titlebar::Native));
         assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
-        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto"] {
+        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto", "--macos-titlebar-style=tabs"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }

@@ -20,7 +20,7 @@ use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, St
 use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Rgb, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
+use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, Extent, Titlebar, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::hotkey;
@@ -928,6 +928,8 @@ impl App {
 
     /// A shell in a new window, or with `tab` in a new tab of the key window.
     fn new_shell_window(&mut self, tab: bool) {
+        // Without a title bar there's no tab bar either: a window instead, as in Ghostty.
+        let tab = tab && self.config.behaviour.titlebar != Titlebar::Hidden;
         let key = self.key_window();
         let current = key.and_then(|(_, view)| self.surfaces.iter().find(|s| s.view == view));
         let cwd = current.and_then(|s| self.cwd_of(s));
@@ -1665,6 +1667,8 @@ impl App {
         self.config = config;
         let windows: Vec<Id> = self.windows.iter().map(|w| w.window).collect();
         for window in windows {
+            // The title bar may cover the content now, or not.
+            self.layout(window, false);
             self.dim(window);
         }
         if !warnings.is_empty() {
@@ -2191,6 +2195,47 @@ extern "C" fn on_scrollbar_fade(_: *mut c_void) {
     }
 }
 
+/// `macos-titlebar-style` for `window`, unless it has no title bar (the
+/// quick terminal).
+unsafe fn style_titlebar(window: Id, config: &Config, translucent: bool) {
+    const TITLED: usize = 1;
+    const FULL_SIZE_CONTENT: usize = 1 << 15;
+    unsafe {
+        let mask: usize = msg!(window, c"styleMask");
+        if mask & TITLED == 0 {
+            return;
+        }
+        let style = config.behaviour.titlebar;
+        let native = style == Titlebar::Native;
+        // Native tabs sit under the title bar: a window that has some keeps
+        // one, transparent, rather than the tab bar covering the terminal.
+        let group: Id = msg!(window, c"tabbedWindows");
+        let tabs: usize = if group.is_null() { 0 } else { msg!(group, c"count") };
+        let hidden = style == Titlebar::Hidden && tabs <= 1;
+        let mask = if hidden { mask | FULL_SIZE_CONTENT } else { mask & !FULL_SIZE_CONTENT };
+        call!(window, c"setStyleMask:", mask);
+        call!(window, c"setTitlebarAppearsTransparent:", if native { NO } else { YES });
+        call!(window, c"setTitleVisibility:", if hidden { 1isize } else { 0isize });
+        for button in 0..3usize {
+            // Close, minimize, zoom.
+            let button: Id = msg!(window, c"standardWindowButton:", button);
+            if !button.is_null() {
+                call!(button, c"setHidden:", if hidden { YES } else { NO });
+            }
+        }
+        if !native && !translucent {
+            // The title bar shows the window's background: the terminal's.
+            call!(window, c"setBackgroundColor:", ns_color(config.theme.background, 1.0, config.colorspace));
+        }
+        // Its title and buttons drawn to suit that background.
+        let (r, g, b) = config.theme.background;
+        let dark = (0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64) < 128.0;
+        let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+        let appearance: Id = if native { NIL } else { msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name)) };
+        call!(window, c"setAppearance:", appearance);
+    }
+}
+
 /// Shows `shape` as the mouse pointer.
 fn set_pointer(shape: PointerShape) {
     let name = match shape {
@@ -2215,18 +2260,21 @@ fn set_pointer(shape: PointerShape) {
     }
 }
 
-/// A `CGColor` in `space` (autoreleased with its `NSColor`).
-fn color_alpha((r, g, b): (u8, u8, u8), alpha: f64, space: Colorspace) -> Id {
+/// An `NSColor` in `space` (autoreleased).
+fn ns_color((r, g, b): (u8, u8, u8), alpha: f64, space: Colorspace) -> Id {
     let c = |v: u8| v as f64 / 255.0;
     let make = match space {
         Colorspace::Srgb => c"colorWithSRGBRed:green:blue:alpha:",
         Colorspace::DisplayP3 => c"colorWithDisplayP3Red:green:blue:alpha:",
     };
-    // SAFETY: documented signatures.
-    unsafe {
-        let color: Id = msg!(class(c"NSColor"), make, c(r), c(g), c(b), alpha);
-        msg!(color, c"CGColor")
-    }
+    // SAFETY: documented signature.
+    unsafe { msg!(class(c"NSColor"), make, c(r), c(g), c(b), alpha) }
+}
+
+/// A `CGColor` in `space`, for layers (autoreleased with its `NSColor`).
+fn color_alpha(rgb: (u8, u8, u8), alpha: f64, space: Colorspace) -> Id {
+    // SAFETY: documented signature.
+    unsafe { msg!(ns_color(rgb, alpha, space), c"CGColor") }
 }
 
 /// Behind each pane's terminal: the default background, at
@@ -2244,6 +2292,7 @@ fn style_window(window: Id, root: Id, config: &Config) {
         call!(window, c"setOpaque:", if translucent { NO } else { YES });
         let background: Id = if translucent { msg!(class(c"NSColor"), c"clearColor") } else { msg!(class(c"NSColor"), c"windowBackgroundColor") };
         call!(window, c"setBackgroundColor:", background);
+        style_titlebar(window, config, translucent);
         // Translucent dividers would show the pane backgrounds through twice: clear instead.
         let divider = renderer::mix(config.theme.background, config.theme.foreground, 0.25);
         call!(msg!(root, c"layer"), c"setBackgroundColor:", color_alpha(divider, if translucent { 0.0 } else { 1.0 }, config.colorspace));
@@ -2779,6 +2828,18 @@ impl Surface {
         self.render();
     }
 
+    /// Whether `event` is in the window's top padding, above the first row
+    /// of a pane at the top.
+    fn in_top_padding(&self, event: Id) -> bool {
+        // SAFETY: main thread; `event` is a mouse NSEvent; documented signatures.
+        let (y, height) = unsafe {
+            let point: CGPoint = msg!(event, c"locationInWindow");
+            (point.y, send_rect(msg!(self.window, c"contentView"), c"bounds").size.height)
+        };
+        let pad = self.renderer.padding_px().1 / self.renderer.scale();
+        y >= height - pad
+    }
+
     /// Whether the mouse is over the terminal.
     fn mouse_inside(&self) -> bool {
         // SAFETY: main thread; documented signatures.
@@ -3160,6 +3221,12 @@ unsafe fn register_view_class() -> Id {
         }
     }
     extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
+        // Without a title bar, the top padding moves the window.
+        if BEHAVIOUR.get().titlebar == Titlebar::Hidden && with_surface(view, |w| w.in_top_padding(event)) == Some(true) {
+            // SAFETY: main thread; `event` is this mouse-down.
+            unsafe { call!(msg!(view, c"window"), c"performWindowDragWithEvent:", event) };
+            return;
+        }
         // SAFETY: `event` is an NSEvent.
         let flags: usize = unsafe { msg!(event, c"modifierFlags") };
         if flags & CMD != 0 {
