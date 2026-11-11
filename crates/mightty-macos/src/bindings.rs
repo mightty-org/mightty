@@ -117,6 +117,10 @@ pub enum Action {
     ToggleCommandPalette,
     /// Asks for a title for the pane, shown in its tab and window.
     PromptSurfaceTitle,
+    /// The key window's tab, out into a window of its own.
+    MoveTabToNewWindow,
+    /// Closes the key window's other tabs.
+    CloseOtherTabs,
     /// Brings back the last tab, pane or window closed, still running (see `undo-timeout`).
     Undo,
     /// Reopens the last closed: running still, or new shells where they were.
@@ -195,6 +199,8 @@ impl Action {
             ("toggle_command_palette", _) => bare(Self::ToggleCommandPalette),
             ("prompt_surface_title", _) => bare(Self::PromptSurfaceTitle),
             ("undo", _) => bare(Self::Undo),
+            ("move_tab_to_new_window", _) => bare(Self::MoveTabToNewWindow),
+            ("close_other_tabs", _) => bare(Self::CloseOtherTabs),
             ("reopen_closed", _) => bare(Self::ReopenClosed),
             ("increase_font_size", _) => Ok(Self::ChangeFontSize(points(arg)?)),
             ("decrease_font_size", _) => Ok(Self::ChangeFontSize(-points(arg)?)),

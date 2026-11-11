@@ -4331,6 +4331,19 @@ fn perform(view: Id, action: &Action) {
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
         Action::Undo => drop(with_app(|app| app.reopen_closed(true))),
+        Action::MoveTabToNewWindow | Action::CloseOtherTabs => {
+            // As from the tab bar's menu, for the key window's tab.
+            let found = with_app(|app| {
+                let (window, _) = app.key_window()?;
+                let index = app.tabs_of(window).iter().position(|&t| app.windows[t].shown)?;
+                let bar = app.bars.iter().find(|b| b.0 == window)?.1.bar;
+                Some((bar, index))
+            });
+            if let Some((bar, index)) = found.flatten() {
+                let click = if *action == Action::MoveTabToNewWindow { tabbar::Click::NewWindow(index) } else { tabbar::Click::CloseOthers(index) };
+                on_tab_click(bar, click);
+            }
+        }
         Action::ReopenClosed => drop(with_app(|app| app.reopen_closed(false))),
         Action::PromptSurfaceTitle => {
             let current = |s: &mut Surface| {
@@ -4488,6 +4501,8 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         separator(window_menu);
         add_action(window_menu, "Show Previous Tab", Action::PreviousTab);
         add_action(window_menu, "Show Next Tab", Action::NextTab);
+        add_action(window_menu, "Move Tab to New Window", Action::MoveTabToNewWindow);
+        add_action(window_menu, "Close Other Tabs", Action::CloseOtherTabs);
         for digit in 1..=9isize {
             let (title, action) =
                 if digit == 9 { ("Select Last Tab".to_owned(), Action::LastTab) } else { (format!("Select Tab {digit}"), Action::GotoTab(digit as usize)) };

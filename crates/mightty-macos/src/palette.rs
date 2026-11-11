@@ -38,6 +38,8 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Zoom Pane", ToggleSplitZoom),
         ("Equalize Panes", EqualizeSplits),
         ("Next Tab", NextTab),
+        ("Move Tab to New Window", MoveTabToNewWindow),
+        ("Close Other Tabs", CloseOtherTabs),
         ("Previous Tab", PreviousTab),
         ("Jump to Pane Needing You", JumpToAttention),
         ("Increase Font Size", ChangeFontSize(1.0)),

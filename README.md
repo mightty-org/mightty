@@ -162,6 +162,7 @@ keybind = global:ctrl+grave_accent=toggle_quick_terminal
 | `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
 | `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
 | `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `move_tab_to_new_window`, `close_other_tabs` | | The key window's tab out into a window of its own; its other tabs closed (each undoable). Also in the tab's right-click menu and the Window menu |
 | `undo` | ⌘Z | Undo Close (Edit menu): brings back the last tab, pane or window closed, as it was, within `undo-timeout`, as in Ghostty: its shell kept running meanwhile, hidden |
 | `reopen_closed` | ⌘⇧T | Reopen Closed (Shell menu): the last tab, pane or window closed, back in its place; still running within `undo-timeout`, else new shells in the same folders, with the same splits and titles (the last 20 closes) |
 | `prompt_surface_title` | | Change Title… (Shell menu, command palette): a title for the pane, shown in its tab and the window instead of its program's, and kept when windows are restored; empty goes back to the program's |
