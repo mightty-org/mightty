@@ -2562,15 +2562,47 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
                 with_app(|app| tab(app, i).map(|t| app.close_tab(t)));
             }
         }
-        tabbar::Click::Rename(i) => {
-            let view = with_app(|app| {
-                app.select_tab(window, i);
-                tab(app, i).map(|t| app.windows[t].active)
-            });
-            if let Some(view) = view.flatten() {
-                perform(view, &Action::PromptSurfaceTitle);
+        tabbar::Click::Rename(i) => drop(with_app(|app| {
+            app.select_tab(window, i);
+            let active = app.windows[tab(app, i)?].active;
+            let s = app.surfaces.iter().find(|s| s.view == active)?;
+            let text = match &s.title_override {
+                Some(title) => title.clone(),
+                None => s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned(),
+            };
+            app.bars.iter().find(|b| b.0 == window)?.1.edit(i, &text);
+            Some(())
+        })),
+        tabbar::Click::Retitle(i, text) => drop(with_app(|app| {
+            let active = app.windows[tab(app, i)?].active;
+            if let Some(text) = text {
+                let s = app.surfaces.iter_mut().find(|s| s.view == active)?;
+                s.title_override = (!text.is_empty()).then_some(text);
+                s.title.clear();
+                s.render();
+                for bar in app.bars.iter_mut().filter(|b| b.0 == window) {
+                    bar.2 = None;
+                }
+                app.update_tab_bar(window);
             }
-        }
+            // The keys back to the terminal.
+            app.focus(active);
+            Some(())
+        })),
+        tabbar::Click::CloseOthers(i) => drop(with_app(|app| {
+            let kept = app.windows[tab(app, i)?].active;
+            // One at a time, the indices moving as tabs go; each undoable.
+            while let Some(&other) = app.tabs_of(window).iter().find(|&&t| !app.windows[t].tree.leaves().contains(&kept)) {
+                app.close_tab(other);
+            }
+            Some(())
+        })),
+        tabbar::Click::NewWindow(i) => drop(with_app(|app| {
+            // SAFETY: main thread; a live NSWindow.
+            let frame = unsafe { send_rect(window, c"frame") };
+            // Cascaded from this one, as a new window would be.
+            app.detach_tab(window, i, CGPoint { x: frame.origin.x + 90.0, y: frame.origin.y + frame.size.height - 44.0 });
+        })),
         tabbar::Click::New => drop(with_app(|app| app.new_shell_tab_of(window))),
         tabbar::Click::Move(from, to) => drop(with_app(|app| app.move_tab(window, from, to))),
         tabbar::Click::Detach(i, (x, y)) => drop(with_app(|app| app.detach_tab(window, i, CGPoint { x, y }))),

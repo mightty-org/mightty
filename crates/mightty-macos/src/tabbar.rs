@@ -22,13 +22,18 @@ const PLUS: f64 = 28.0;
 const CLOSE: f64 = 16.0;
 const MIN_TAB: f64 = 120.0;
 
-/// What a click or drag on a tab bar asks for.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What a click, drag or menu item on a tab bar asks for.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Click {
     Select(usize),
     Close(usize),
-    /// Double-clicked: a new title for the tab.
+    /// Double-clicked, or Rename Tab: its title to edit in place (see `TabBar::edit`).
     Rename(usize),
+    /// Its title edited: the new one (empty: the program's), or `None` if cancelled.
+    Retitle(usize, Option<String>),
+    CloseOthers(usize),
+    /// Move Tab to New Window.
+    NewWindow(usize),
     New,
     /// Dragged along the bar: from one place to another (or back to its own).
     Move(usize, usize),
@@ -111,6 +116,8 @@ struct State {
     incoming: Option<(usize, Vec<(Id, Id)>)>,
     /// Shown only for a tab dragged over its window (one tab, bar hidden).
     peeking: bool,
+    /// A tab whose title is being edited, and the field it's edited in.
+    editing: Option<(usize, Id)>,
     /// The selected tab's colour, the bar's, and the text's.
     colors: [(u8, u8, u8); 3],
 }
@@ -548,8 +555,83 @@ fn bar_class() -> Id {
             let hidden: Bool = msg!(bar, c"isHidden");
             let f = send_rect(bar, c"frame");
             let inside = (f.origin.x..f.origin.x + f.size.width).contains(&point.x) && (f.origin.y..f.origin.y + f.size.height).contains(&point.y);
-            if hidden == NO && inside { bar } else { NIL }
+            if hidden != NO || !inside {
+                return NIL;
+            }
+            // A title being edited takes its own clicks, to place the caret.
+            if let Some(Some(field)) = with_state(bar, |s| s.editing.map(|e| e.1)) {
+                let superview: Id = msg!(bar, c"superview");
+                let in_bar: CGPoint = msg!(bar, c"convertPoint:fromView:", point, superview);
+                let holder: Id = msg!(field, c"superview");
+                let in_holder: CGPoint = msg!(holder, c"convertPoint:fromView:", in_bar, bar);
+                let hit: Id = msg!(field, c"hitTest:", in_holder);
+                if !hit.is_null() {
+                    return hit;
+                }
+            }
+            bar
         }
+    }
+    /// A right-click on a tab: its menu, as AppKit's tabs have.
+    extern "C" fn right_mouse_down(bar: Id, _: Sel, event: Id) {
+        let x = x_in(bar, event);
+        let Some(Some((index, _))) = with_state(bar, |s| s.tab_at(x)) else { return };
+        // SAFETY: main thread; documented signatures; the menu is autoreleased once shown.
+        unsafe {
+            let menu: Id = msg!(msg!(class(c"NSMenu"), c"alloc"), c"initWithTitle:", nsstring(""));
+            for (title, action) in [
+                ("Rename Tab…", c"tabMenuRename:"),
+                ("Move Tab to New Window", c"tabMenuNewWindow:"),
+                ("", c""),
+                ("Close Tab", c"tabMenuClose:"),
+                ("Close Other Tabs", c"tabMenuCloseOthers:"),
+            ] {
+                if title.is_empty() {
+                    let separator: Id = msg!(class(c"NSMenuItem"), c"separatorItem");
+                    call!(menu, c"addItem:", separator);
+                    continue;
+                }
+                let item: Id = msg!(menu, c"addItemWithTitle:action:keyEquivalent:", nsstring(title), sel(action), nsstring(""));
+                call!(item, c"setTarget:", bar);
+                call!(item, c"setTag:", index as isize);
+            }
+            call!(class(c"NSMenu"), c"popUpContextMenu:withEvent:forView:", menu, event, bar);
+            call!(menu, c"release");
+        }
+    }
+    fn menu_click(bar: Id, item: Id, click: fn(usize) -> Click) {
+        // SAFETY: a menu item of ours; documented signature.
+        let index: isize = unsafe { msg!(item, c"tag") };
+        if let Some(on_click) = ON_CLICK.get() {
+            on_click(bar, click(index as usize));
+        }
+    }
+    extern "C" fn menu_rename(bar: Id, _: Sel, item: Id) {
+        menu_click(bar, item, Click::Rename);
+    }
+    extern "C" fn menu_new_window(bar: Id, _: Sel, item: Id) {
+        menu_click(bar, item, Click::NewWindow);
+    }
+    extern "C" fn menu_close(bar: Id, _: Sel, item: Id) {
+        menu_click(bar, item, Click::Close);
+    }
+    extern "C" fn menu_close_others(bar: Id, _: Sel, item: Id) {
+        menu_click(bar, item, Click::CloseOthers);
+    }
+    /// Keys in a title being edited: Return keeps it, Escape doesn't.
+    extern "C" fn edit_command(bar: Id, _: Sel, _control: Id, _text_view: Id, command: Sel) -> Bool {
+        if command == sel(c"insertNewline:") {
+            finish_edit(bar, true);
+        } else if command == sel(c"cancelOperation:") {
+            finish_edit(bar, false);
+        } else {
+            return NO;
+        }
+        YES
+    }
+    /// Clicking elsewhere ends the edit, keeping the title.
+    extern "C" fn edit_ended(bar: Id, _: Sel, _notification: Id) {
+        finish_edit(bar, true);
     }
     /// Scrolling over it scrolls the tabs, as their scroll view would.
     extern "C" fn scroll_wheel(bar: Id, _: Sel, event: Id) {
@@ -580,6 +662,17 @@ fn bar_class() -> Id {
                 (c"mouseExited:", event(mouse_exited), c"v@:@"),
                 (c"tabsScrolled:", event(scrolled), c"v@:@"),
                 (c"scrollWheel:", event(scroll_wheel), c"v@:@"),
+                (c"rightMouseDown:", event(right_mouse_down), c"v@:@"),
+                (c"tabMenuRename:", event(menu_rename), c"v@:@"),
+                (c"tabMenuNewWindow:", event(menu_new_window), c"v@:@"),
+                (c"tabMenuClose:", event(menu_close), c"v@:@"),
+                (c"tabMenuCloseOthers:", event(menu_close_others), c"v@:@"),
+                (c"controlTextDidEndEditing:", event(edit_ended), c"v@:@"),
+                (
+                    c"control:textView:doCommandBySelector:",
+                    edit_command as extern "C" fn(Id, Sel, Id, Id, Sel) -> Bool as *const c_void,
+                    c"c@:@@:",
+                ),
                 (c"hitTest:", hit_test as extern "C" fn(Id, Sel, CGPoint) -> Id as *const c_void, c"@@:{CGPoint=dd}"),
                 (c"acceptsFirstMouse:", yes as extern "C" fn(Id, Sel, Id) -> Bool as *const c_void, c"c@:@"),
                 // Clicks reach it under a transparent title bar, not the window's dragging.
@@ -619,6 +712,28 @@ pub fn hover(point: Option<CGPoint>, except: Id, titles: &[String]) -> Option<(I
         }
         found
     })
+}
+
+/// Ends the title edit in `bar`: its text for the tab if `keep`.
+fn finish_edit(bar: Id, keep: bool) {
+    // Taken first: removing the field ends its editing, which comes back here.
+    let Some(Some((index, field))) = with_state(bar, |s| s.editing.take()) else { return };
+    // SAFETY: main thread; the field is ours until removed here.
+    let text = unsafe {
+        let text = keep.then(|| string_from_ns(msg!(field, c"stringValue")));
+        call!(field, c"setDelegate:", NIL);
+        call!(field, c"removeFromSuperview");
+        text
+    };
+    with_state(bar, |s| {
+        if let Some(tab) = s.tabs.get(index) {
+            // SAFETY: main thread; documented signature.
+            unsafe { call!(tab.title, c"setHidden:", NO) };
+        }
+    });
+    if let Some(on_click) = ON_CLICK.get() {
+        on_click(bar, Click::Retitle(index, text.map(|t| t.trim().to_owned())));
+    }
 }
 
 pub struct TabBar {
@@ -689,6 +804,7 @@ impl TabBar {
                     preview: None,
                     incoming: None,
                     peeking: false,
+                    editing: None,
                     colors: [(0, 0, 0); 3],
                 })
             });
@@ -784,6 +900,47 @@ impl TabBar {
                     call!(s.scroller, c"reflectScrolledClipView:", s.clip);
                 }
                 s.pin();
+            }
+        });
+    }
+
+    /// Edits tab `index`'s title in place, starting from `text`, selected.
+    pub fn edit(&self, index: usize, text: &str) {
+        with_state(self.bar, |s| {
+            let Some(tab) = s.tabs.get(index).copied() else { return };
+            if s.editing.is_some() {
+                return;
+            }
+            let [background, _, _] = s.colors;
+            // SAFETY: main thread; documented signatures; the field is held by the tab.
+            unsafe {
+                // The system's rounded text field across the tab, even margins, centred.
+                let width = send_rect(tab.view, c"frame").size.width;
+                let field: Id = msg!(msg!(class(c"NSTextField"), c"alloc"), c"initWithFrame:", rect(6.0, (HEIGHT - 20.0) / 2.0, (width - 12.0).max(40.0), 20.0));
+                call!(field, c"setStringValue:", nsstring(text));
+                call!(field, c"setPlaceholderString:", nsstring("The program's title"));
+                let font: Id = msg!(class(c"NSFont"), c"systemFontOfSize:", 12.0f64);
+                call!(field, c"setFont:", font);
+                call!(field, c"setAlignment:", 1isize); // centred
+                call!(field, c"setBezeled:", YES);
+                call!(field, c"setBezelStyle:", 1usize); // rounded
+                let cell: Id = msg!(field, c"cell");
+                call!(cell, c"setUsesSingleLineMode:", YES);
+                call!(cell, c"setScrollable:", YES);
+                // Dark on a dark terminal, light on a light one, whatever the system's.
+                let dark = 0.2126 * background.0 as f64 + 0.7152 * background.1 as f64 + 0.0722 * background.2 as f64 <= 127.0;
+                let name = if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+                let appearance: Id = msg!(class(c"NSAppearance"), c"appearanceNamed:", nsstring(name));
+                call!(field, c"setAppearance:", appearance);
+                call!(field, c"setDelegate:", self.bar);
+                call!(tab.title, c"setHidden:", YES);
+                call!(tab.close, c"setHidden:", YES);
+                call!(tab.view, c"addSubview:", field);
+                call!(field, c"release");
+                let window: Id = msg!(self.bar, c"window");
+                call!(window, c"makeFirstResponder:", field);
+                call!(field, c"selectText:", NIL);
+                s.editing = Some((index, field));
             }
         });
     }
