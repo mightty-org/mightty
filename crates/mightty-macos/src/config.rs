@@ -47,6 +47,8 @@ pub struct Config {
     pub auto_secure_input: bool,
     /// `undo-timeout`: how long a closed pane's shell keeps running, for ⌘Z to bring it back.
     pub undo_timeout: std::time::Duration,
+    /// `bell-audio-path`: the sound a bell plays with `bell-features` audio.
+    pub bell_audio: Option<PathBuf>,
     /// `quick-terminal-position`: the screen edge the quick terminal drops from.
     pub quick_position: QuickPosition,
     /// `quick-terminal-autohide`: the quick terminal hides when another app or window takes the keys.
@@ -175,6 +177,8 @@ pub struct Behaviour {
     pub scrollbar: bool,
     /// `macos-titlebar-style`.
     pub titlebar: Titlebar,
+    /// `bell-features`: what a bell does.
+    pub bell: Bell,
     /// `password-mask`: a `*` at the cursor for each character typed at a
     /// password prompt, drawn by mightty and sent nowhere.
     pub password_mask: bool,
@@ -193,6 +197,7 @@ impl Default for Behaviour {
             hide_mouse: false,
             scrollbar: true,
             titlebar: Titlebar::Native,
+            bell: Bell { system: true, audio: false, attention: false, title: true, border: false },
             password_mask: true,
             scroll_multiplier: 1.0,
         }
@@ -301,6 +306,21 @@ impl Adjust {
             Self::Percent(p) => format!("{p}%"),
         }
     }
+}
+
+/// `bell-features`, as in Ghostty: what a bell (BEL) does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bell {
+    /// The system's alert sound.
+    pub system: bool,
+    /// `bell-audio-path`'s sound.
+    pub audio: bool,
+    /// The Dock icon bounces once while mightty isn't the active app.
+    pub attention: bool,
+    /// 🔔 on the pane's tab and window title until it's typed in or looked at.
+    pub title: bool,
+    /// The pane's edge flashes.
+    pub border: bool,
 }
 
 /// `macos-titlebar-style`, as in Ghostty.
@@ -456,6 +476,7 @@ impl Default for Config {
             ligatures: true,
             auto_secure_input: true,
             undo_timeout: std::time::Duration::from_secs(5),
+            bell_audio: None,
             quick_position: QuickPosition::Top,
             quick_autohide: true,
             quick_size: (Extent::Percent(40.0), None),
@@ -1051,6 +1072,48 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.behaviour.hide_mouse.to_string()),
+    },
+    Setting {
+        name: "bell-features",
+        value: "FEATURES",
+        help: "what a bell does, as in Ghostty: a comma list of system (the alert sound), audio (bell-audio-path), \
+               attention (bounce the Dock icon while in the background), title (🔔 on the title until the pane is \
+               typed in or looked at) and border (flash the pane's edge); no-NAME turns one off. Default: system,title",
+        color: false,
+        set: |c, v| {
+            let bell = &mut c.behaviour.bell;
+            for item in v.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+                let (name, on) = match item.strip_prefix("no-") {
+                    Some(name) => (name, false),
+                    None => (item, true),
+                };
+                *match name {
+                    "system" => &mut bell.system,
+                    "audio" => &mut bell.audio,
+                    "attention" => &mut bell.attention,
+                    "title" => &mut bell.title,
+                    "border" => &mut bell.border,
+                    _ => return Err(format!("unknown feature `{name}`: system, audio, attention, title or border")),
+                } = on;
+            }
+            Ok(())
+        },
+        get: |c| {
+            let b = c.behaviour.bell;
+            let list = [("system", b.system), ("audio", b.audio), ("attention", b.attention), ("title", b.title), ("border", b.border)];
+            Some(list.iter().map(|&(n, on)| if on { n.to_owned() } else { format!("no-{n}") }).collect::<Vec<_>>().join(","))
+        },
+    },
+    Setting {
+        name: "bell-audio-path",
+        value: "PATH",
+        help: "a sound file a bell plays with bell-features audio (any format macOS plays: aiff, wav, mp3, m4a)",
+        color: false,
+        set: |c, v| {
+            c.bell_audio = (!v.is_empty()).then(|| expand_home(v));
+            Ok(())
+        },
+        get: |c| c.bell_audio.as_ref().map(|p| p.display().to_string()),
     },
     Setting {
         name: "macos-titlebar-style",
@@ -1697,14 +1760,16 @@ mod tests {
             "--mouse-scroll-multiplier=3",
             "--scrollbar=never",
             "--macos-titlebar-style=hidden",
+            "--bell-features=no-system,border",
         ]))
         .unwrap();
         let b = c.behaviour;
         assert!(!b.paste_protection && Config::default().behaviour.paste_protection);
         assert!(!b.scrollbar && Config::default().behaviour.scrollbar);
         assert_eq!((b.titlebar, Config::default().behaviour.titlebar), (Titlebar::Hidden, Titlebar::Native));
+        assert_eq!(b.bell, Bell { system: false, audio: false, attention: false, title: true, border: true });
         assert_eq!((b.clipboard_read, b.clipboard_write, b.copy_on_select, b.hide_mouse, b.scroll_multiplier), (Permission::Deny, Permission::Ask, true, true, 3.0));
-        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto", "--macos-titlebar-style=chrome"] {
+        for bad in ["--clipboard-read=sometimes", "--mouse-scroll-multiplier=0", "--copy-on-select=primary", "--scrollbar=auto", "--macos-titlebar-style=chrome", "--bell-features=loud"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }

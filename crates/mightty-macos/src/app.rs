@@ -11,7 +11,7 @@ use std::ffi::{CStr, c_void};
 use std::fs;
 use std::io;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -196,6 +196,10 @@ struct Surface {
     active: bool,
     /// Some pane in its window needs the user (see `App::refresh_attention`).
     window_attention: bool,
+    /// A bell rang here, not yet seen: 🔔 on its title (see `bell-features`).
+    bell: bool,
+    /// Flashed round the pane's edge by a bell, made on the first.
+    flash: Id,
 }
 
 /// An open search bar and what it found.
@@ -640,6 +644,9 @@ pub fn run(config: Config) -> io::Result<()> {
         let restore = config.command.is_none();
 
         BEHAVIOUR.set(config.behaviour);
+        if let Some(problem) = load_bell_sound(config.bell_audio.as_deref()) {
+            eprintln!("mightty: {problem}");
+        }
         let app = App {
             mux,
             windows: Vec::new(),
@@ -858,11 +865,12 @@ impl App {
     fn tab_title(&self, index: usize) -> String {
         let active = self.windows[index].active;
         let Some(s) = self.surfaces.iter().find(|s| s.view == active) else { return String::new() };
+        let mark = if s.bell { "🔔 " } else { "" };
         if let Some(title) = &s.title_override {
-            return title.clone();
+            return format!("{mark}{title}");
         }
         let title = s.pane.term.lock().unwrap().title().trim_start_matches(['●', ' ']).to_owned();
-        if title.is_empty() { s.pane.command.clone() } else { title }
+        format!("{mark}{}", if title.is_empty() { &s.pane.command } else { &title })
     }
 
     /// Brings `window`'s tab bar up to date: there with mightty's own tabs
@@ -1205,6 +1213,8 @@ impl App {
                 hint: None,
                 active,
                 window_attention: false,
+                bell: false,
+                flash: NIL,
             });
             view
         }
@@ -2018,6 +2028,7 @@ impl App {
             surface.resize();
         }
         BEHAVIOUR.set(config.behaviour);
+        let sound_problem = load_bell_sound(config.bell_audio.as_deref());
         self.config = config;
         let windows: Vec<Id> = self.windows.iter().map(|w| w.window).collect();
         for window in windows {
@@ -2030,6 +2041,7 @@ impl App {
             self.layout(window, false);
             self.dim(window);
         }
+        let warnings: Vec<String> = warnings.into_iter().chain(sound_problem).collect();
         if !warnings.is_empty() {
             show_problems("Some settings weren't applied", &warnings);
         }
@@ -2571,6 +2583,29 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
 }
 
 thread_local! {
+    /// `bell-audio-path`'s sound, loaded (ours, +1), or nil.
+    static BELL_SOUND: Cell<Id> = const { Cell::new(NIL) };
+}
+
+/// Loads `path` as the bell's sound (see `bell-audio-path`), saying why not.
+fn load_bell_sound(path: Option<&Path>) -> Option<String> {
+    // SAFETY: main thread; documented signatures; the old sound was ours.
+    unsafe {
+        let old = BELL_SOUND.replace(NIL);
+        if !old.is_null() {
+            call!(old, c"release");
+        }
+        let path = path?;
+        let sound: Id = msg!(msg!(class(c"NSSound"), c"alloc"), c"initWithContentsOfFile:byReference:", nsstring(&path.display().to_string()), YES);
+        if sound.is_null() {
+            return Some(format!("bell-audio-path: {} isn't a sound macOS can play", path.display()));
+        }
+        BELL_SOUND.set(sound);
+        None
+    }
+}
+
+thread_local! {
     /// The window being dragged by its title bar, while the button's down.
     static WINDOW_DRAG: Cell<Option<Id>> = const { Cell::new(None) };
 }
@@ -2753,7 +2788,7 @@ impl Surface {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let pool = objc_autoreleasePoolPush();
-            let (frame, clipboard, pointer, bar) = {
+            let (frame, clipboard, pointer, bar, rang) = {
                 let mut term = self.pane.term.lock().unwrap();
                 // Animated images' next frames, or a stale progress bar to take down.
                 self.animation_due = match (term.animate(Instant::now()), term.progress_expiry()) {
@@ -2763,8 +2798,9 @@ impl Surface {
                 if let Some(due) = self.animation_due {
                     schedule_animation(due);
                 }
-                if term.take_bell() {
-                    NSBeep();
+                let rang = term.take_bell();
+                if rang && BEHAVIOUR.get().bell.title {
+                    self.bell = true;
                 }
                 let clipboard = term.take_clipboard_requests();
                 let pointer = term.pointer_shape();
@@ -2779,6 +2815,9 @@ impl Surface {
                     title += &code.map_or(" — exited".into(), |c| format!(" — exited ({c})"));
                 }
                 // The window shows its active pane's title, marked if any of its panes needs the user.
+                if self.bell {
+                    title.insert_str(0, "🔔 ");
+                }
                 if self.window_attention {
                     title.insert_str(0, "● ");
                 }
@@ -2807,10 +2846,13 @@ impl Surface {
                     }
                     Some(selection_range(self.selection, &term))
                 };
-                (frame, clipboard, pointer, bar)
+                (frame, clipboard, pointer, bar, rang)
             };
             for request in clipboard {
                 self.clipboard_request(request);
+            }
+            if rang {
+                self.ring();
             }
             let (history, rows, alt) = bar;
             let dark = self.dark();
@@ -2867,8 +2909,59 @@ impl Surface {
         self.render();
     }
 
+    /// A bell rang: what `bell-features` asks (the title's mark is set
+    /// as the frame is drawn).
+    fn ring(&mut self) {
+        let bell = BEHAVIOUR.get().bell;
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            if bell.system {
+                NSBeep();
+            }
+            let sound = BELL_SOUND.get();
+            if bell.audio && !sound.is_null() {
+                let _: Bool = msg!(sound, c"stop");
+                let _: Bool = msg!(sound, c"play");
+            }
+            let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+            let active: Bool = msg!(ns_app, c"isActive");
+            if bell.attention && active == NO {
+                let _: isize = msg!(ns_app, c"requestUserAttention:", 10usize); // informational: one bounce
+            }
+            if bell.border {
+                // A ring round the pane in the accent colour, fading as it thins.
+                let container: Id = msg!(self.container, c"layer");
+                if self.flash.is_null() {
+                    self.flash = msg!(class(c"CALayer"), c"layer");
+                    let _: Id = msg!(self.flash, c"retain");
+                    call!(container, c"addSublayer:", self.flash);
+                }
+                call!(self.flash, c"setFrame:", send_rect(self.container, c"bounds"));
+                let accent: Id = msg!(class(c"NSColor"), c"controlAccentColor");
+                let accent: Id = msg!(accent, c"CGColor");
+                call!(self.flash, c"setBorderColor:", accent);
+                call!(self.flash, c"setBorderWidth:", 0.0f64);
+                let fade: Id = msg!(class(c"CABasicAnimation"), c"animationWithKeyPath:", nsstring("borderWidth"));
+                let number = |v: f64| -> Id { msg!(class(c"NSNumber"), c"numberWithDouble:", v) };
+                call!(fade, c"setFromValue:", number(4.0));
+                call!(fade, c"setToValue:", number(0.0));
+                call!(fade, c"setDuration:", 0.35f64);
+                call!(self.flash, c"addAnimation:forKey:", fade, nsstring("bell"));
+            }
+        }
+    }
+
+    /// The pane's been seen: its bell's mark goes.
+    fn bell_seen(&mut self) {
+        if mem::take(&mut self.bell) {
+            self.title.clear();
+            self.render();
+        }
+    }
+
     /// Sends typed input, drawing its echo early (see `ECHO_WAIT`).
     fn type_bytes(&mut self, bytes: &[u8]) {
+        self.bell_seen();
         // Typing shows a blinking cursor until it pauses.
         BLINK.set((false, Instant::now()));
         if BEHAVIOUR.get().hide_mouse {
@@ -3296,6 +3389,9 @@ impl Surface {
 
     fn set_focused(&mut self, focused: bool) {
         self.renderer.focused = focused;
+        if focused {
+            self.bell = false; // seen
+        }
         // Looking at a pane answers whatever it needed the user for.
         if self.pane.set_focused(focused) {
             run_on_main_with(self.pane.id as usize, on_pane_status);
