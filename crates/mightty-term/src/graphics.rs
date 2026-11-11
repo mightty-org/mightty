@@ -9,10 +9,12 @@
 //! specifier; source rectangles, cell offsets, cell sizes and z-index;
 //! Unicode placeholders (`U=1`); animation: frames (`a=f`), playing them
 //! (`a=a`) and composing them (`a=c`); relative placements (`P=`, `Q=`),
-//! which follow their parent, grid or virtual, and go with it. Not yet:
-//! shared memory (`t=s`), which is refused with an error.
+//! which follow their parent, grid or virtual, and go with it; and shared
+//! memory (`t=s`).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::{CString, c_char, c_int, c_void};
+use std::os::fd::FromRawFd;
 use std::{fs, mem};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -686,6 +688,61 @@ const O_NOFOLLOW: i32 = 0x0100;
 #[cfg(not(target_os = "linux"))]
 const O_NONBLOCK: i32 = 0x0004;
 
+const SHM_ERROR: &str = "EBADF:can't read an image from the shared memory";
+
+/// `t=s`: the bytes in POSIX shared memory object `name` (`O=` and `S=`
+/// pick a part), which is then unlinked, as the protocol asks: the client
+/// hands it over. Only the user's objects named as handed over are read:
+/// any program printing to the terminal could otherwise unlink others.
+fn read_shm(c: &Command, name: &[u8]) -> Option<Vec<u8>> {
+    unsafe extern "C" {
+        fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
+        fn shm_unlink(name: *const c_char) -> c_int;
+        fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) -> *mut c_void;
+        fn munmap(addr: *mut c_void, len: usize) -> c_int;
+    }
+    const PROT_READ: c_int = 1;
+    const MAP_SHARED: c_int = 1;
+    // The protocol's mark for temp files, or kitten icat's names.
+    if !name.windows(21).any(|w| w == b"tty-graphics-protocol") && !name.starts_with(b"/icat-") {
+        return None;
+    }
+    let name = CString::new(name).ok()?;
+    // SAFETY: `name` is NUL-terminated; O_RDONLY (0) takes no mode.
+    let fd = unsafe { shm_open(name.as_ptr(), 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` was just opened and nothing else owns it; the file closes it.
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    let meta = file.metadata().ok()?;
+    if meta.uid() != current_uid() {
+        return None;
+    }
+    let end = match c.read_size {
+        0 => meta.len(),
+        size => c.read_offset.checked_add(size)?,
+    };
+    if end > meta.len() || c.read_offset >= end || end - c.read_offset > MAX_TRANSMIT as u64 {
+        return None;
+    }
+    let len = usize::try_from(end).ok()?;
+    // SAFETY: `fd` is open for reading, and `len` is within the object.
+    let map = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_SHARED, fd, 0) };
+    if map as isize == -1 {
+        return None;
+    }
+    // SAFETY: the mapping is `len` readable bytes until unmapped below.
+    let data = unsafe { std::slice::from_raw_parts(map as *const u8, len) }[c.read_offset as usize..].to_vec();
+    // SAFETY: `map` and `len` are the mapping just made; `name` is
+    // NUL-terminated. Unlinked only once read: a request refused leaves it.
+    unsafe {
+        munmap(map, len);
+        shm_unlink(name.as_ptr());
+    }
+    Some(data)
+}
+
 /// The user this process runs as.
 fn current_uid() -> u32 {
     unsafe extern "C" {
@@ -1062,7 +1119,7 @@ impl Term {
                 Err("EINVAL:a file must be sent as a whole, uncompressed PNG")
             }
             b'f' | b't' => read_file(c, &data).and_then(|data| decode(c, data).ok()).ok_or(FILE_ERROR),
-            b's' => Err("EINVAL:shared memory isn't supported"),
+            b's' => read_shm(c, &data).ok_or(SHM_ERROR).and_then(|data| decode(c, data)),
             _ => Err("EINVAL:unknown transmission medium"),
         };
         match c.action {
@@ -1326,7 +1383,7 @@ mod tests {
         // No id, no reply.
         assert_eq!(send(&mut t, "a=t,f=32,s=2,v=1", &rgba(2, 1)), "");
         assert_eq!(send(&mut t, "a=p,i=99", &[]), "\x1b_Gi=99;ENOENT:no such image\x1b\\");
-        assert_eq!(send(&mut t, "a=t,t=s,i=3", b"/name"), "\x1b_Gi=3;EINVAL:shared memory isn't supported\x1b\\");
+        assert_eq!(send(&mut t, "a=t,t=s,i=3", b"/mightty-no-such-name"), format!("\x1b_Gi=3;{SHM_ERROR}\x1b\\"));
         assert_eq!(send(&mut t, "a=q,f=100,i=31", &png(3, 2)), "\x1b_Gi=31;OK\x1b\\");
         assert_eq!(send(&mut t, "a=q,f=100,i=31", b"not a png"), "\x1b_Gi=31;EBADPNG:can't decode the PNG\x1b\\");
         // A query stores nothing.
@@ -1602,6 +1659,64 @@ mod tests {
         assert_eq!(reply, format!("\x1b_Gi={id},I=5;OK\x1b\\"));
         assert_eq!(send(&mut t, "a=p,I=5,p=2", &[]), format!("\x1b_Gi={id},I=5,p=2;OK\x1b\\"));
         assert_eq!(t.image_placements().len(), 1);
+    }
+
+    /// A shared memory object named `name` holding `data`.
+    fn shm(name: &str, data: &[u8]) {
+        unsafe extern "C" {
+            fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
+            fn ftruncate(fd: c_int, len: i64) -> c_int;
+            fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) -> *mut c_void;
+            fn munmap(addr: *mut c_void, len: usize) -> c_int;
+            fn close(fd: c_int) -> c_int;
+        }
+        const O_RDWR_CREAT: c_int = if cfg!(target_os = "linux") { 0o102 } else { 0x202 };
+        let name = CString::new(name).unwrap();
+        // SAFETY: a new object, mapped read-write at its size, filled, unmapped, closed.
+        unsafe {
+            let fd = shm_open(name.as_ptr(), O_RDWR_CREAT, 0o600 as c_int);
+            assert!(fd >= 0);
+            assert_eq!(ftruncate(fd, data.len() as i64), 0);
+            let map = mmap(std::ptr::null_mut(), data.len(), 3, 1, fd, 0);
+            assert_ne!(map as isize, -1);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), map as *mut u8, data.len());
+            munmap(map, data.len());
+            close(fd);
+        }
+    }
+
+    #[test]
+    fn shared_memory() {
+        let mut t = term();
+        let name = format!("/tty-graphics-protocol-{}", std::process::id());
+        let mut pixels = rgba(2, 1);
+        pixels[4..8].copy_from_slice(&[0, 0, 255, 255]);
+        shm(&name, &pixels);
+        assert_eq!(send(&mut t, "a=T,t=s,f=32,s=2,v=1,i=1", name.as_bytes()), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(t.image_placements()[0].image.pixels, pixels);
+        // Unlinked once read.
+        let gone = format!("\x1b_Gi=2;{SHM_ERROR}\x1b\\");
+        assert_eq!(send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2", name.as_bytes()), gone);
+        // A part, by offset and size; not past the end (on macOS, its size
+        // rounded up to a page).
+        shm(&name, &pixels);
+        assert_eq!(send(&mut t, "a=T,t=s,f=32,s=1,v=1,i=3,O=4,S=4", name.as_bytes()), "\x1b_Gi=3;OK\x1b\\");
+        assert_eq!(t.image_placements()[1].image.pixels, [0, 0, 255, 255]);
+        shm(&name, &pixels);
+        assert_eq!(send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2,O=4,S=1048576", name.as_bytes()), gone);
+        // Refused, it's left to its owner; and only names handed over are read.
+        assert_eq!(send(&mut t, "a=T,t=s,f=32,s=1,v=1,i=5", name.as_bytes()), "\x1b_Gi=5;OK\x1b\\");
+        let other = format!("/mightty-test-{}", std::process::id());
+        shm(&other, &pixels);
+        assert_eq!(send(&mut t, "a=t,t=s,f=32,s=1,v=1,i=2", other.as_bytes()), gone);
+        unsafe extern "C" {
+            fn shm_unlink(name: *const c_char) -> c_int;
+        }
+        // SAFETY: a NUL-terminated name; it was left, so unlinking succeeds.
+        assert_eq!(unsafe { shm_unlink(CString::new(other).unwrap().as_ptr()) }, 0);
+        // As PNG too.
+        shm(&name, &png(2, 2));
+        assert_eq!(send(&mut t, "a=t,t=s,f=100,i=4", name.as_bytes()), "\x1b_Gi=4;OK\x1b\\");
     }
 
     #[test]
