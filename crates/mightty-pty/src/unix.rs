@@ -48,6 +48,7 @@ unsafe extern "C" {
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn setsid() -> c_int;
     fn tcgetpgrp(fd: c_int) -> c_int;
+    fn tcgetattr(fd: c_int, termios: *mut Termios) -> c_int;
     fn signal(signal: c_int, handler: usize) -> usize;
     fn kill(pid: c_int, signal: c_int) -> c_int;
 }
@@ -67,6 +68,44 @@ unsafe extern "C" {
     fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -> c_int;
     fn sysctl(name: *mut c_int, len: u32, old: *mut c_void, old_len: *mut usize, new: *mut c_void, new_len: usize) -> c_int;
 }
+
+/// `tcflag_t`.
+#[cfg(target_os = "linux")]
+type TcFlag = u32;
+#[cfg(not(target_os = "linux"))]
+type TcFlag = c_ulong;
+
+/// `struct termios`; only the local flags are read.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Default)]
+struct Termios {
+    iflag: TcFlag,
+    oflag: TcFlag,
+    cflag: TcFlag,
+    lflag: TcFlag,
+    line: u8,
+    cc: [u8; 32],
+    ispeed: u32,
+    ospeed: u32,
+}
+#[cfg(not(target_os = "linux"))]
+#[repr(C)]
+#[derive(Default)]
+struct Termios {
+    iflag: TcFlag,
+    oflag: TcFlag,
+    cflag: TcFlag,
+    lflag: TcFlag,
+    cc: [u8; 20],
+    ispeed: c_ulong,
+    ospeed: c_ulong,
+}
+const ECHO: TcFlag = 0x8;
+#[cfg(target_os = "linux")]
+const ICANON: TcFlag = 0x2;
+#[cfg(not(target_os = "linux"))]
+const ICANON: TcFlag = 0x100;
 
 pub struct Pty {
     master: File,
@@ -169,6 +208,17 @@ impl Pty {
         Ok(())
     }
 
+    /// Whether the program reads whole lines without echoing them: a
+    /// password prompt, as sudo and ssh show.
+    pub fn hides_input(&self) -> bool {
+        let mut termios = Termios::default();
+        // SAFETY: a valid fd, and a `struct termios` to fill.
+        if unsafe { tcgetattr(self.master.as_raw_fd(), &mut termios) } != 0 {
+            return false;
+        }
+        termios.lflag & ECHO == 0 && termios.lflag & ICANON != 0
+    }
+
     /// The process the terminal's foreground belongs to: the shell, or the
     /// program it's running. As the process describes itself, so only a hint.
     pub fn foreground(&self) -> Option<Foreground> {
@@ -257,6 +307,20 @@ mod tests {
         }
         let found = found.unwrap();
         assert_eq!((found.name.as_str(), found.args.as_slice()), ("sleep", &["sleep".to_owned(), "5".to_owned()][..]));
+        pty.kill().unwrap();
+    }
+
+    #[test]
+    fn password_prompts_hide_input() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 0.3; stty -echo; exec sleep 5"]);
+        let mut pty = Pty::spawn(cmd, WindowSize { cols: 80, rows: 24, ..Default::default() }).unwrap();
+        assert!(!pty.hides_input());
+        let hidden = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            pty.hides_input()
+        });
+        assert!(hidden);
         pty.kill().unwrap();
     }
 

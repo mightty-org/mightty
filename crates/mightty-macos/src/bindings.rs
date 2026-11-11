@@ -109,6 +109,8 @@ pub enum Action {
     JumpToAttention,
     OpenConfig,
     ReloadConfig,
+    /// Secure Keyboard Entry, on or off.
+    ToggleSecureInput,
     /// Points; `increase_font_size:N` and `decrease_font_size:N`.
     ChangeFontSize(f64),
     ResetFontSize,
@@ -178,6 +180,7 @@ impl Action {
             ("jump_to_attention", _) => bare(Self::JumpToAttention),
             ("open_config", _) => bare(Self::OpenConfig),
             ("reload_config", _) => bare(Self::ReloadConfig),
+            ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
             ("increase_font_size", _) => Ok(Self::ChangeFontSize(points(arg)?)),
             ("decrease_font_size", _) => Ok(Self::ChangeFontSize(-points(arg)?)),
             ("reset_font_size", _) => bare(Self::ResetFontSize),

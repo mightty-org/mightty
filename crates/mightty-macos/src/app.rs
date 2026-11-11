@@ -49,6 +49,9 @@ struct App {
     banners: Vec<(PaneId, Instant)>,
     /// The session last written (see `window-save-state`).
     saved: String,
+    /// Secure Keyboard Entry: asked for from the menu, and whether it's on.
+    secure_input: bool,
+    secure_input_on: bool,
 }
 
 /// Points between split panes, drawn as a divider.
@@ -491,6 +494,8 @@ extern "C" fn on_redraw(_: *mut c_void) {
                 deferred.push(window.pane.id);
             }
         }
+        // Output may be a password prompt.
+        app.update_secure_input();
     });
     if let Some((delay, deferred)) = wait {
         let mut pending = host.pending.lock().unwrap();
@@ -587,6 +592,8 @@ pub fn run(config: Config) -> io::Result<()> {
             config,
             cascade: CGPoint::default(),
             attention_count: 0,
+            secure_input: false,
+            secure_input_on: false,
             banners: Vec::new(),
             saved: String::new(),
         };
@@ -985,6 +992,41 @@ impl App {
 
     /// Updates which panes show as focused after key-window changes made
     /// inside `with_app`, which the window delegate couldn't see.
+    /// Turns Secure Keyboard Entry on while mightty is the active app and
+    /// it was asked for, or the key pane's program reads a password; off
+    /// otherwise, as other apps need it off to take keys from the user.
+    fn update_secure_input(&mut self) {
+        // SAFETY: main thread; documented signature.
+        let active: Bool = unsafe { msg!(msg!(class(c"NSApplication"), c"sharedApplication"), c"isActive") };
+        let password = || {
+            let Some((_, view)) = self.key_window() else { return false };
+            self.surfaces.iter().find(|s| s.view == view).is_some_and(|s| s.pane.hides_input())
+        };
+        let on = active != NO && (self.secure_input || (self.config.auto_secure_input && password()));
+        if on != self.secure_input_on {
+            self.secure_input_on = on;
+            // SAFETY: Carbon calls taking nothing; each on is matched by an off.
+            unsafe {
+                if on {
+                    EnableSecureEventInput();
+                } else {
+                    DisableSecureEventInput();
+                }
+            }
+        }
+    }
+
+    fn toggle_secure_input(&mut self) {
+        self.secure_input = !self.secure_input;
+        MENU.with_borrow(|items| {
+            for (item, _) in items.iter().filter(|i| i.1 == Action::ToggleSecureInput) {
+                // SAFETY: main thread; a menu item; NSControlStateValueOn is 1.
+                unsafe { call!(*item, c"setState:", isize::from(self.secure_input)) };
+            }
+        });
+        self.update_secure_input();
+    }
+
     fn sync_key_focus(&mut self) {
         for w in &self.windows {
             // SAFETY: main thread; documented signature.
@@ -999,6 +1041,7 @@ impl App {
                 }
             }
         }
+        self.update_secure_input();
     }
 
     /// Closes `view`'s pane. If it was its window's last, returns the window
@@ -2733,8 +2776,15 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn terminate_after_last_window(_: Id, _: Sel, _: Id) -> Bool {
         YES
     }
+    extern "C" fn did_change_active(_: Id, _: Sel, _: Id) {
+        with_app(App::update_secure_input);
+    }
     extern "C" fn will_terminate(_: Id, _: Sel, _: Id) {
         with_app(|app| {
+            if mem::take(&mut app.secure_input_on) {
+                // SAFETY: matches the call that turned it on.
+                unsafe { DisableSecureEventInput() };
+            }
             app.save_session();
             if let Some(socket) = app.mux.socket_path() {
                 let _ = fs::remove_file(socket);
@@ -2898,6 +2948,8 @@ unsafe fn register_delegate_class() -> Id {
                 c"c@:@",
             ),
             (c"applicationWillTerminate:", action(will_terminate), c"v@:@"),
+            (c"applicationDidBecomeActive:", action(did_change_active), c"v@:@"),
+            (c"applicationDidResignActive:", action(did_change_active), c"v@:@"),
             (c"windowDidResize:", action(did_resize), c"v@:@"),
             (c"windowDidChangeBackingProperties:", action(did_resize), c"v@:@"),
             (c"windowDidBecomeKey:", action(did_become_key), c"v@:@"),
@@ -3018,6 +3070,7 @@ fn perform(view: Id, action: &Action) {
         Action::JumpToAttention => drop(with_app(App::jump_to_attention)),
         Action::OpenConfig => drop(with_app(|app| app.open_config())),
         Action::ReloadConfig => drop(with_app(App::reload_config)),
+        Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ChangeFontSize(points) => drop(with_app(|app| app.change_font_size(view, Some(points)))),
         Action::ResetFontSize => drop(with_app(|app| app.change_font_size(view, None))),
         Action::ClearScreen => drop(with_surface(view, Surface::clear_screen)),
@@ -3101,6 +3154,8 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         let app_menu = submenu(bar, "mightty");
         add_item(app_menu, "Settings…", c"openConfig:", Action::OpenConfig);
         add_item(app_menu, "Reload Configuration", c"reloadConfig:", Action::ReloadConfig);
+        separator(app_menu);
+        add_action(app_menu, "Secure Keyboard Entry", Action::ToggleSecureInput);
         separator(app_menu);
         add_item(app_menu, "Quit mightty", c"terminate:", Action::Quit);
         let shell_menu = submenu(bar, "Shell");

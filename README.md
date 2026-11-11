@@ -77,6 +77,7 @@ cursor-color = #ff79c6
 | `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
 | `scrollback-lines` | `10000` | Lines kept above the screen |
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
+| `macos-auto-secure-input` | `true` | Turn on Secure Keyboard Entry while a program reads a password (a whole line, not echoed, as sudo and ssh ask), so other apps can't read the keys, as in Ghostty; off again once it's read, and while mightty isn't the active app |
 | `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |
 | `confirm-close-surface` | `true` | Ask before closing a pane (⌘W), a window or tab, or mightty: `true` while a command or agent runs in it, `always`, or `false`, as in Ghostty |
 | `font-ligatures` | `true` | Draw the font's ligatures and contextual alternates (`->`, `!=`, `===` in fonts such as JetBrains Mono and Fira Code), each kept to the cells it covers; never across the cursor or a change of colour or style |
@@ -148,6 +149,7 @@ keybind = cmd+k=unbind
 | `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
 | `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
 | `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `toggle_secure_input` | | Secure Keyboard Entry (mightty → Secure Keyboard Entry): other apps can't read the keys typed |
 | `increase_font_size:1`, `decrease_font_size:1`, `reset_font_size` | ⌘=, ⌘-, ⌘0 | The pane keys go to, in points |
 | `clear_screen` | ⌘K | History and the screen above the prompt |
 | `scroll_to_top`, `scroll_to_bottom`, `scroll_page_up`, `scroll_page_down` | ⌘Home, ⌘End, ⌘PgUp, ⌘PgDn | |

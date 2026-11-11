@@ -223,6 +223,11 @@ impl Pane {
         let _ = self.pty.lock().unwrap().resize(WindowSize { cols, rows, pixel_width, pixel_height });
     }
 
+    /// Whether the program is reading a password: a whole line, not echoed.
+    pub fn hides_input(&self) -> bool {
+        self.pty.lock().unwrap().hides_input()
+    }
+
     /// `None` while running; `Some(code)` after exit, where `code` is `None` for a signal.
     pub fn exit_status(&self) -> Option<Option<i32>> {
         *self.exit.lock().unwrap()

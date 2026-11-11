@@ -193,6 +193,8 @@ pub unsafe fn call_block(block: Id) {
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     pub fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+    pub fn EnableSecureEventInput() -> i32;
+    pub fn DisableSecureEventInput() -> i32;
     pub fn TISGetInputSourceProperty(source: CFTypeRef, key: CFStringRef) -> CFTypeRef;
     pub static kTISPropertyInputSourceID: CFStringRef;
 }

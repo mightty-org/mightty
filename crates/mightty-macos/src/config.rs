@@ -43,6 +43,8 @@ pub struct Config {
     pub colorspace: Colorspace,
     /// Draw the font's ligatures and contextual alternates (`->` as an arrow).
     pub ligatures: bool,
+    /// `macos-auto-secure-input`: Secure Keyboard Entry at password prompts.
+    pub auto_secure_input: bool,
     /// `keybind`: the defaults, changed by each setting in order.
     pub keybinds: Bindings,
     /// How panes look beyond colours and fonts.
@@ -371,6 +373,7 @@ impl Default for Config {
             wide_emoji: true,
             colorspace: Colorspace::Srgb,
             ligatures: true,
+            auto_secure_input: true,
             keybinds: Bindings::default(),
             look: Look::default(),
             background_blur: 0,
@@ -572,6 +575,18 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.vsync.to_string()),
+    },
+    Setting {
+        name: "macos-auto-secure-input",
+        value: "BOOL",
+        help: "turn on Secure Keyboard Entry while a program reads a password (input not echoed), so other apps \
+               can't read the keys, as in Ghostty",
+        color: false,
+        set: |c, v| {
+            c.auto_secure_input = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.auto_secure_input.to_string()),
     },
     Setting {
         name: "macos-option-as-alt",
