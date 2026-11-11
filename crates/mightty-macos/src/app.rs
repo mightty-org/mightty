@@ -20,9 +20,10 @@ use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, St
 use mightty_term::{ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Term, clipboard_reply};
 
 use crate::bindings::{self, Action, Bindings, Trigger};
-use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, SaveState};
+use crate::config::{self, Behaviour, Colorspace, Config, ConfirmClose, MAX_FONT_SIZE, MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState};
 use crate::ffi::*;
 use crate::findbar::FindBar;
+use crate::hotkey;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
 use crate::open;
@@ -52,6 +53,10 @@ struct App {
     /// Secure Keyboard Entry: asked for from the menu, and whether it's on.
     secure_input: bool,
     secure_input_on: bool,
+    /// The quick terminal's window, once opened; and the app (retained)
+    /// to give the keys back to when it hides.
+    quick: Option<Id>,
+    quick_return: Id,
 }
 
 /// Points between split panes, drawn as a divider.
@@ -557,6 +562,7 @@ pub fn run(config: Config) -> io::Result<()> {
         let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
         call!(ns_app, c"setActivationPolicy:", 0isize); // regular app: Dock icon, menu bar
         install_menu(ns_app, &config.keybinds);
+        register_global_keys(&config.keybinds);
         let delegate: Id = msg!(register_delegate_class(), c"new");
         call!(ns_app, c"setDelegate:", delegate);
         notify::set_delegate(delegate);
@@ -597,6 +603,8 @@ pub fn run(config: Config) -> io::Result<()> {
             attention_count: 0,
             secure_input: false,
             secure_input_on: false,
+            quick: None,
+            quick_return: NIL,
             banners: Vec::new(),
             saved: String::new(),
         };
@@ -628,6 +636,12 @@ impl App {
     /// Opens a window for `pane`, as a new tab of `tab_of` unless that's nil;
     /// it becomes the key window with `focus` (a tab is otherwise added behind).
     fn open_window_in(&mut self, pane: Arc<Pane>, hold: bool, tab_of: Id, focus: bool) {
+        self.open_window_with(pane, hold, tab_of, focus, false);
+    }
+
+    /// `open_window_in`, or with `quick` the quick terminal's window:
+    /// borderless, never a tab, left hidden for `show_quick` to place.
+    fn open_window_with(&mut self, pane: Arc<Pane>, hold: bool, tab_of: Id, focus: bool, quick: bool) -> Id {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let screen: Id = msg!(class(c"NSScreen"), c"mainScreen");
@@ -646,20 +660,27 @@ impl App {
                     height: (rows as f64 * ch as f64 + 2.0 * py) / scale,
                 },
             };
-            // titled | closable | miniaturizable | resizable; buffered backing.
+            // titled | closable | miniaturizable | resizable, or borderless; buffered backing.
             let window: Id = msg!(
-                msg!(class(c"NSWindow"), c"alloc"),
+                msg!(if quick { quick_window_class() } else { class(c"NSWindow") }, c"alloc"),
                 c"initWithContentRect:styleMask:backing:defer:",
                 content,
-                15usize,
+                if quick { 0usize } else { 15usize },
                 2usize,
                 NO
             );
             call!(window, c"setTitle:", nsstring("mightty"));
             call!(window, c"setDelegate:", self.delegate);
             call!(window, c"setReleasedWhenClosed:", NO);
-            // Native tabs: windows with one identifier can be tabs of each other.
-            call!(window, c"setTabbingIdentifier:", nsstring("mightty"));
+            if quick {
+                call!(window, c"setTabbingMode:", 2isize); // disallowed
+                // Over other windows, on every Space, and over full-screen apps.
+                call!(window, c"setLevel:", 3isize); // floating
+                call!(window, c"setCollectionBehavior:", 1usize | 256); // canJoinAllSpaces | fullScreenAuxiliary
+            } else {
+                // Native tabs: windows with one identifier can be tabs of each other.
+                call!(window, c"setTabbingIdentifier:", nsstring("mightty"));
+            }
 
             let root: Id = msg!(msg!(self.split_class, c"alloc"), c"initWithFrame:", content);
             call!(root, c"setWantsLayer:", YES);
@@ -668,6 +689,10 @@ impl App {
             let view = self.add_surface(window, content, renderer, pane, hold, true);
             self.windows.push(Window { window, root, tree: Node::Leaf(view), active: view, zoomed: false, dragging: None });
             call!(window, c"makeFirstResponder:", view);
+            if quick {
+                style_window(window, root, &self.config);
+                return window;
+            }
             if self.windows.len() == 1 {
                 call!(window, c"center");
                 latency::start(window);
@@ -685,6 +710,69 @@ impl App {
             style_window(window, root, &self.config);
             self.layout(window, true);
             self.sync_key_focus();
+            window
+        }
+    }
+
+    /// Shows the quick terminal, starting a shell for it the first time,
+    /// or hides it when it has the keys.
+    fn toggle_quick_terminal(&mut self) {
+        // SAFETY: main thread; documented signatures.
+        unsafe {
+            if let Some(window) = self.quick {
+                let key: Bool = msg!(window, c"isKeyWindow");
+                if key != NO {
+                    return self.hide_quick(true);
+                }
+            }
+            let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+            let front: Id = msg!(msg!(class(c"NSWorkspace"), c"sharedWorkspace"), c"frontmostApplication");
+            let us: Id = msg!(class(c"NSRunningApplication"), c"currentApplication");
+            // Where the keys go back to when it hides.
+            let pid = |app: Id| -> i32 { if app.is_null() { 0 } else { msg!(app, c"processIdentifier") } };
+            if pid(front) != pid(us) {
+                if !self.quick_return.is_null() {
+                    call!(self.quick_return, c"release");
+                }
+                self.quick_return = if front.is_null() { NIL } else { msg!(front, c"retain") };
+            }
+            let window = match self.quick {
+                Some(window) => window,
+                None => {
+                    let opts = SpawnOptions { cols: self.config.cols, rows: self.config.rows, ..Default::default() };
+                    let pane = match self.mux.spawn(opts) {
+                        Ok(pane) => pane,
+                        Err(e) => return eprintln!("mightty: could not start a shell: {e}"),
+                    };
+                    let window = self.open_window_with(pane, false, NIL, true, true);
+                    self.quick = Some(window);
+                    window
+                }
+            };
+            // On the screen with the mouse, sliding in from its edge.
+            let (frame, start) = quick_frames(self.config.quick_position);
+            call!(window, c"setFrame:display:", start, NO);
+            call!(window, c"makeKeyAndOrderFront:", NIL);
+            call!(ns_app, c"activateIgnoringOtherApps:", YES);
+            call!(msg!(window, c"animator"), c"setFrame:display:", frame, YES);
+            self.layout(window, true);
+        }
+    }
+
+    /// Hides the quick terminal; with `give_back`, the keys go back to the
+    /// app that had them.
+    fn hide_quick(&mut self, give_back: bool) {
+        let Some(window) = self.quick else { return };
+        // SAFETY: main thread; documented signatures; `quick_return` was retained.
+        unsafe {
+            call!(window, c"orderOut:", NIL);
+            if !self.quick_return.is_null() {
+                if give_back {
+                    let _: Bool = msg!(self.quick_return, c"activateWithOptions:", 0usize);
+                }
+                call!(self.quick_return, c"release");
+                self.quick_return = NIL;
+            }
         }
     }
 
@@ -1113,7 +1201,8 @@ impl App {
         let mut seen = Vec::new();
         let mut front = None;
         for w in &self.windows {
-            if seen.contains(&w.window) {
+            // The quick terminal isn't a window to restore.
+            if seen.contains(&w.window) || self.quick == Some(w.window) {
                 continue;
             }
             // SAFETY: main thread; documented signatures.
@@ -1282,6 +1371,9 @@ impl App {
 
     /// Forgets a closed window, ending its panes.
     fn window_closed(&mut self, window: Id) {
+        if self.quick == Some(window) {
+            self.quick = None;
+        }
         self.windows.retain(|w| w.window != window);
         let (closed, kept) = mem::take(&mut self.surfaces).into_iter().partition(|s| s.window == window);
         self.surfaces = kept;
@@ -1365,6 +1457,7 @@ impl App {
         let font = |c: &Config| (c.fonts.clone(), c.font_size, c.font_backend, c.ligatures);
         let font_changed = font(&config) != font(&self.config);
         set_menu_keys(&config.keybinds);
+        register_global_keys(&config.keybinds);
         for w in &self.windows {
             style_window(w.window, w.root, &config);
         }
@@ -1715,6 +1808,74 @@ fn to_rect(r: CGRect) -> Rect {
 
 fn from_rect(r: Rect) -> CGRect {
     CGRect { origin: CGPoint { x: r.x, y: r.y }, size: CGSize { width: r.width, height: r.height } }
+}
+
+/// Registers the `global:` keybinds, saying which couldn't be.
+fn register_global_keys(bindings: &Bindings) {
+    fn perform_global(action: &Action) {
+        let view = with_app(|app| app.key_window().map(|k| k.1)).flatten().unwrap_or(NIL);
+        perform(view, action);
+    }
+    let failed = hotkey::register(bindings, perform_global);
+    if !failed.is_empty() {
+        let keys: Vec<String> = failed.iter().map(|t| format!("global:{t}: taken by another app, or not a key on a US keyboard")).collect();
+        show_problems("Some global keys couldn't be set", &keys);
+    }
+}
+
+/// The quick terminal's window class: borderless, yet it takes keys.
+fn quick_window_class() -> Id {
+    thread_local! {
+        static CLASS: std::cell::OnceCell<Id> = const { std::cell::OnceCell::new() };
+    }
+    extern "C" fn yes(_: Id, _: Sel) -> Bool {
+        YES
+    }
+    CLASS.with(|cell| {
+        *cell.get_or_init(|| {
+            let yes = yes as extern "C" fn(Id, Sel) -> Bool as *const c_void;
+            // SAFETY: a new subclass, its methods with their signatures.
+            unsafe {
+                register_class(c"MighttyQuickWindow", c"NSWindow", &[
+                    (c"canBecomeKeyWindow", yes, c"c@:"),
+                    (c"canBecomeMainWindow", yes, c"c@:"),
+                ])
+            }
+        })
+    })
+}
+
+/// The quick terminal's frame for `position` on the screen with the mouse,
+/// and where it slides in from: off that edge.
+fn quick_frames(position: QuickPosition) -> (CGRect, CGRect) {
+    // SAFETY: main thread; documented signatures.
+    let area = unsafe {
+        let mouse: CGPoint = msg!(class(c"NSEvent"), c"mouseLocation");
+        let screens: Id = msg!(class(c"NSScreen"), c"screens");
+        let count: usize = msg!(screens, c"count");
+        let screen = (0..count)
+            .map(|i| -> Id { msg!(screens, c"objectAtIndex:", i) })
+            .find(|&s| {
+                let f = send_rect(s, c"frame");
+                (f.origin.x..f.origin.x + f.size.width).contains(&mouse.x) && (f.origin.y..f.origin.y + f.size.height).contains(&mouse.y)
+            })
+            .unwrap_or_else(|| msg!(class(c"NSScreen"), c"mainScreen"));
+        send_rect(screen, c"visibleFrame")
+    };
+    let (x, y, w, h) = (area.origin.x, area.origin.y, area.size.width, area.size.height);
+    let rect = |x, y, w, h| CGRect { origin: CGPoint { x, y }, size: CGSize { width: w, height: h } };
+    // A share of the screen, as in Ghostty's defaults.
+    let (across, deep) = (0.4, 0.4);
+    match position {
+        QuickPosition::Top => (rect(x, y + h * (1.0 - deep), w, h * deep), rect(x, y + h, w, h * deep)),
+        QuickPosition::Bottom => (rect(x, y, w, h * deep), rect(x, y - h * deep, w, h * deep)),
+        QuickPosition::Left => (rect(x, y, w * across, h), rect(x - w * across, y, w * across, h)),
+        QuickPosition::Right => (rect(x + w * (1.0 - across), y, w * across, h), rect(x + w, y, w * across, h)),
+        QuickPosition::Center => {
+            let frame = rect(x + w * 0.2, y + h * 0.25, w * 0.6, h * 0.5);
+            (frame, frame)
+        }
+    }
 }
 
 /// Shows `shape` as the mouse pointer.
@@ -2848,6 +3009,13 @@ unsafe fn register_delegate_class() -> Id {
     }
     extern "C" fn did_resign_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, false);
+        // Another app or window took the keys: it keeps them.
+        let window = window_of(notification);
+        with_app(|app| {
+            if app.quick == Some(window) && app.config.quick_autohide {
+                app.hide_quick(false);
+            }
+        });
     }
     extern "C" fn will_close(_: Id, _: Sel, notification: Id) {
         let window = window_of(notification);
@@ -3090,6 +3258,7 @@ fn perform(view: Id, action: &Action) {
         Action::OpenConfig => drop(with_app(|app| app.open_config())),
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
+        Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
         Action::ChangeFontSize(points) => drop(with_app(|app| app.change_font_size(view, Some(points)))),
         Action::ResetFontSize => drop(with_app(|app| app.change_font_size(view, None))),
         Action::ClearScreen => drop(with_surface(view, Surface::clear_screen)),
@@ -3202,6 +3371,7 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         add_item(window_menu, "Minimize", c"performMiniaturize:", Action::MinimizeWindow);
         separator(window_menu);
         add_item(window_menu, "Jump to Pane Needing You", c"jumpToAttention:", Action::JumpToAttention);
+        add_action(window_menu, "Quick Terminal", Action::ToggleQuickTerminal);
         separator(window_menu);
         add_item(window_menu, "Zoom Split", c"toggleSplitZoom:", Action::ToggleSplitZoom);
         add_item(window_menu, "Equalize Splits", c"equalizeSplits:", Action::EqualizeSplits);

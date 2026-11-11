@@ -45,6 +45,10 @@ pub struct Config {
     pub ligatures: bool,
     /// `macos-auto-secure-input`: Secure Keyboard Entry at password prompts.
     pub auto_secure_input: bool,
+    /// `quick-terminal-position`: the screen edge the quick terminal drops from.
+    pub quick_position: QuickPosition,
+    /// `quick-terminal-autohide`: the quick terminal hides when another app or window takes the keys.
+    pub quick_autohide: bool,
     /// `keybind`: the defaults, changed by each setting in order.
     pub keybinds: Bindings,
     /// How panes look beyond colours and fonts.
@@ -288,6 +292,16 @@ impl Adjust {
     }
 }
 
+/// `quick-terminal-position`, as in Ghostty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuickPosition {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
 /// `window-colorspace`: what colours (theme, images) are taken to be in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Colorspace {
@@ -378,6 +392,8 @@ impl Default for Config {
             colorspace: Colorspace::Srgb,
             ligatures: true,
             auto_secure_input: true,
+            quick_position: QuickPosition::Top,
+            quick_autohide: true,
             keybinds: Bindings::default(),
             look: Look::default(),
             background_blur: 0,
@@ -591,6 +607,36 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.auto_secure_input.to_string()),
+    },
+    Setting {
+        name: "quick-terminal-position",
+        value: "EDGE",
+        help: "top, bottom, left, right or center: where the quick terminal (toggle_quick_terminal) appears, as \
+               in Ghostty",
+        color: false,
+        set: |c, v| {
+            c.quick_position = match v {
+                "top" => QuickPosition::Top,
+                "bottom" => QuickPosition::Bottom,
+                "left" => QuickPosition::Left,
+                "right" => QuickPosition::Right,
+                "center" => QuickPosition::Center,
+                _ => return Err("expects top, bottom, left, right or center".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(format!("{:?}", c.quick_position).to_lowercase()),
+    },
+    Setting {
+        name: "quick-terminal-autohide",
+        value: "BOOL",
+        help: "hide the quick terminal when another window or app takes the keys",
+        color: false,
+        set: |c, v| {
+            c.quick_autohide = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.quick_autohide.to_string()),
     },
     Setting {
         name: "macos-option-as-alt",
@@ -1591,8 +1637,11 @@ mod tests {
             "--adjust-cell-width=-1",
             "--unfocused-split-opacity=0.5",
             "--window-colorspace=display-p3",
+            "--quick-terminal-position=bottom",
+            "--quick-terminal-autohide=false",
         ]))
         .unwrap();
+        assert_eq!((c.quick_position, c.quick_autohide), (QuickPosition::Bottom, false));
         assert_eq!(c.colorspace, Colorspace::DisplayP3);
         assert_eq!((c.look.background_opacity, c.background_blur, c.look.padding), (0.85, 20, (12.0, 6.0)));
         assert_eq!((c.look.cursor_style, c.look.cursor_blink), (CursorStyle::Bar, Some(true)));
@@ -1602,7 +1651,7 @@ mod tests {
         assert_eq!(Adjust::Points(-1.0).apply(16, 2.0), 14);
         assert_eq!(Adjust::Points(-50.0).apply(16, 2.0), 1);
         assert_eq!(Config::default().colorspace, Colorspace::Srgb);
-        for bad in ["--background-opacity=1.5", "--window-colorspace=p3", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
+        for bad in ["--background-opacity=1.5", "--window-colorspace=p3", "--quick-terminal-position=middle", "--cursor-style=beam", "--adjust-cell-height=-100%", "--unfocused-split-opacity=0.1"] {
             assert!(Config::default().apply_args(&args(&[bad])).is_err(), "{bad}");
         }
     }

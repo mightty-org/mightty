@@ -111,6 +111,8 @@ pub enum Action {
     ReloadConfig,
     /// Secure Keyboard Entry, on or off.
     ToggleSecureInput,
+    /// The quick terminal: a window dropping down from the top of the screen.
+    ToggleQuickTerminal,
     /// Points; `increase_font_size:N` and `decrease_font_size:N`.
     ChangeFontSize(f64),
     ResetFontSize,
@@ -181,6 +183,7 @@ impl Action {
             ("open_config", _) => bare(Self::OpenConfig),
             ("reload_config", _) => bare(Self::ReloadConfig),
             ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
+            ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
             ("increase_font_size", _) => Ok(Self::ChangeFontSize(points(arg)?)),
             ("decrease_font_size", _) => Ok(Self::ChangeFontSize(-points(arg)?)),
             ("reset_font_size", _) => bare(Self::ResetFontSize),
@@ -223,6 +226,25 @@ fn unescape(text: &str) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+/// As it's written in a `keybind`: `ctrl+grave_accent`.
+impl std::fmt::Display for Trigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for (bit, name) in [(CMD, "cmd"), (CTRL, "ctrl"), (ALT, "alt"), (SHIFT, "shift")] {
+            if self.mods & bit != 0 {
+                write!(f, "{name}+")?;
+            }
+        }
+        match NAMES.iter().find(|(_, key)| *key == self.key) {
+            Some((name, _)) => f.write_str(name),
+            None => match self.key {
+                Key::Named(Named::F(n)) => write!(f, "f{n}"),
+                Key::Char(c) => write!(f, "{c}"),
+                Key::Named(n) => write!(f, "{n:?}"),
+            },
+        }
+    }
 }
 
 impl Trigger {
@@ -322,7 +344,11 @@ impl Trigger {
 
 /// The bindings in effect: defaults, then `keybind` settings in order.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Bindings(Vec<(Trigger, Action)>);
+pub struct Bindings {
+    keys: Vec<(Trigger, Action)>,
+    /// `global:TRIGGER=ACTION`: keys that act whichever app is active.
+    global: Vec<(Trigger, Action)>,
+}
 
 impl Default for Bindings {
     fn default() -> Self {
@@ -373,16 +399,18 @@ impl Default for Bindings {
         let mut bindings: Vec<(Trigger, Action)> =
             list.drain(..).map(|(t, a)| (Trigger::parse(t).expect("a valid default trigger"), a)).collect();
         bindings.extend(tabs.into_iter().map(|(t, a)| (Trigger::parse(&t).expect("a valid default trigger"), a)));
-        Self(bindings)
+        Self { keys: bindings, global: Vec::new() }
     }
 }
 
 impl Bindings {
     /// Applies one `keybind` value: `TRIGGER=ACTION`, `TRIGGER=unbind`, or
-    /// `clear`, which drops every binding (the defaults too).
+    /// `clear`, which drops every binding (the defaults too). A trigger
+    /// starting `global:` acts whichever app is active, as in Ghostty.
     pub fn apply(&mut self, value: &str) -> Result<(), String> {
         if value == "clear" {
-            self.0.clear();
+            self.keys.clear();
+            self.global.clear();
             return Ok(());
         }
         // The first `=` that isn't the key of a trigger ending in `+=`.
@@ -391,21 +419,31 @@ impl Bindings {
             .find(|&(i, c)| c == '=' && i > 0 && !value[..i].ends_with('+'))
             .map(|(i, _)| i)
             .ok_or("expects TRIGGER=ACTION, such as cmd+t=new_tab")?;
-        let (trigger, action) = (Trigger::parse(value[..at].trim())?, value[at + 1..].trim());
-        self.0.retain(|(t, _)| *t != trigger);
+        let (trigger, action) = (value[..at].trim(), value[at + 1..].trim());
+        let (list, trigger) = match trigger.strip_prefix("global:") {
+            Some(trigger) => (&mut self.global, trigger),
+            None => (&mut self.keys, trigger),
+        };
+        let trigger = Trigger::parse(trigger)?;
+        list.retain(|(t, _)| *t != trigger);
         if action != "unbind" {
-            self.0.push((trigger, Action::parse(action)?));
+            list.push((trigger, Action::parse(action)?));
         }
         Ok(())
     }
 
+    /// The `global:` bindings.
+    pub fn global(&self) -> &[(Trigger, Action)] {
+        &self.global
+    }
+
     pub fn find(&self, trigger: Trigger) -> Option<&Action> {
-        self.0.iter().find(|(t, _)| *t == trigger).map(|(_, a)| a)
+        self.keys.iter().find(|(t, _)| *t == trigger).map(|(_, a)| a)
     }
 
     /// The first trigger bound to `action`, for its menu item.
     pub fn trigger_for(&self, action: &Action) -> Option<Trigger> {
-        self.0.iter().find(|(_, a)| a == action).map(|(t, _)| *t)
+        self.keys.iter().find(|(_, a)| a == action).map(|(t, _)| *t)
     }
 }
 
@@ -468,6 +506,14 @@ mod tests {
         assert_eq!(b.find(trigger("ctrl+shift+t")), Some(&Action::NewTab));
         assert!(b.apply("cmd+t").is_err());
         assert!(b.apply("cmd+t=fly").is_err());
+        // Global keys are kept apart: they act from any app.
+        b.apply("global:ctrl+grave_accent=toggle_quick_terminal").unwrap();
+        assert_eq!(b.global(), [(trigger("ctrl+grave_accent"), Action::ToggleQuickTerminal)]);
+        assert_eq!(b.global()[0].0.to_string(), "ctrl+grave_accent");
+        assert_eq!(trigger("cmd+shift+f5").to_string(), "cmd+shift+f5");
+        assert_eq!(b.find(trigger("ctrl+grave_accent")), None);
+        b.apply("global:ctrl+grave_accent=unbind").unwrap();
+        assert!(b.global().is_empty());
         b.apply("clear").unwrap();
         assert_eq!(b.find(trigger("cmd+w")), None);
     }

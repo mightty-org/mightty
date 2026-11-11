@@ -9,6 +9,7 @@ mod config;
 mod ffi;
 mod findbar;
 mod font;
+mod hotkey;
 mod keys;
 mod latency;
 mod linkhint;

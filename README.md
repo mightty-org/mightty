@@ -77,6 +77,8 @@ cursor-color = #ff79c6
 | `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
 | `scrollback-lines` | `10000` | Lines kept above the screen |
 | `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
+| `quick-terminal-position` | `top` | `top`, `bottom`, `left`, `right` or `center`: where the quick terminal appears, on the screen with the mouse, sliding in from that edge |
+| `quick-terminal-autohide` | `true` | Hide the quick terminal when another window or app takes the keys |
 | `macos-auto-secure-input` | `true` | Turn on Secure Keyboard Entry while a program reads a password (a whole line, not echoed, as sudo and ssh ask), so other apps can't read the keys, as in Ghostty; off again once it's read, and while mightty isn't the active app |
 | `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |
 | `confirm-close-surface` | `true` | Ask before closing a pane (⌘W), a window or tab, or mightty: `true` while a command or agent runs in it, `always`, or `false`, as in Ghostty |
@@ -129,11 +131,15 @@ A trigger is modifiers (`cmd`, `ctrl`, `alt`, `shift`) and a key joined by
 `left`/`right`, `home`, `end`, `page_up`, `page_down`, `f1`…`f12`, `plus`).
 `TRIGGER=unbind` removes a binding, and `keybind = clear` removes them all,
 defaults included. Menu items show the first key bound to their action.
+A trigger starting `global:` works whichever app is active, as in Ghostty;
+no Accessibility permission is needed, and keys are found by their place on
+a US keyboard.
 
 ```
 keybind = cmd+shift+t=new_tab
 keybind = ctrl+shift+h=text:echo hello\r
 keybind = cmd+k=unbind
+keybind = global:ctrl+grave_accent=toggle_quick_terminal
 ```
 
 | Action | Default | |
@@ -150,6 +156,7 @@ keybind = cmd+k=unbind
 | `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
 | `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
 | `open_config`, `reload_config` | ⌘,, ⌘⇧, | |
+| `toggle_quick_terminal` | | The quick terminal (Window → Quick Terminal): a window that drops from the top of the screen over any app, on every Space; again to hide it. Bind it globally: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` |
 | `toggle_secure_input` | | Secure Keyboard Entry (mightty → Secure Keyboard Entry): other apps can't read the keys typed |
 | `increase_font_size:1`, `decrease_font_size:1`, `reset_font_size` | ⌘=, ⌘-, ⌘0 | The pane keys go to, in points |
 | `clear_screen` | ⌘K | History and the screen above the prompt |
