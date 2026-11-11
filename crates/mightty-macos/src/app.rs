@@ -2820,7 +2820,7 @@ impl Surface {
         // SAFETY: main thread; AppKit calls with documented signatures.
         unsafe {
             let pool = objc_autoreleasePoolPush();
-            let (frame, clipboard, pointer, bar, rang) = {
+            let (frame, clipboard, pointer, bar, rang, font) = {
                 let mut term = self.pane.term.lock().unwrap();
                 // Animated images' next frames, or a stale progress bar to take down.
                 self.animation_due = match (term.animate(Instant::now()), term.progress_expiry()) {
@@ -2836,6 +2836,7 @@ impl Surface {
                 }
                 let clipboard = term.take_clipboard_requests();
                 let pointer = term.pointer_shape();
+                let font = term.take_font_request();
                 let bar = (term.scrollback().len(), term.rows(), term.is_alt_screen());
                 // A program can't set the attention marker itself.
                 let own = match &self.title_override {
@@ -2878,7 +2879,7 @@ impl Surface {
                     }
                     Some(selection_range(self.selection, &term))
                 };
-                (frame, clipboard, pointer, bar, rang)
+                (frame, clipboard, pointer, bar, rang, font)
             };
             for request in clipboard {
                 self.clipboard_request(request);
@@ -2886,6 +2887,9 @@ impl Surface {
             if rang {
                 self.ring();
             }
+            // Another font for this pane (OSC 50): its cells, so its grid,
+            // may change; drawn once it's fitted to them, below.
+            let refit = font.is_some_and(|family| self.renderer.set_family(family));
             let (history, rows, alt) = bar;
             let dark = self.dark();
             self.scrollbar.update(history, rows, self.scroll_offset, BEHAVIOUR.get().scrollbar && !alt, dark);
@@ -2899,7 +2903,7 @@ impl Surface {
                 }
             }
             // The terminal is unlocked again: build and draw the frame.
-            if let Some(selection) = frame {
+            if let Some(selection) = frame.filter(|_| !refit) {
                 if let Some(search) = &mut self.search {
                     search.update_count();
                 }
@@ -2920,6 +2924,9 @@ impl Surface {
                 self.echo_frame = None;
             }
             objc_autoreleasePoolPop(pool);
+            if refit {
+                self.resize();
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 //! What programs ask of the window around the terminal: a progress bar
-//! (ConEmu's OSC 9 ; 4, as Ghostty and Windows Terminal show it) and the
-//! pointer's shape (OSC 22, as in xterm and kitty).
+//! (ConEmu's OSC 9 ; 4, as Ghostty and Windows Terminal show it), the
+//! pointer's shape (OSC 22, as in xterm and kitty), and the pane's font
+//! family (OSC 50, as in xterm), as `mightty config` previews fonts.
 
 use std::time::{Duration, Instant};
 
@@ -98,6 +99,22 @@ impl Term {
         self.progress = progress.map(|p| (p, Instant::now()));
     }
 
+    /// A font family the pane's program asked for (OSC 50): `Some(None)`
+    /// to go back to the configured one. Taken once.
+    pub fn take_font_request(&mut self) -> Option<Option<String>> {
+        self.font_request.take()
+    }
+
+    /// OSC 50 ; family: the pane's font, by family name; empty for the
+    /// configured one. Queries (`?`) aren't answered.
+    pub(crate) fn set_font(&mut self, name: &[u8]) {
+        let Ok(name) = std::str::from_utf8(name) else { return };
+        if name.starts_with('?') || name.len() > 256 || name.chars().any(char::is_control) {
+            return;
+        }
+        self.font_request = Some((!name.is_empty()).then(|| name.to_owned()));
+    }
+
     /// OSC 22 ; name: unknown names leave the shape as it is.
     pub(crate) fn set_pointer_shape(&mut self, name: &[u8]) {
         if let Some(shape) = PointerShape::from_name(name) {
@@ -147,5 +164,21 @@ mod tests {
         assert_eq!(t.pointer_shape(), PointerShape::Default);
         t.feed(b"\x1b]22;grab\x07\x1bc");
         assert_eq!(t.pointer_shape(), PointerShape::Default);
+    }
+
+    #[test]
+    fn font_requests() {
+        let mut t = Term::new(5, 1);
+        t.feed(b"\x1b]50;JetBrains Mono\x07");
+        assert_eq!(t.take_font_request(), Some(Some("JetBrains Mono".into())));
+        assert_eq!(t.take_font_request(), None);
+        // Queries aren't answered, nor taken as a family.
+        t.feed(b"\x1b]50;?\x07");
+        assert_eq!(t.take_font_request(), None);
+        t.feed(b"\x1b]50;\x1b\\");
+        assert_eq!(t.take_font_request(), Some(None));
+        // A reset gives the pane its own font back.
+        t.feed(b"\x1b]50;Menlo\x07\x1bc");
+        assert_eq!(t.take_font_request(), Some(None));
     }
 }

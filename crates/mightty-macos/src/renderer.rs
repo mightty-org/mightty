@@ -263,6 +263,17 @@ impl Snapshot {
     }
 }
 
+/// `fonts` with `family` first, the configured ones falling back after it;
+/// bold and italic from it too, not the configured family's.
+fn with_family(fonts: &Fonts, family: Option<&str>) -> Fonts {
+    let mut fonts = fonts.clone();
+    if let Some(family) = family {
+        fonts.families.insert(0, family.to_owned());
+        fonts.styled = Default::default();
+    }
+    fonts
+}
+
 /// Has `layer`'s pixels shown as in `space`.
 ///
 /// # Safety
@@ -395,6 +406,10 @@ pub struct Renderer {
     /// Ligatures found in runs of text, by the text and its style.
     shaped: HashMap<RunKey, Rc<[Ligature]>>,
     fonts: Fonts,
+    /// The fonts as configured, and a family the pane's program asked for
+    /// over them (OSC 50), as `mightty config` previews fonts.
+    config_fonts: Fonts,
+    family: Option<String>,
     font_size: f64,
     backend: FontBackend,
     scale: f64,
@@ -452,6 +467,8 @@ impl Renderer {
                 shaped: HashMap::new(),
                 backend: config.font_backend,
                 fonts: config.fonts.clone(),
+                config_fonts: config.fonts.clone(),
+                family: None,
                 font_size: config.font_size,
                 scale,
                 theme: config.theme.clone(),
@@ -509,7 +526,8 @@ impl Renderer {
         self.colorspace = config.colorspace;
         let font = |r: &Self| (r.fonts.clone(), r.font_size, r.backend, r.ligatures, r.look.cell_adjust);
         let before = (font(self), self.look.padding);
-        self.fonts = config.fonts.clone();
+        self.config_fonts = config.fonts.clone();
+        self.fonts = with_family(&self.config_fonts, self.family.as_deref());
         self.font_size = font_size;
         self.backend = config.font_backend;
         self.ligatures = config.ligatures;
@@ -518,6 +536,18 @@ impl Renderer {
             self.reload_font();
         }
         (font(self), self.look.padding) != before
+    }
+
+    /// The pane's font family, as its program asked (OSC 50), or the
+    /// configured one for `None`. Returns whether the font changed.
+    pub fn set_family(&mut self, family: Option<String>) -> bool {
+        if family == self.family {
+            return false;
+        }
+        self.family = family;
+        self.fonts = with_family(&self.config_fonts, self.family.as_deref());
+        self.reload_font();
+        true
     }
 
     fn reload_font(&mut self) {

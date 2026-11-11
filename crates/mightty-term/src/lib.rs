@@ -264,6 +264,8 @@ pub struct Term {
     /// The progress bar a program asked for (OSC 9 ; 4), and when.
     progress: Option<(Progress, std::time::Instant)>,
     pointer_shape: PointerShape,
+    /// See `take_font_request`.
+    font_request: Option<Option<String>>,
     /// The theme's colours, and those programs set over them.
     theme: Colors,
     set_colors: colors::SetColors,
@@ -360,6 +362,7 @@ impl Term {
             mark_nonce: None,
             progress: None,
             pointer_shape: PointerShape::Default,
+            font_request: None,
             theme: Colors::default(),
             set_colors: Box::new([None; colors::FOREGROUND + 3]),
             wide_emoji: true,
@@ -1655,6 +1658,8 @@ impl Term {
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
         (self.mark_nonce, self.theme, self.cell_pixels, self.wide_emoji) = (mark_nonce, theme, cell_pixels, wide_emoji);
         self.modes.grapheme_cluster = wide_emoji;
+        // The configured font again, if a program had changed it (OSC 50).
+        self.font_request = Some(None);
         // Scrollback keeps its style and cluster ids, so it keeps their tables too.
         self.scrollback = scrollback;
         self.styles = styles;
@@ -1863,6 +1868,7 @@ impl Term {
             },
             [b"4", pairs @ ..] => self.osc_palette(pairs, terminator),
             [b"22", name] => self.set_pointer_shape(name),
+            [b"50", name] => self.set_font(name),
             [b"104", indices @ ..] => self.osc_reset_palette(indices),
             [code @ (b"10" | b"11" | b"12"), specs @ ..] => self.osc_dynamic(usize::from(code[1] - b'0') + 10, specs, terminator),
             [code @ (b"110" | b"111" | b"112"), ..] => self.osc_reset_dynamic(usize::from(code[2] - b'0') + 110),
