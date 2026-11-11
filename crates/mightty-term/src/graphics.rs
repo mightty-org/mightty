@@ -383,14 +383,19 @@ impl Graphics {
     }
 
     fn remove_image(&mut self, id: u32) {
-        if let Some(at) = self.images.iter().position(|i| i.id == id) {
-            let image = self.images.remove(at);
-            self.stored -= image.bytes();
-        }
+        self.forget_image(id);
         self.placements.retain(|p| p.image_id != id);
         self.virtuals.retain(|p| p.image_id != id);
         self.floating.retain(|p| p.image_id != id);
         self.settle();
+    }
+
+    /// Drops image `id`'s pixels, not its placements.
+    fn forget_image(&mut self, id: u32) {
+        if let Some(at) = self.images.iter().position(|i| i.id == id) {
+            let image = self.images.remove(at);
+            self.stored -= image.bytes();
+        }
     }
 
     fn all_placements(&self) -> impl Iterator<Item = &Placement> {
@@ -426,28 +431,37 @@ impl Graphics {
         let (mut pending, grid): (Vec<_>, Vec<_>) = mem::take(&mut self.placements).into_iter().partition(|p| p.parent.is_some());
         self.placements = grid;
         pending.append(&mut self.floating);
-        loop {
+        // Where each placement settled: its top-left on the grid, or none
+        // when floating. One level of the chains settles a round, so those
+        // deeper than MAX_DEPTH (after a parent was placed again) go too.
+        let mut settled: HashMap<(u32, u32), Option<(i64, usize)>> = self.virtuals.iter().map(|p| (p.key(), None)).collect();
+        settled.extend(self.placements.iter().map(|p| (p.key(), Some((p.line, p.col)))));
+        for _ in 0..MAX_DEPTH {
             let before = pending.len();
+            let mut level = Vec::new();
             for mut p in mem::take(&mut pending) {
-                let up = p.parent;
-                let is_parent = |q: &&Placement| Some(q.key()) == up;
-                if let Some(parent) = self.placements.iter().find(is_parent) {
-                    p.hang(parent.line, parent.col);
-                    self.placements.push(p);
-                } else if self.virtuals.iter().chain(&self.floating).any(|q| is_parent(&q)) {
-                    self.floating.push(p);
-                } else {
-                    pending.push(p);
+                match p.parent.and_then(|up| settled.get(&up).copied()) {
+                    Some(Some((line, col))) => {
+                        p.hang(line, col);
+                        level.push((p, true));
+                    }
+                    Some(None) => level.push((p, false)),
+                    None => pending.push(p),
                 }
+            }
+            for (p, grid) in level {
+                settled.insert(p.key(), grid.then_some((p.line, p.col)));
+                if grid { self.placements.push(p) } else { self.floating.push(p) }
             }
             if pending.len() == before {
                 break;
             }
         }
+        // Their placements gone already, orphans' images leave none behind.
         let orphans: HashSet<u32> = pending.iter().map(|p| p.image_id).collect();
         for id in orphans {
             if !self.all_placements().any(|p| p.image_id == id) {
-                self.remove_image(id);
+                self.forget_image(id);
             }
         }
     }
@@ -978,7 +992,7 @@ impl Term {
             *corner = (corner.0.min(run.line as i64), corner.1.min(run.col));
         }
         let mut pending: Vec<&Placement> = graphics.floating.iter().collect();
-        loop {
+        for _ in 0..MAX_DEPTH {
             let before = pending.len();
             pending.retain(|p| {
                 let Some(&(line, col)) = p.parent.and_then(|up| at.get(&up)) else { return true };
@@ -989,9 +1003,10 @@ impl Term {
                 false
             });
             if pending.len() == before {
-                return shown;
+                break;
             }
         }
+        shown
     }
 }
 
@@ -1164,10 +1179,16 @@ impl Term {
             graphics.placements.retain(|p| p.key() != (id, placement_id));
             graphics.floating.retain(|p| p.key() != (id, placement_id));
         }
-        let placements = if c.unicode { &mut graphics.virtuals } else { &mut graphics.placements };
-        if placements.len() >= MAX_PLACEMENTS {
-            placements.remove(0);
+        // Floating placements count with the grid's.
+        if c.unicode && graphics.virtuals.len() >= MAX_PLACEMENTS {
+            graphics.virtuals.remove(0);
+        } else if !c.unicode && graphics.placements.len() + graphics.floating.len() >= MAX_PLACEMENTS {
+            match graphics.placements.is_empty() {
+                true => graphics.floating.remove(0),
+                false => graphics.placements.remove(0),
+            };
         }
+        let placements = if c.unicode { &mut graphics.virtuals } else { &mut graphics.placements };
         placements.push(Placement {
             image,
             image_id: id,
@@ -1502,6 +1523,24 @@ mod tests {
         assert_eq!(at(&t).iter().map(|p| p.0).collect::<Vec<_>>(), [3]);
         assert_eq!(send(&mut t, "a=p,i=1,C=1", b""), "\x1b_Gi=1;OK\x1b\\");
         assert_eq!(send(&mut t, "a=p,i=2", b""), "\x1b_Gi=2;ENOENT:no such image\x1b\\");
+    }
+
+    #[test]
+    fn chains_stay_within_depth() {
+        let mut t = term();
+        send(&mut t, "a=t,f=32,s=1,v=1,i=1", &rgba(1, 1));
+        send(&mut t, "a=p,i=1,p=1,C=1", b"");
+        // Placement 1 on the grid, then MAX_DEPTH more, each below the last.
+        let last = MAX_DEPTH as u32 + 1;
+        for p in 2..=last {
+            send(&mut t, &format!("a=p,i=1,p={p},P=1,Q={},H=1", p - 1), b"");
+        }
+        assert_eq!(t.image_placements().len(), MAX_DEPTH + 1);
+        // Hung below another, the chain grows one too deep: its last goes.
+        send(&mut t, "a=p,i=1,p=100,C=1", b"");
+        assert_eq!(send(&mut t, "a=p,i=1,p=1,P=1,Q=100", b""), "\x1b_Gi=1,p=1;OK\x1b\\");
+        assert_eq!(t.image_placements().len(), MAX_DEPTH + 1);
+        assert!(t.image_placements().iter().all(|p| p.id != last));
     }
 
     #[test]
