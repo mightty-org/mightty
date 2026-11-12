@@ -33,9 +33,9 @@ end
 set -g _mightty_running 0
 
 function _mightty_prompt --on-event fish_prompt
-    # Percent-encoded so `;` can't split it; with the nonce, like marks.
-    set -l dir (string replace -a '%' '%25' -- $PWD | string replace -a ';' '%3B' | string replace -a ' ' '%20')
-    printf '\e]7;file://%s%s%s\a' $hostname "$dir" "$_mightty_mark"
+    # Percent-encoded, control characters too, so nothing can split it or
+    # end it early (showing the nonce); with the nonce, like marks.
+    printf '\e]7;file://%s%s%s\a' $hostname (string escape --style=url -- $PWD) "$_mightty_mark"
     printf '\e]133;A%s\a' $_mightty_mark
 end
 

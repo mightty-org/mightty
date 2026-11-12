@@ -2482,7 +2482,6 @@ fn unescape_command(raw: &[u8]) -> String {
     displayable(&String::from_utf8_lossy(&out), MAX_COMMAND_LEN)
 }
 
-/// `file://host/path` → `/path`, percent-decoded.
 /// `file://host/path` as (host, decoded path).
 fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
     let rest = url.strip_prefix(b"file://")?;

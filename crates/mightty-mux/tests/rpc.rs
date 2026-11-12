@@ -156,6 +156,56 @@ fn run_uses_fish_integration() {
     mux.close(id);
 }
 
+/// A directory whose name could end the shell's report of it early
+/// doesn't put the nonce on screen.
+#[test]
+fn odd_directory_keeps_the_nonce_hidden() {
+    let shells = [
+        ("/bin/zsh", ".zshrc", "PS1='ready> '\n"),
+        ("/bin/bash", ".bash_profile", "PS1='ready> '\n"),
+        (
+            "/opt/homebrew/bin/fish",
+            ".config/fish/config.fish",
+            "set -g fish_greeting\nfunction fish_prompt; echo -n 'ready> '; end\n",
+        ),
+    ];
+    for (shell, file, profile) in shells {
+        if !Path::new(shell).exists() {
+            continue;
+        }
+        let name = Path::new(shell).file_name().unwrap().to_str().unwrap();
+        let home =
+            std::env::temp_dir().join(format!("mightty-test-odd-{name}-{}", std::process::id()));
+        let odd = home.join("a\x07b\x1b\\c");
+        std::fs::create_dir_all(&odd).unwrap();
+        let path = home.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, profile).unwrap();
+        let mux = Mux::new(Arc::new(Headless));
+        let params = Value::object([
+            ("shell", shell.into()),
+            ("visible", false.into()),
+            ("cwd", odd.to_str().unwrap().into()),
+            (
+                "env",
+                Value::object([("HOME", home.to_str().unwrap().into())]),
+            ),
+        ]);
+        let id = handle(&mux, "pane.spawn", &params).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        call(
+            &mux,
+            "pane.wait",
+            &format!(r#"{{"pane": {id}, "text": "ready>"}}"#),
+        );
+        let screen = call(&mux, "pane.read", &format!(r#"{{"pane": {id}}}"#));
+        assert!(!screen.to_string().contains("nonce"), "{shell}: {screen}");
+        mux.close(id);
+        let _ = std::fs::remove_dir_all(home);
+    }
+}
+
 fn cwd(mux: &Arc<Mux>, id: u64) -> String {
     let panes = call(mux, "pane.list", "{}");
     let pane = panes

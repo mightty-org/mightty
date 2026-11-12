@@ -18,10 +18,13 @@ _mightty_precmd() {
     printf '\e]133;D;%d%s\a' "$ret" "$_mightty_mark"
     _mightty_running=0
   fi
-  # Percent-encoded so `;` can't split it; with the nonce, like marks.
-  local dir=${PWD//\%/%25}
-  dir=${dir//;/%3B}
-  printf '\e]7;file://%s%s%s\a' "${HOST}" "${dir// /%20}" "$_mightty_mark"
+  # Percent-encoded so `;` can't split it; with the nonce, like marks. Not
+  # with control characters, which could end it early and show the nonce.
+  if [[ $PWD != *[[:cntrl:]]* ]]; then
+    local dir=${PWD//\%/%25}
+    dir=${dir//;/%3B}
+    printf '\e]7;file://%s%s%s\a' "${HOST}" "${dir// /%20}" "$_mightty_mark"
+  fi
   printf '\e]133;A%s\a' "$_mightty_mark"
 }
 
