@@ -280,6 +280,8 @@ pub struct Term {
     set_colors: colors::SetColors,
     /// What RIS sets mode 2027 back to: [`TermOptions::wide_emoji`].
     wide_emoji: bool,
+    /// Kitty graphics may read images from files and shared memory.
+    image_files: bool,
     responses: Vec<u8>,
     bell: bool,
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
@@ -328,6 +330,13 @@ impl Term {
     /// Applies changed options to a running terminal: the theme's colours
     /// (those programs set stay), how much history it keeps (dropping the oldest lines
     /// past a lower limit), and how wide VS16 emoji are from now on.
+    /// Whether kitty graphics may read images from files and shared memory
+    /// (`t=f`, `t=t`, `t=s`), as on Unix it does unless told not to. Without,
+    /// images come only in the output, and the terminal does no I/O.
+    pub fn set_image_files(&mut self, allowed: bool) {
+        self.image_files = allowed && cfg!(unix);
+    }
+
     pub fn set_options(&mut self, options: &TermOptions) {
         self.theme = options.colors.clone();
         if options.wide_emoji != self.wide_emoji {
@@ -375,6 +384,7 @@ impl Term {
             theme: Colors::default(),
             set_colors: Box::new([None; colors::FOREGROUND + 3]),
             wide_emoji: true,
+            image_files: cfg!(unix),
             responses: Vec::new(),
             bell: false,
             bells: 0,

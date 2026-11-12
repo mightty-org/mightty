@@ -15,7 +15,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
 use std::os::fd::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -844,10 +846,20 @@ fn reply(c: &Command, message: &str) -> Option<Vec<u8>> {
 const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4000;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const O_NOFOLLOW: i32 = 0x0100;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const O_NONBLOCK: i32 = 0x0004;
+
+/// Without Unix's files and shared memory, `set_image_files` keeps these from being called.
+#[cfg(not(unix))]
+fn read_file(_: &Command, _: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+#[cfg(not(unix))]
+fn read_shm(_: &Command, _: &[u8]) -> Option<Vec<u8>> {
+    None
+}
 
 const SHM_ERROR: &str = "EBADF:can't read an image from the shared memory";
 
@@ -855,6 +867,7 @@ const SHM_ERROR: &str = "EBADF:can't read an image from the shared memory";
 /// pick a part), which is then unlinked, as the protocol asks: the client
 /// hands it over. Only the user's objects named as handed over are read:
 /// any program printing to the terminal could otherwise unlink others.
+#[cfg(unix)]
 fn read_shm(c: &Command, name: &[u8]) -> Option<Vec<u8>> {
     unsafe extern "C" {
         fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
@@ -917,6 +930,7 @@ fn read_shm(c: &Command, name: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The user this process runs as.
+#[cfg(unix)]
 fn current_uid() -> u32 {
     unsafe extern "C" {
         fn getuid() -> u32;
@@ -934,6 +948,7 @@ const FILE_ERROR: &str = "EBADF:can't read an image from the file";
 /// `tty-graphics-protocol`, in a temp directory), the path to it with its
 /// directory resolved, so `..` and symlinked directories can't lead out.
 /// Output can come from other machines (ssh), so this guards the deletion.
+#[cfg(unix)]
 fn temp_file(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute()
         || path
@@ -965,6 +980,7 @@ fn temp_file(path: &Path) -> Option<PathBuf> {
 /// waiting, so not devices or pipes, and nothing under /proc, /sys or
 /// /dev; temp files only as `temp_file` allows, never through a symlink,
 /// and deleted once read. Errors say nothing (see `FILE_ERROR`).
+#[cfg(unix)]
 fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
     let path = PathBuf::from(std::str::from_utf8(path).ok()?);
     if !path.is_absolute() {
@@ -1377,8 +1393,10 @@ impl Term {
     }
 
     fn graphics_command(&mut self, mut c: Command, data: Vec<u8>) {
+        let files = self.image_files;
         let pixels = |c: &Command, data: Vec<u8>| match c.medium {
             b'd' => decode(c, data),
+            b'f' | b't' | b's' if !files => Err("EINVAL:images can only be sent directly (t=d)"),
             // Any file can be named, so only as a whole, uncompressed
             // PNG: raw pixels, offsets and zlib would tell a remote
             // program about the file by whether they decode.

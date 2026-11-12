@@ -37,6 +37,12 @@ int main(void) {
     CHECK(st.cols == 20 && st.rows == 5);
     CHECK(st.cursor_row == 1 && st.cursor_col == 0);
     CHECK(st.cursor_visible == 1 && st.alt_screen == 0);
+    /* A caller built against a newer header learns how much was filled. */
+    struct { mightty_state state; uint8_t newer[8]; } grown;
+    memset(&grown, 0, sizeof grown);
+    grown.state.size = sizeof grown;
+    CHECK(mightty_term_get_state(t, &grown.state) == MIGHTTY_OK);
+    CHECK(grown.state.size == sizeof(mightty_state) && grown.state.cols == 20);
 
     /* Cells, colours, flags. */
     mightty_cell cells[20];
@@ -69,6 +75,13 @@ int main(void) {
     CHECK(mightty_term_take_responses(t, big, sizeof big, &len) == MIGHTTY_OK);
     CHECK(len == 6 && memcmp(big, "\x1b[2;1R", 6) == 0);
     CHECK(mightty_term_take_responses(t, big, sizeof big, &len) == MIGHTTY_OK && len == 0);
+
+    /* No I/O: images can't be read from files. */
+    feed(t, "\x1b_Ga=t,t=f,f=100,i=1;L2V0Yy9ob3N0cw==\x1b\\");
+    CHECK(mightty_term_take_responses(t, big, sizeof big, &len) == MIGHTTY_ERR_BUFFER);
+    char reply[64];
+    CHECK(mightty_term_take_responses(t, (uint8_t *)reply, sizeof reply, &len) == MIGHTTY_OK);
+    CHECK(len > 12 && memcmp(reply, "\x1b_Gi=1;EINVAL", 12) == 0);
 
     /* Text extraction. */
     char text[64];

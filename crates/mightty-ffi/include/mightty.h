@@ -3,9 +3,10 @@
  *
  * libmightty parses what a program writes to its terminal and keeps the
  * resulting screen state. Feed it output bytes; read back cells, cursor,
- * modes, scrollback and shell-integration marks. It performs no I/O, starts
- * no threads and never calls back into you, so it embeds anywhere: GUI
- * front ends, test harnesses, multiplexers, agent tooling, WebAssembly.
+ * modes, scrollback and shell-integration marks. It performs no I/O (kitty
+ * graphics images must come in the output, not by file or shared memory),
+ * starts no threads and never calls back into you, so it embeds anywhere:
+ * GUI front ends, test harnesses, multiplexers, agent tooling, WebAssembly.
  *
  * Conventions
  *   - Functions that can fail return mightty_result; MIGHTTY_OK is 0.
@@ -16,7 +17,8 @@
  *   - Text is UTF-8 with an explicit length; it is not NUL-terminated.
  *   - Structs that may grow begin with `size`, which the caller sets to
  *     sizeof(the struct). The library fills only the fields that fit, so
- *     programs built against older headers keep working.
+ *     programs built against older headers keep working, and sets `size`
+ *     to the bytes it filled.
  *   - A mightty_term is not thread-safe. Synchronise access yourself.
  *   - Lines are addressed absolutely: screen row r is line
  *     (lines_scrolled + r) and scrollback holds lines first_line up to

@@ -150,7 +150,10 @@ pub extern "C" fn mightty_term_new(
         return ptr::null_mut();
     }
     catch_unwind(|| {
-        let term = Term::with_scrollback(cols as usize, rows as usize, scrollback_lines as usize);
+        let mut term =
+            Term::with_scrollback(cols as usize, rows as usize, scrollback_lines as usize);
+        // As the header promises: no I/O, so kitty images come only inline.
+        term.set_image_files(false);
         Box::into_raw(Box::new(mightty_term(term)))
     })
     .unwrap_or(ptr::null_mut())
@@ -278,8 +281,11 @@ pub unsafe extern "C" fn mightty_term_get_state(
         }
         let (row, col) = term.cursor();
         let m = term.modes();
+        // Older callers get the prefix they know about, and `size` says
+        // how much was filled, for newer callers of an older library.
+        let n = size.min(mem::size_of::<mightty_state>());
         let state = mightty_state {
-            size: size as u32,
+            size: n as u32,
             cols: term.cols() as u32,
             rows: term.rows() as u32,
             cursor_col: col as u32,
@@ -304,8 +310,6 @@ pub unsafe extern "C" fn mightty_term_get_state(
             cursor_shape: m.cursor_shape.min(255) as u8,
             _reserved: [0; 6],
         };
-        // Older callers get the prefix they know about.
-        let n = size.min(mem::size_of::<mightty_state>());
         // SAFETY: the caller promised `size` writable bytes.
         unsafe {
             ptr::copy_nonoverlapping(
