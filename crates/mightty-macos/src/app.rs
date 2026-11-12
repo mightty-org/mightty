@@ -2919,40 +2919,81 @@ const CONFIG_TEMPLATE: &str = "\
 # theme = Dracula
 ";
 
-/// Tells the user what went wrong, on a sheet over the key window if
-/// there is one; also on stderr.
+thread_local! {
+    /// Problems waiting for a window to show them on.
+    static PROBLEMS: RefCell<Vec<(String, Vec<String>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Tells the user what went wrong, on a sheet over a window; also on stderr.
 fn show_problems(title: &str, problems: &[String]) {
     for problem in problems {
         eprintln!("mightty: {problem}");
     }
+    PROBLEMS.with_borrow_mut(|p| p.push((title.into(), problems.to_vec())));
+    show_waiting_problems();
+}
+
+/// Shows the first problem waiting, on a sheet over the key window or else
+/// the frontmost of ours without one. Never in a modal loop: callers may
+/// be inside `with_app`, and everything else would wait until it was
+/// answered. With no window free, problems wait for one to become key.
+fn show_waiting_problems() {
+    static ANSWERED: Block = Block::with_response(answered);
+    unsafe extern "C" fn answered(_: *const Block, _: isize) {
+        // After the sheet has gone.
+        run_on_main_after(Duration::ZERO, next);
+    }
+    extern "C" fn next(_: *mut c_void) {
+        show_waiting_problems();
+    }
     // SAFETY: main thread; documented signatures.
     unsafe {
+        let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+        let free = |w: Id| -> bool {
+            let (visible, sheet, attached, main): (Bool, Bool, Id, Bool) = (
+                msg!(w, c"isVisible"),
+                msg!(w, c"isSheet"),
+                msg!(w, c"attachedSheet"),
+                msg!(w, c"canBecomeMainWindow"),
+            );
+            visible != NO && sheet == NO && attached.is_null() && main != NO
+        };
+        let key: Id = msg!(ns_app, c"keyWindow");
+        let window = if !key.is_null() && free(key) {
+            key
+        } else {
+            let ordered: Id = msg!(ns_app, c"orderedWindows");
+            let count: usize = msg!(ordered, c"count");
+            match (0..count)
+                .map(|i| -> Id { msg!(ordered, c"objectAtIndex:", i) })
+                .find(|&w| free(w))
+            {
+                Some(w) => w,
+                None => return,
+            }
+        };
+        let Some((title, problems)) = PROBLEMS.with_borrow_mut(|p| {
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.remove(0))
+            }
+        }) else {
+            return;
+        };
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
-        call!(alert, c"setMessageText:", nsstring(title));
+        call!(alert, c"setMessageText:", nsstring(&title));
         call!(
             alert,
             c"setInformativeText:",
             nsstring(&problems.join("\n"))
         );
-        let key: Id = msg!(
-            msg!(class(c"NSApplication"), c"sharedApplication"),
-            c"keyWindow"
+        call!(
+            alert,
+            c"beginSheetModalForWindow:completionHandler:",
+            window,
+            &ANSWERED
         );
-        let sheet: Id = if key.is_null() {
-            NIL
-        } else {
-            msg!(key, c"attachedSheet")
-        };
-        if key.is_null() || !sheet.is_null() {
-            let _: isize = msg!(alert, c"runModal");
-        } else {
-            call!(
-                alert,
-                c"beginSheetModalForWindow:completionHandler:",
-                key,
-                NIL
-            );
-        }
     }
 }
 
@@ -5378,6 +5419,7 @@ unsafe fn register_delegate_class() -> Id {
     }
     extern "C" fn did_become_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, true);
+        show_waiting_problems();
     }
     extern "C" fn did_resign_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, false);
