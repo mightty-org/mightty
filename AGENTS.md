@@ -39,6 +39,8 @@ scripts/bundle.sh --install                     # Mightty.app in ~/Applications
   `crates/mightty/src/ctl.rs`. MCP tools: `crates/mightty-mcp/src/lib.rs`.
 - Benchmarks: `bench/`. Read `README.md`'s Performance section before
   quoting numbers; the two benchmark scripts measure differently.
+- Releases: `.github/workflows/release.yml`, run by a `v*` tag; how to
+  make one, and the signing secrets, are in `RELEASING.md`.
 
 ## Conventions
 

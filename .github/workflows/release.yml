@@ -1,0 +1,106 @@
+# Pushing a version tag (v0.2.0) builds Mightty.app for Apple Silicon and
+# Intel, signs it with the Developer ID, has Apple notarize it, and attaches
+# it to a GitHub Release as Mightty.zip. The website's download button links
+# to releases/latest/download/Mightty.zip. The secrets it needs are in
+# RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag is Cargo.toml's version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+
+      - run: |
+          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup default stable
+
+      - run: cargo test --workspace
+
+      # Into a keychain of the job's own, deleted at the end.
+      - name: Import the Developer ID certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain=$RUNNER_TEMP/signing.keychain-db
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+          if [ -z "$identity" ]; then
+            echo "::error::no Developer ID Application identity in MACOS_CERTIFICATE"
+            exit 1
+          fi
+          echo "IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - run: scripts/bundle.sh --universal --sign "$IDENTITY"
+
+      # notarytool exits 0 whatever Apple decides, so the status is checked,
+      # and Apple's log shown when it isn't Accepted.
+      - name: Notarize
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          key=$RUNNER_TEMP/notary.p8
+          printf '%s\n' "$NOTARY_KEY" > "$key"
+          auth="--key $key --key-id $NOTARY_KEY_ID --issuer $NOTARY_ISSUER_ID"
+          ditto -c -k --keepParent target/release/Mightty.app "$RUNNER_TEMP/submit.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/submit.zip" $auth \
+            --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json"
+          cat "$RUNNER_TEMP/notary.json"
+          status=$(plutil -extract status raw -o - "$RUNNER_TEMP/notary.json")
+          if [ "$status" != Accepted ]; then
+            id=$(plutil -extract id raw -o - "$RUNNER_TEMP/notary.json")
+            xcrun notarytool log "$id" $auth
+            rm "$key"
+            exit 1
+          fi
+          rm "$key"
+          xcrun stapler staple target/release/Mightty.app
+          spctl --assess --verbose=2 target/release/Mightty.app
+
+      - name: Package
+        run: |
+          ditto -c -k --keepParent target/release/Mightty.app Mightty.zip
+          shasum -a 256 Mightty.zip > Mightty.zip.sha256
+
+      # A tag with a hyphen (v0.2.0-beta.1) is a pre-release, which
+      # releases/latest skips.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=
+          case $GITHUB_REF_NAME in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" Mightty.zip Mightty.zip.sha256 \
+            --title "Mightty ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag $prerelease
+
+      - name: Delete the keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

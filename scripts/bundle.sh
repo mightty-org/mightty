@@ -1,17 +1,45 @@
 #!/bin/sh
 # Builds Mightty.app (in target/release), signed ad hoc so macOS delivers
-# its notifications. With --install, copies it to DIR (default
-# ~/Applications), replacing an older copy.
-# usage: scripts/bundle.sh [--install [DIR]]
+# its notifications.
+#   --universal      for Apple Silicon and Intel both (needs the rustup
+#                    targets aarch64-apple-darwin and x86_64-apple-darwin)
+#   --sign IDENTITY  signed with IDENTITY ("Developer ID Application: …"),
+#                    with the hardened runtime notarization asks for
+#   --install [DIR]  then copied to DIR (default ~/Applications), replacing
+#                    an older copy
+# usage: scripts/bundle.sh [--universal] [--sign IDENTITY] [--install [DIR]]
 set -eu
 cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
-cargo build --release --package mightty
+universal= identity=- install= dir="$HOME/Applications"
+while [ $# -gt 0 ]; do
+  case $1 in
+    --universal) universal=1 ;;
+    --sign) identity=${2:?--sign needs an identity}; shift ;;
+    --install)
+      install=1
+      if [ $# -gt 1 ] && [ "${2#--}" = "$2" ]; then dir=$2; shift; fi
+      ;;
+    *) echo "bundle.sh: unknown option $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 app=target/release/Mightty.app
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/mightty "$app/Contents/MacOS/mightty"
+if [ -n "$universal" ]; then
+  # The oldest macOS it runs on, as Info.plist says.
+  export MACOSX_DEPLOYMENT_TARGET=12.0
+  for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build --release --package mightty --target "$target"
+  done
+  lipo -create -output "$app/Contents/MacOS/mightty" \
+    target/aarch64-apple-darwin/release/mightty target/x86_64-apple-darwin/release/mightty
+else
+  cargo build --release --package mightty
+  cp target/release/mightty "$app/Contents/MacOS/mightty"
+fi
 cp assets/mightty.icns "$app/Contents/Resources/mightty.icns"
 # The themes (iTerm2-Color-Schemes, as Ghostty bundles them), and their licence.
 mkdir -p "$app/Contents/Resources/themes"
@@ -39,11 +67,14 @@ cat > "$app/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-codesign --force --sign - "$app"
+if [ "$identity" = - ]; then
+  codesign --force --sign - "$app"
+else
+  codesign --force --options runtime --timestamp --sign "$identity" "$app"
+fi
 echo "built $app ($version)"
 
-if [ "${1:-}" = "--install" ]; then
-  dir="${2:-$HOME/Applications}"
+if [ -n "$install" ]; then
   mkdir -p "$dir"
   # The old lowercase name too, on a case-sensitive disk.
   rm -rf "$dir/mightty.app" "$dir/Mightty.app"

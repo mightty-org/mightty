@@ -49,6 +49,9 @@ scripts/bundle.sh                       # target/release/Mightty.app, signed ad 
 scripts/bundle.sh --install             # copied to ~/Applications
 ```
 
+Releases are built, signed and notarized by GitHub Actions when a version
+tag is pushed; see [RELEASING.md](RELEASING.md).
+
 Clicking a banner brings its pane to the front. The icon is drawn by
 `scripts/make-icon.py` (`scripts/make-icon.sh` rebuilds `assets/mightty.icns`).
 
