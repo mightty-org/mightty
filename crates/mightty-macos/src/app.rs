@@ -3766,6 +3766,15 @@ fn style_window(window: Id, root: Id, config: &Config) {
     }
 }
 
+impl Drop for Surface {
+    fn drop(&mut self) {
+        if !self.flash.is_null() {
+            // SAFETY: main thread; retained when it was made, released once.
+            unsafe { call!(self.flash, c"release") };
+        }
+    }
+}
+
 impl Surface {
     fn render(&mut self) {
         // SAFETY: main thread; AppKit calls with documented signatures.

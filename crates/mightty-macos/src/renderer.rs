@@ -485,8 +485,8 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `layer` must be a `CAMetalLayer`. Draws with `config`'s font, colours
-    /// and look (see `configure`).
+    /// `layer` must be a `CAMetalLayer` with a reference the renderer takes
+    /// over. Draws with `config`'s font, colours and look (see `configure`).
     pub fn new(layer: Id, scale: f64, config: &Config) -> Self {
         // SAFETY: Metal calls with the documented signatures.
         unsafe {
@@ -1635,7 +1635,13 @@ impl Drop for Renderer {
             for t in self.images.values() {
                 call!(t.texture, c"release");
             }
-            for object in [self.atlas.texture, self.pipeline, self.queue, self.device] {
+            for object in [
+                self.atlas.texture,
+                self.pipeline,
+                self.queue,
+                self.device,
+                self.layer,
+            ] {
                 call!(object, c"release");
             }
         }
