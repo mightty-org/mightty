@@ -504,7 +504,7 @@ impl Term {
         let text = |b: &[u8]| {
             String::from_utf8_lossy(b)
                 .chars()
-                .filter(|c| !c.is_control())
+                .filter(|&c| !c.is_control() && !is_bidi_control(c))
                 .take(MAX_NOTIFICATION_TEXT)
                 .collect()
         };
@@ -2541,10 +2541,9 @@ fn parse_file_url(url: &[u8]) -> Option<(String, String)> {
 /// are shown in the UI or printed to terminals, where they could otherwise
 /// run escape sequences or reorder what's shown.
 fn displayable(text: &str, max: usize) -> String {
-    let bidi = |c: char| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
     text.chars()
         .map(|c| {
-            if c.is_control() || bidi(c) {
+            if c.is_control() || is_bidi_control(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -2552,6 +2551,12 @@ fn displayable(text: &str, max: usize) -> String {
         })
         .take(max)
         .collect()
+}
+
+/// Bidirectional formatting characters, which can make text read other
+/// than it is: a file name ending `txt.exe` shown as `exe.txt`.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
 }
 
 /// DEC Special Graphics (`ESC ( 0`): line drawing used by many TUIs.

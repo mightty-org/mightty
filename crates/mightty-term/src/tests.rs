@@ -901,8 +901,9 @@ fn notifications_and_bells() {
     // The OSC's terminating BEL isn't a bell; the lone one is.
     assert_eq!(t.bells(), 1);
     assert!(t.take_bell());
-    // ConEmu progress (OSC 9;4) isn't a notification; control characters are dropped.
-    t.feed("\x1b]9;4;1;50\x07\x1b]9;a\u{85}b\x07".as_bytes());
+    // ConEmu progress (OSC 9;4) isn't a notification; control characters
+    // are dropped, and so are bidi overrides, which could disguise text.
+    t.feed("\x1b]9;4;1;50\x07\x1b]9;a\u{85}\u{202E}b\x07".as_bytes());
     assert_eq!(
         t.take_notifications()
             .iter()
