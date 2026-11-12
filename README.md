@@ -387,6 +387,7 @@ python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]  # full suite above; l
 bench/compare.sh                                       # throughput only; needs a running mightty; uses Ghostty and kitty if installed
 cargo run --release -p mightty-term --example feed -- bench/data/*.txt     # core only, no PTY
 cargo run --release -p mightty-mux --example pipeline -- $PWD/bench/data/*.txt
+cargo run --release -p mightty-term --example digest -- bench/data/*.txt   # a fingerprint of the terminal's state: the same before and after a change that shouldn't show
 ```
 
 What made the difference, measured along the way:

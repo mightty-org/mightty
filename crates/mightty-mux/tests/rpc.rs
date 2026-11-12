@@ -70,6 +70,36 @@ fn pane_answers_while_its_program_runs_detached() {
     mux.close(pane.id);
 }
 
+/// Once a pane's output pauses, its history lets go of the room it doesn't use.
+#[test]
+fn history_is_trimmed_when_quiet() {
+    let mux = Mux::new(Arc::new(Headless));
+    let pane = call(
+        &mux,
+        "pane.spawn",
+        r#"{"command": "seq 1 300; read x", "shell": "/bin/sh", "visible": false}"#,
+    );
+    let id = pane["id"].as_u64().unwrap();
+    call(
+        &mux,
+        "pane.wait",
+        &format!(r#"{{"pane": {id}, "text": "300"}}"#),
+    );
+    let pane = mux.pane(id).unwrap();
+    let held = || -> usize {
+        let term = pane.term.lock().unwrap();
+        term.scrollback().iter().map(|r| r.cells.capacity()).sum()
+    };
+    let before = held();
+    // A few ticks of the monitor.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while held() * 4 >= before && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(held() * 4 < before, "{} of {before}", held());
+    mux.close(id);
+}
+
 #[test]
 fn errors_are_reported() {
     let mux = Mux::new(Arc::new(Headless));

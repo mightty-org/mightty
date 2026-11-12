@@ -34,6 +34,9 @@ use width::{emoji_style, width_class};
 pub use window::{PointerShape, Progress};
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
+/// Unused cells a history row may keep: giving back fewer isn't worth
+/// moving the row.
+const TRIM_SLACK: usize = 8;
 const MAX_MARKS: usize = 10_000;
 /// Longer command lines (OSC 633;E) are cut, so the kept ones stay small.
 const MAX_COMMAND_LEN: usize = 4096;
@@ -248,6 +251,9 @@ pub struct Term {
     scrollback: VecDeque<Row>,
     scrollback_limit: usize,
     lines_scrolled: u64,
+    /// History before this absolute line holds no more than it uses (see
+    /// `trim_history`).
+    trimmed_to: u64,
     cursor: Cursor,
     /// Saved cursor per screen, indexed by `alt_active`.
     saved: [Option<SavedCursor>; 2],
@@ -362,6 +368,7 @@ impl Term {
             scrollback: VecDeque::new(),
             scrollback_limit,
             lines_scrolled: 0,
+            trimmed_to: 0,
             cursor: Cursor::default(),
             saved: [None, None],
             top: 0,
@@ -851,6 +858,28 @@ impl Term {
         self.scrollback.clear();
         let first = self.first_line();
         self.graphics[0].forget_above(first);
+    }
+
+    /// Gives back the room history's rows hold and don't use. A row is
+    /// allocated for the full width, and keeps that as it scrolls off, to
+    /// be reused once history is full: under a stream of output nothing is
+    /// allocated per line. Call this when output has paused; rows already
+    /// trimmed aren't looked at again.
+    pub fn trim_history(&mut self) {
+        let first = self.first_line();
+        // Within what's there: a taller screen takes rows back from history.
+        let from = ((self.trimmed_to.max(first) - first) as usize).min(self.scrollback.len());
+        for row in self.scrollback.range_mut(from..) {
+            // Not for the few cells a nearly full row would give back.
+            if row.cells.capacity() - row.cells.len() > TRIM_SLACK {
+                // A copy, not `shrink_to_fit`: shrunk in place, each row
+                // leaves a hole after it too small for the allocator to
+                // give back, and the process is no smaller. Copies pack
+                // together, and the rows they leave free whole pages.
+                row.cells = row.cells.as_slice().into();
+            }
+        }
+        self.trimmed_to = self.lines_scrolled;
     }
 
     /// Absolute line number of the oldest row still in scrollback.
@@ -1418,6 +1447,11 @@ impl Term {
             // tail is trimmed after.
             let old_len = cells.len();
             let end = cols.min(start + 2 * (chars.len() - i));
+            // The spare cell past the width would double a full row's
+            // allocation, for good: rows are reused as they scroll.
+            if cells.capacity() <= cols {
+                cells.reserve_exact(cols + 1 - old_len);
+            }
             grow(cells, end + 1);
             let out = &mut cells[..end + 1];
             let mut col = start;
@@ -1674,13 +1708,18 @@ impl Term {
                 };
                 self.scrollback.push_back(leaving);
                 recycled.unwrap_or_else(|| Row {
-                    cells: Vec::with_capacity(cols),
+                    // The width and the spare cell `input_text` writes past it.
+                    cells: Vec::with_capacity(cols + 1),
                     wrapped: false,
                 })
             } else {
                 leaving
             };
             clear_rows(slice::from_mut(&mut fresh), blank, cols);
+            // A row trimmed in history is a screen row again.
+            if fresh.cells.capacity() <= cols {
+                fresh.cells.reserve_exact(cols + 1 - fresh.cells.len());
+            }
             if full_screen {
                 lines.push_back(fresh);
             } else {

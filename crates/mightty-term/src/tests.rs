@@ -182,6 +182,37 @@ fn rows_under_a_top_region_keep_their_marks() {
     assert_eq!(t.screen_text(), "a\nb\nc\n\n$");
 }
 
+/// History gives back the room its rows don't use, and takes output again
+/// after as if nothing had happened.
+#[test]
+fn history_is_trimmed() {
+    let mut t = Term::new(100, 4);
+    let held = |t: &Term| -> usize { t.scrollback().iter().map(|r| r.cells.capacity()).sum() };
+    let lines: String = (0..50).map(|i| format!("line {i} 中文\r\n")).collect();
+    t.feed(lines.as_bytes());
+    let (before, text) = (held(&t), t.history_text());
+    t.trim_history();
+    assert!(held(&t) * 4 < before, "{} of {before}", held(&t));
+    assert!(
+        t.scrollback()
+            .iter()
+            .all(|r| r.cells.capacity() <= r.cells.len() + 8)
+    );
+    assert_eq!(t.history_text(), text);
+    // Rows trimmed are full-width rows again when they come round.
+    let mut small = Term::with_scrollback(100, 4, 10);
+    small.feed(lines.as_bytes());
+    small.trim_history();
+    small.feed(lines.as_bytes());
+    small.feed("x".repeat(250).as_bytes());
+    let mut plain = Term::with_scrollback(100, 4, 10);
+    plain.feed(lines.as_bytes());
+    plain.feed(lines.as_bytes());
+    plain.feed("x".repeat(250).as_bytes());
+    assert_eq!(small.history_text(), plain.history_text());
+    assert!(small.lines().iter().all(|r| r.cells.capacity() <= 101));
+}
+
 #[test]
 fn tabs() {
     let t = term(20, 1, "a\tb\x1b[2Zc");

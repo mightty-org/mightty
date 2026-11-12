@@ -153,6 +153,10 @@ pub struct Pane {
     visible: AtomicBool,
     /// Output generation counter, bumped after every read, for waiters.
     changed: (Mutex<u64>, Condvar),
+    /// The generation at the monitor's last tick, and at the last trim of
+    /// the terminal's history (see `trim_when_quiet`).
+    ticked_at: AtomicU64,
+    trimmed_at: AtomicU64,
     activity: Mutex<Activity>,
     /// The user is looking at it: it can't need them.
     focused: AtomicBool,
@@ -366,6 +370,17 @@ impl Pane {
         *lock.lock().unwrap() += 1;
         cv.notify_all();
     }
+
+    /// Has the terminal give back memory its history doesn't use, once
+    /// nothing has been written for a tick of the monitor: while output
+    /// streams, rows are reused as they are (see `Term::trim_history`).
+    fn trim_when_quiet(&self) {
+        let generation = *self.changed.0.lock().unwrap();
+        let quiet = self.ticked_at.swap(generation, Ordering::Relaxed) == generation;
+        if quiet && self.trimmed_at.swap(generation, Ordering::Relaxed) != generation {
+            self.term.lock().unwrap().trim_history();
+        }
+    }
 }
 
 pub struct Mux {
@@ -486,6 +501,8 @@ impl Mux {
             exit: Mutex::new(None),
             visible: AtomicBool::new(false),
             changed: (Mutex::new(0), Condvar::new()),
+            ticked_at: AtomicU64::new(u64::MAX),
+            trimmed_at: AtomicU64::new(u64::MAX),
             activity: Mutex::new(Activity::new()),
             focused: AtomicBool::new(false),
             events: self.events.clone(),
@@ -562,6 +579,7 @@ fn spawn_monitor(mux: Weak<Mux>) {
                     if pane.update_status() {
                         mux.host.pane_status(pane.id);
                     }
+                    pane.trim_when_quiet();
                 }
                 drop(mux);
                 thread::sleep(STATUS_INTERVAL);
