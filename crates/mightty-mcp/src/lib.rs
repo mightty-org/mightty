@@ -75,11 +75,15 @@ pub fn serve(
     input: impl BufRead,
     mut output: impl Write,
 ) -> io::Result<()> {
+    // The pane id is only this mightty's if its socket was the one
+    // named beside it; one found otherwise numbers its panes its own way.
     let own_pane = match &backend {
-        Backend::Remote(_) => std::env::var("MIGHTTY_PANE_ID")
-            .ok()
-            .and_then(|id| id.parse().ok()),
-        Backend::Local(_) => None,
+        Backend::Remote(_) if std::env::var_os("MIGHTTY_SOCKET").is_some() => {
+            std::env::var("MIGHTTY_PANE_ID")
+                .ok()
+                .and_then(|id| id.parse().ok())
+        }
+        _ => None,
     };
     let allowed = (panes == Panes::Own).then(|| own_pane.into_iter().collect());
     let mut server = Server {
