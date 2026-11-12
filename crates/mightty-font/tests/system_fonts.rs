@@ -69,6 +69,16 @@ fn menlo_collection() {
     assert!(contours('é') > contours('e'));
 }
 
+/// A collection claiming four billion faces holds what it has room to list.
+#[test]
+fn collection_count_is_bounded() {
+    let mut ttc = b"ttcf\0\x01\0\0\xff\xff\xff\xff".to_vec();
+    ttc.extend([0; 8]);
+    assert_eq!(Face::count(&ttc), 2);
+    ttc.extend(vec![0; 1 << 16]);
+    assert_eq!(Face::count(&ttc), 1024);
+}
+
 #[test]
 fn rasterized_h_has_two_stems_and_a_bar() {
     let Some(data) = load("/System/Library/Fonts/Monaco.ttf") else {

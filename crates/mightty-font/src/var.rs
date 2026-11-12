@@ -29,6 +29,9 @@ fn f2dot14(b: Bytes<'_>, at: usize) -> Option<f32> {
     Some(b.i16(at)? as f32 / 16384.0)
 }
 
+/// Axes a variable font may have; the most real fonts have is about 15.
+const MAX_AXES: usize = 64;
+
 /// The axes `fvar` at `at` declares; `None` if any makes no sense.
 pub(crate) fn axes(b: Bytes<'_>, at: usize) -> Option<Vec<Axis>> {
     let (first, count, size) = (
@@ -36,7 +39,9 @@ pub(crate) fn axes(b: Bytes<'_>, at: usize) -> Option<Vec<Axis>> {
         b.u16(at + 8)? as usize,
         b.u16(at + 10)? as usize,
     );
-    if size < 20 {
+    // Every delta is weighed per axis: more than real fonts have makes the
+    // font not variable.
+    if size < 20 || count > MAX_AXES {
         return None;
     }
     (0..count)

@@ -138,6 +138,9 @@ fn offset(v: f64) -> Option<usize> {
     (v >= 0.0 && v.fract() == 0.0).then_some(v as usize)
 }
 
+/// Bytes of private DICTs a CID-keyed font may have read, all told.
+const MAX_PRIVATE_BYTES: usize = 1 << 20;
+
 /// The local subroutines a private DICT at (`size`, `at`) names, if any.
 fn private_subrs(b: Bytes<'_>, private: &[f64]) -> Option<Index> {
     let [size, at] = private else { return None };
@@ -190,10 +193,18 @@ impl Cff {
                 .and_then(|v| offset(*v.first()?))
                 .ok_or_else(damaged)?;
             let (array, _) = Index::parse(b, array).ok_or_else(damaged)?;
-            let subrs = (0..array.count)
+            // FDSelect picks among 256 at most. Real private DICTs are a few
+            // dozen bytes; each FD could name the same huge one.
+            let mut budget = MAX_PRIVATE_BYTES;
+            let subrs = (0..array.count.min(256))
                 .map(|i| {
                     let fd = dict(array.get(b, i).ok_or_else(damaged)?).ok_or_else(damaged)?;
-                    Ok(lookup(&fd, 18).and_then(|private| private_subrs(b, private)))
+                    let private = lookup(&fd, 18).filter(|p| {
+                        let size = p.first().copied().and_then(offset).unwrap_or(0);
+                        budget = budget.saturating_sub(size);
+                        budget > 0
+                    });
+                    Ok(private.and_then(|private| private_subrs(b, private)))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             cid = Some((select, subrs));

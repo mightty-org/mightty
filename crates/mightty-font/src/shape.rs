@@ -612,7 +612,13 @@ fn prepare(b: Bytes<'_>, gsub: usize, glyphs: u16) -> Prepared {
             .then(|| read_lookup(b, list, index, &mut work))
             .flatten();
         let start = lookup.as_ref().and_then(|lookup| {
-            let mut set = vec![0u64; (glyphs as usize).div_ceil(64)].into_boxed_slice();
+            // Each set counts too: 8 KB a lookup, and a font can have 65,535.
+            let words = (glyphs as usize).div_ceil(64);
+            work += words;
+            if work > PREPARE_WORK {
+                return None;
+            }
+            let mut set = vec![0u64; words].into_boxed_slice();
             for &s in &lookup.subtables {
                 add_covered(
                     b,

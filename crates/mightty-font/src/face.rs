@@ -142,12 +142,22 @@ const MAX_COMPONENTS: u32 = 1024;
 /// Segments in one glyph's outline; real glyphs have a few hundred.
 pub(crate) const MAX_SEGMENTS: usize = 1 << 16;
 
+/// Faces a collection may hold: a header could claim four billion, each
+/// tried in turn by name. The largest real ones hold a few dozen.
+const MAX_FACES: u32 = 1024;
+
 impl Face {
-    /// How many faces `data` holds: a collection (`.ttc`) holds several.
+    /// How many faces `data` holds: a collection (`.ttc`) holds several,
+    /// as many as it has room to list, up to `MAX_FACES`.
     pub fn count(data: &[u8]) -> u32 {
         let b = Bytes(data);
         match b.u32(0) {
-            Some(0x7474_6366) => b.u32(8).unwrap_or(0), // 'ttcf'
+            // 'ttcf'
+            Some(0x7474_6366) => b
+                .u32(8)
+                .unwrap_or(0)
+                .min(MAX_FACES)
+                .min((data.len().saturating_sub(12) / 4) as u32),
             Some(_) => 1,
             None => 0,
         }

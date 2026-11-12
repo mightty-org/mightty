@@ -209,6 +209,9 @@ fn cbdt_glyph(
     })
 }
 
+/// Layers a colour glyph may have; emoji fonts use a few dozen at most.
+const MAX_LAYERS: usize = 512;
+
 fn colr_layers(
     b: Bytes<'_>,
     (colr, _): (usize, usize),
@@ -236,7 +239,8 @@ fn colr_layers(
         return None;
     }
     let (first, count) = (b.u16(record + 2)? as usize, b.u16(record + 4)? as usize);
-    if first + count > layer_count {
+    // Each layer is rasterized over the whole tile.
+    if first + count > layer_count || count > MAX_LAYERS {
         return None;
     }
     // Palette 0.
