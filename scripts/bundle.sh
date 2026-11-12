@@ -63,6 +63,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 the Mightty contributors. MIT License.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>

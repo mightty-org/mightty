@@ -37,6 +37,8 @@ pub struct Config {
     pub option_as_alt: Option<OptionAsAlt>,
     pub confirm_close: ConfirmClose,
     pub save_state: SaveState,
+    /// `auto-update`: look for a new version at launch and daily.
+    pub auto_update: bool,
     pub font_backend: FontBackend,
     /// `grapheme-width`: whether VS16 emoji take two cells (unicode) or one (legacy).
     pub wide_emoji: bool,
@@ -509,6 +511,7 @@ impl Default for Config {
             option_as_alt: None,
             confirm_close: ConfirmClose::Running,
             save_state: SaveState::Default,
+            auto_update: true,
             font_backend: FontBackend::CoreText,
             wide_emoji: true,
             colorspace: Colorspace::Srgb,
@@ -577,6 +580,7 @@ pub fn choices(name: &str) -> &'static [&'static str] {
         "grapheme-width" => &["unicode", "legacy"],
         "window-colorspace" => &["srgb", "display-p3"],
         "window-save-state" => &["default", "never", "always"],
+        "auto-update" => &["check", "off"],
         "cursor-style" => &["block", "bar", "underline", "block_hollow"],
         "clipboard-read" | "clipboard-write" => &["allow", "ask", "deny"],
         "macos-titlebar-style" => &["native", "transparent", "tabs", "hidden"],
@@ -1080,6 +1084,23 @@ const SETTINGS: &[Setting] = &[
                 .into(),
             )
         },
+    },
+    Setting {
+        name: "auto-update",
+        value: "WHEN",
+        help: "check or off: look for a new version of Mightty when it starts and once a day, \
+               and say when there is one. It asks GitHub for the latest release; nothing is \
+               downloaded or installed by itself. Check for Updates in the menu works either way",
+        color: false,
+        set: |c, v| {
+            c.auto_update = match v {
+                "check" => true,
+                "off" => false,
+                _ => return Err("expects check or off".into()),
+            };
+            Ok(())
+        },
+        get: |c| Some(if c.auto_update { "check" } else { "off" }.into()),
     },
     Setting {
         name: "background-opacity",

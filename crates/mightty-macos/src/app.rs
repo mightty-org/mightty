@@ -40,6 +40,7 @@ use crate::scrollbar::{self, Scrollbar};
 use crate::session::{self, Layout, Session};
 use crate::split::{self, Axis, Direction, Divider, Node, Place, Rect};
 use crate::tabbar::{self, TabBar};
+use crate::update;
 
 struct App {
     mux: Arc<Mux>,
@@ -753,6 +754,7 @@ pub fn run(config: Config) -> io::Result<()> {
         .flatten();
         CONFIG_SEEN.set(config_stamp(path.as_deref()));
         run_on_main_after(CONFIG_TICK, on_config_tick);
+        run_on_main_after(UPDATE_FIRST, on_update_tick);
         // As in Ghostty: `kill -USR2` reloads the configuration.
         const SIGUSR2: i32 = 31;
         on_signal_run_on_main(SIGUSR2, on_reload_signal);
@@ -2916,6 +2918,8 @@ enum Asking {
     Paste(PaneId, String),
     /// The field (retained) a new title is typed in.
     Title(PaneId, Id),
+    /// A newer version, to download or read about.
+    Update(String),
 }
 
 thread_local! {
@@ -3030,6 +3034,14 @@ fn answer(window: Id, asking: Asking, response: isize) {
                 });
             }
         }
+        Asking::Update(version) => {
+            let (download, notes) = update::addresses(&version);
+            match response {
+                ALERT_FIRST_BUTTON => open::open(&download),
+                ALERT_SECOND_BUTTON => open::open(&notes),
+                _ => {}
+            }
+        }
         Asking::Title(id, field) => {
             // SAFETY: main thread; the field was retained when the sheet opened.
             let text = unsafe {
@@ -3095,29 +3107,8 @@ fn show_waiting_problems() {
     }
     // SAFETY: main thread; documented signatures.
     unsafe {
-        let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
-        let free = |w: Id| -> bool {
-            let (visible, sheet, attached, main): (Bool, Bool, Id, Bool) = (
-                msg!(w, c"isVisible"),
-                msg!(w, c"isSheet"),
-                msg!(w, c"attachedSheet"),
-                msg!(w, c"canBecomeMainWindow"),
-            );
-            visible != NO && sheet == NO && attached.is_null() && main != NO
-        };
-        let key: Id = msg!(ns_app, c"keyWindow");
-        let window = if !key.is_null() && free(key) {
-            key
-        } else {
-            let ordered: Id = msg!(ns_app, c"orderedWindows");
-            let count: usize = msg!(ordered, c"count");
-            match (0..count)
-                .map(|i| -> Id { msg!(ordered, c"objectAtIndex:", i) })
-                .find(|&w| free(w))
-            {
-                Some(w) => w,
-                None => return,
-            }
+        let Some(window) = free_window() else {
+            return;
         };
         let Some((title, problems)) = PROBLEMS.with_borrow_mut(|p| {
             if p.is_empty() {
@@ -3141,6 +3132,159 @@ fn show_waiting_problems() {
             window,
             &ANSWERED
         );
+    }
+}
+
+/// A window a sheet can go on: the key window, or else the frontmost of
+/// ours, without a sheet already.
+///
+/// # Safety
+/// Main thread.
+unsafe fn free_window() -> Option<Id> {
+    // SAFETY: as the caller promises; documented signatures.
+    unsafe {
+        let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+        let free = |w: Id| -> bool {
+            let (visible, sheet, attached, main): (Bool, Bool, Id, Bool) = (
+                msg!(w, c"isVisible"),
+                msg!(w, c"isSheet"),
+                msg!(w, c"attachedSheet"),
+                msg!(w, c"canBecomeMainWindow"),
+            );
+            visible != NO && sheet == NO && attached.is_null() && main != NO
+        };
+        let key: Id = msg!(ns_app, c"keyWindow");
+        if !key.is_null() && free(key) {
+            return Some(key);
+        }
+        let ordered: Id = msg!(ns_app, c"orderedWindows");
+        let count: usize = msg!(ordered, c"count");
+        (0..count)
+            .map(|i| -> Id { msg!(ordered, c"objectAtIndex:", i) })
+            .find(|&w| free(w))
+    }
+}
+
+/// How long after launch, and how often from then, a newer version is
+/// looked for (`auto-update`).
+const UPDATE_FIRST: Duration = Duration::from_secs(5);
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Looks for a newer version if the settings say to, and again tomorrow.
+extern "C" fn on_update_tick(_: *mut c_void) {
+    if with_app(|app| app.config.auto_update).unwrap_or(false) {
+        update::check(false, on_update_checked);
+    }
+    run_on_main_after(UPDATE_EVERY, on_update_tick);
+}
+
+/// A check for a newer version has ended: says so if the user asked, or
+/// if there is one they haven't been told about.
+extern "C" fn on_update_checked(_: *mut c_void) {
+    let Some((outcome, manual)) = update::take() else {
+        return;
+    };
+    match outcome {
+        update::Outcome::Newer(version) => {
+            const TOLD: &str = "UpdateToldAbout";
+            // SAFETY: main thread; documented signatures.
+            unsafe {
+                let defaults: Id = msg!(class(c"NSUserDefaults"), c"standardUserDefaults");
+                let told = string_from_ns(msg!(defaults, c"stringForKey:", nsstring(TOLD)));
+                // Found on its own, a version is mentioned once.
+                if !manual && told == version {
+                    return;
+                }
+                let Some(window) = free_window() else {
+                    if manual {
+                        let (download, _) = update::addresses(&version);
+                        show_problems(
+                            &format!("Mightty {version} is available"),
+                            &[format!(
+                                "You have {}. Download it from {download}",
+                                update::VERSION
+                            )],
+                        );
+                    }
+                    return;
+                };
+                let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+                call!(
+                    alert,
+                    c"setMessageText:",
+                    nsstring(&format!("Mightty {version} is available"))
+                );
+                call!(
+                    alert,
+                    c"setInformativeText:",
+                    nsstring(&format!(
+                        "You have {}. Download opens the disk image in your browser: \
+                         drag the new Mightty over the old one in Applications.",
+                        update::VERSION
+                    ))
+                );
+                for button in ["Download", "Release Notes", "Later"] {
+                    let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring(button));
+                }
+                if ask(window, alert, Asking::Update(version.clone())) {
+                    call!(
+                        defaults,
+                        c"setObject:forKey:",
+                        nsstring(&version),
+                        nsstring(TOLD)
+                    );
+                }
+            }
+        }
+        update::Outcome::UpToDate if manual => show_problems(
+            "Mightty is up to date",
+            &[format!("Version {} is the latest.", update::VERSION)],
+        ),
+        update::Outcome::Failed(why) if manual => {
+            show_problems("Mightty couldn't check for updates", &[why])
+        }
+        _ => {}
+    }
+}
+
+/// The About panel: the version, and the licences of Mightty and of what
+/// it includes.
+fn show_about() {
+    const CREDITS: &str = "The fast, lightweight terminal for macOS.\n\
+        mightty.org\n\n\
+        Released under the MIT License.\n\n\
+        Includes the themes of iTerm2-Color-Schemes and Symbols Nerd Font, \
+        both under the MIT License; the icon sets in the font keep their own licences.";
+    // SAFETY: main thread; documented signatures.
+    unsafe {
+        let attributes: Id = msg!(new_object(c"NSMutableDictionary"), c"autorelease");
+        let font: Id = msg!(class(c"NSFont"), c"systemFontOfSize:", 11.0f64);
+        let color: Id = msg!(class(c"NSColor"), c"labelColor");
+        call!(attributes, c"setObject:forKey:", font, nsstring("NSFont"));
+        call!(attributes, c"setObject:forKey:", color, nsstring("NSColor"));
+        let credits: Id = msg!(
+            msg!(
+                msg!(class(c"NSAttributedString"), c"alloc"),
+                c"initWithString:attributes:",
+                nsstring(CREDITS),
+                attributes
+            ),
+            c"autorelease"
+        );
+        let options: Id = msg!(new_object(c"NSMutableDictionary"), c"autorelease");
+        let set = |key: &str, value: Id| call!(options, c"setObject:forKey:", value, nsstring(key));
+        set("ApplicationName", nsstring("Mightty"));
+        set("ApplicationVersion", nsstring(update::VERSION));
+        // The build number, which is the version again: shown once.
+        set("Version", nsstring(""));
+        set(
+            "Copyright",
+            nsstring("Copyright © 2026 the Mightty contributors"),
+        );
+        set("Credits", credits);
+        let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+        call!(ns_app, c"activateIgnoringOtherApps:", YES);
+        call!(ns_app, c"orderFrontStandardAboutPanelWithOptions:", options);
     }
 }
 
@@ -5815,6 +5959,8 @@ fn perform(view: Id, action: &Action) {
         Action::JumpToAttention => drop(with_app(App::jump_to_attention)),
         Action::OpenConfig => drop(with_app(|app| app.open_config())),
         Action::OpenSettings => drop(with_app(App::open_settings)),
+        Action::About => show_about(),
+        Action::CheckForUpdates => update::check(true, on_update_checked),
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
@@ -5967,6 +6113,9 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
     unsafe {
         let bar = new_object(c"NSMenu");
         let app_menu = submenu(bar, "Mightty");
+        add_action(app_menu, "About Mightty", Action::About);
+        add_action(app_menu, "Check for Updates…", Action::CheckForUpdates);
+        separator(app_menu);
         add_action(app_menu, "Settings…", Action::OpenSettings);
         add_item(
             app_menu,
