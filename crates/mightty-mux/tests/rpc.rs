@@ -51,6 +51,25 @@ fn spawn_read_wait_exit() {
     assert!(call(&mux, "pane.list", "{}").as_array().unwrap().is_empty());
 }
 
+/// A program can close the terminal and go on running; the pane stays
+/// usable meanwhile.
+#[test]
+fn pane_answers_while_its_program_runs_detached() {
+    let mux = Mux::new(Arc::new(Headless));
+    let pane = call(
+        &mux,
+        "pane.spawn",
+        r#"{"command": "exec </dev/null >/dev/null 2>&1; sleep 2", "shell": "/bin/sh", "visible": false}"#,
+    );
+    let pane = mux.pane(pane["id"].as_u64().unwrap()).unwrap();
+    // Time for the reader to see the terminal closed.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let start = std::time::Instant::now();
+    pane.hides_input();
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    mux.close(pane.id);
+}
+
 #[test]
 fn errors_are_reported() {
     let mux = Mux::new(Arc::new(Headless));

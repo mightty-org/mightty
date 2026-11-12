@@ -659,13 +659,19 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                     host.pane_status(pane.id);
                 }
             }
-            let code = pane
-                .pty
-                .lock()
-                .unwrap()
-                .wait()
-                .ok()
-                .and_then(|status| status.code());
+            // Polled, not waited on with the pty locked: a child can close
+            // the terminal and go on running, and typing, resizing and
+            // asking what's in the foreground all take the lock.
+            let mut pause = Duration::from_millis(1);
+            let status = loop {
+                match pane.pty.lock().unwrap().try_wait() {
+                    Ok(None) => {}
+                    done => break done.ok().flatten(),
+                }
+                thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(250));
+            };
+            let code = status.and_then(|status| status.code());
             *pane.exit.lock().unwrap() = Some(code);
             pane.notify();
             if pane.update_status() {
