@@ -114,6 +114,31 @@ fn run_uses_bash_integration() {
     }
 }
 
+/// A command bash doesn't save to history is still the one reported, not
+/// the last one saved.
+#[test]
+fn bash_command_kept_out_of_history() {
+    for shell in ["/bin/bash", "/opt/homebrew/bin/bash"] {
+        let profile = "PS1='ready> '\nHISTCONTROL=ignorespace\n";
+        let Some((mux, id)) =
+            check_integration(shell, &[(".bash_profile", profile)], BASH_7, ECHO_NONCE)
+        else {
+            continue;
+        };
+        let out = call(
+            &mux,
+            "pane.run",
+            &format!(r#"{{"pane": {id}, "command": " echo unsaved"}}"#),
+        );
+        assert_eq!(
+            out["command"].as_str(),
+            Some("echo unsaved"),
+            "{shell}: {out}"
+        );
+        mux.close(id);
+    }
+}
+
 /// bash 5.1+ can keep PROMPT_COMMAND as an array, each element run in turn.
 #[test]
 fn bash_prompt_command_array() {

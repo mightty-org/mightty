@@ -57,8 +57,12 @@ else
   # prompt is what the user typed. `_mightty_at_prompt` is set last in
   # PROMPT_COMMAND, so PROMPT_COMMAND's own commands don't count.
   _mightty_at_prompt=0
+  # The newest history entry at the prompt: unchanged after a command, it
+  # wasn't saved (HISTCONTROL, HISTIGNORE) and isn't the one typed.
+  _mightty_last=
   _mightty_ready() {
     _mightty_at_prompt=1
+    _mightty_last=$(HISTTIMEFORMAT= builtin history 1)
   }
   _mightty_debug() {
     (( _mightty_at_prompt )) || builtin return 0
@@ -67,6 +71,7 @@ else
     # What was typed, from history: "  42  make test" → "make test".
     local line
     line=$(HISTTIMEFORMAT= builtin history 1)
+    [[ "$line" == "$_mightty_last" ]] && line=
     line=${line#"${line%%[![:space:]]*}"}
     line=${line#"${line%%[![:digit:]]*}"}
     line=${line#\*}
