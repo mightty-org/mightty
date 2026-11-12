@@ -308,7 +308,7 @@ defaults apart from grid and font (kitty with `--config NONE`). mightty is
 not: `bench/compare.sh` runs it as a pane of the mightty already open
 (`mightty ctl spawn`), with that instance's settings, so these numbers don't
 compare like for like. The full suite below launches all three fresh; there
-plain ASCII comes out at 213, 200 and 99 MiB/s. Single runs swing ±10% on a
+plain ASCII comes out at 239, 213 and 103 MiB/s. Single runs swing ±10% on a
 busy machine; long_lines and scroll_region sit at the PTY ceiling for both
 terminals and trade places between runs.
 
@@ -332,55 +332,53 @@ turns round by round: 10 startups and 3 sessions each, M2, macOS 15.
 | | mightty | ghostty | kitty |
 |---|---|---|---|
 | **Startup** | | | |
-| launch → command running (median) | **67 ms** | 139 ms | 394 ms |
+| launch → command running (median) | **57 ms** | 157 ms | 370 ms |
 | **Idle (10 s)** | | | |
-| CPU, avg | **0.0 %** | **0.0 %** | **0.0 %** |
-| RSS, median | **51 MiB** | 89 MiB | 94 MiB |
-| footprint (≈PSS), median | **28 MiB** | 65 MiB | 68 MiB |
+| CPU, avg | **0.1 %** | 0.5 % | 0.5 % |
+| RSS, median | **58 MiB** | 91 MiB | 100 MiB |
+| footprint (≈PSS), median | **41 MiB** | 72 MiB | 102 MiB |
 | **Under load (throughput runs)** | | | |
-| CPU, avg | **85.1 %** | 230.7 % | 113.1 % |
-| RSS, median | **80 MiB** | 151 MiB | 83 MiB |
-| footprint (≈PSS), median | **71 MiB** | 129 MiB | 79 MiB |
+| CPU, avg | **89.0 %** | 227.7 % | 117.0 % |
+| RSS, median | 95 MiB | 150 MiB | **91 MiB** |
+| footprint (≈PSS), median | **78 MiB** | 130 MiB | 116 MiB |
 | **Distribution under load** | | | |
-| CPU avg | **85 %** | 231 % | 113 % |
-| CPU P50 | **86 %** | 230 % | 116 % |
-| CPU P75 | **89 %** | 243 % | 123 % |
-| CPU P90 | **91 %** | 250 % | 128 % |
-| CPU P95 | **93 %** | 254 % | 131 % |
-| RSS avg | **76 MiB** | 156 MiB | 90 MiB |
-| RSS P50 | **80 MiB** | 151 MiB | 83 MiB |
-| RSS P75 | **88 MiB** | 162 MiB | 104 MiB |
-| RSS P90 | **88 MiB** | 189 MiB | 109 MiB |
-| RSS P95 | **88 MiB** | 200 MiB | 109 MiB |
-| footprint avg | **67 MiB** | 136 MiB | 79 MiB |
-| footprint P50 | **71 MiB** | 129 MiB | 79 MiB |
-| footprint P75 | **75 MiB** | 146 MiB | 79 MiB |
-| footprint P90 | **76 MiB** | 169 MiB | 79 MiB |
-| footprint P95 | **76 MiB** | 178 MiB | 79 MiB |
+| CPU avg | **89 %** | 228 % | 117 % |
+| CPU P50 | **89 %** | 227 % | 118 % |
+| CPU P75 | **91 %** | 240 % | 123 % |
+| CPU P90 | **95 %** | 250 % | 127 % |
+| CPU P95 | **96 %** | 264 % | 128 % |
+| RSS avg | **90 MiB** | 158 MiB | 93 MiB |
+| RSS P50 | 95 MiB | 150 MiB | **91 MiB** |
+| RSS P75 | 105 MiB | 164 MiB | **99 MiB** |
+| RSS P90 | 107 MiB | 191 MiB | **99 MiB** |
+| RSS P95 | 107 MiB | 201 MiB | **99 MiB** |
+| footprint avg | **73 MiB** | 140 MiB | 116 MiB |
+| footprint P50 | **78 MiB** | 130 MiB | 116 MiB |
+| footprint P75 | **85 MiB** | 148 MiB | 116 MiB |
+| footprint P90 | **85 MiB** | 171 MiB | 118 MiB |
+| footprint P95 | **87 MiB** | 180 MiB | 119 MiB |
 | **Memory after output** | | | |
-| RSS after ~140 MB | **61 MiB** | 141 MiB | 95 MiB |
-| footprint after ~140 MB | **56 MiB** | 77 MiB | 79 MiB |
-| RSS after ~260 MB | **61 MiB** | 141 MiB | 91 MiB |
-| footprint after ~260 MB | **56 MiB** | 78 MiB | 79 MiB |
+| RSS after ~140 MB | **65 MiB** | 138 MiB | 91 MiB |
+| footprint after ~140 MB | **53 MiB** | 79 MiB | 113 MiB |
+| RSS after ~260 MB | **68 MiB** | 139 MiB | 90 MiB |
+| footprint after ~260 MB | **55 MiB** | 82 MiB | 113 MiB |
 | **Throughput** (median) | | | |
-| plain ASCII | **213 MiB/s** | 200 MiB/s | 99 MiB/s |
-| SGR-colour heavy | **169 MiB/s** | 158 MiB/s | 83 MiB/s |
-| CJK / Unicode | **158 MiB/s** | 152 MiB/s | 86 MiB/s |
-| random cursor addressing (4 MB) | **169 MiB/s** | 156 MiB/s | 40 MiB/s |
+| plain ASCII | **239 MiB/s** | 213 MiB/s | 103 MiB/s |
+| SGR-colour heavy | **186 MiB/s** | 162 MiB/s | 121 MiB/s |
+| CJK / Unicode | **162 MiB/s** | 150 MiB/s | 87 MiB/s |
+| random cursor addressing (4 MB) | **171 MiB/s** | 136 MiB/s | 93 MiB/s |
 | **Response latency** (DSR round trip) | | | |
-| idle, median | **0.218 ms** | 0.297 ms | 0.329 ms |
-| idle, P95 | **0.440 ms** | 0.590 ms | 0.714 ms |
-| under flood, median | **0.040 ms** | 0.200 ms | 4.035 ms |
-| under flood, P95 | **0.077 ms** | 0.400 ms | 6.878 ms |
+| idle, median | **0.135 ms** | 0.193 ms | 0.196 ms |
+| idle, P95 | **0.336 ms** | 0.532 ms | 0.348 ms |
+| under flood, median | **0.046 ms** | 0.202 ms | 4.413 ms |
+| under flood, P95 | **0.111 ms** | 0.405 ms | 7.338 ms |
 | **Steady 250 lines/s** | | | |
-| CPU, avg | 7.9 % | 45.0 % | **4.5 %** |
+| CPU, avg | **8.8 %** | 28.6 % | 9.4 % |
 
-Absolute throughput moves with machine load from run to run (this run's
-ASCII medians are lower for all three than the previous one); compare
-across a row of one run. The steady 250 lines/s row above predates frame
-pacing (below), when it was mightty's one loss; in a later mightty–kitty
-run it was 4.9 % against kitty's 8.5 %. That kitty figure differs a lot
-from the 4.5 % above, so treat this row as noisy.
+Absolute numbers move with the machine from run to run, memory too: in an
+earlier run idle footprint was 28, 65 and 68 MiB, and the same build of
+mightty measured again beside this one idles where this table says.
+Compare across a row of one run.
 
 ```sh
 python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]  # full suite above; launches each terminal itself
