@@ -1888,11 +1888,13 @@ impl Term {
         let graphemes = mem::take(&mut self.graphemes);
         let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
-        let (mark_nonce, theme, cell_pixels, wide_emoji) = (
+        // What the embedder set, which output mustn't undo.
+        let (mark_nonce, theme, cell_pixels, wide_emoji, image_files) = (
             self.mark_nonce.take(),
             mem::take(&mut self.theme),
             self.cell_pixels,
             self.wide_emoji,
+            self.image_files,
         );
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
         (
@@ -1900,7 +1902,8 @@ impl Term {
             self.theme,
             self.cell_pixels,
             self.wide_emoji,
-        ) = (mark_nonce, theme, cell_pixels, wide_emoji);
+            self.image_files,
+        ) = (mark_nonce, theme, cell_pixels, wide_emoji, image_files);
         self.modes.grapheme_cluster = wide_emoji;
         // The configured font again, if a program had changed it (OSC 50).
         self.font_request = Some(None);

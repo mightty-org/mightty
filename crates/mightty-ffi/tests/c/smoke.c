@@ -82,6 +82,12 @@ int main(void) {
     char reply[64];
     CHECK(mightty_term_take_responses(t, (uint8_t *)reply, sizeof reply, &len) == MIGHTTY_OK);
     CHECK(len > 12 && memcmp(reply, "\x1b_Gi=1;EINVAL", 12) == 0);
+    /* Nor after a reset (RIS), which output can ask for. */
+    mightty_term *r = mightty_term_new(20, 5, 100);
+    feed(r, "\x1b" "c\x1b_Ga=t,t=f,f=100,i=1;L2V0Yy9ob3N0cw==\x1b\\");
+    CHECK(mightty_term_take_responses(r, (uint8_t *)reply, sizeof reply, &len) == MIGHTTY_OK);
+    CHECK(len > 12 && memcmp(reply, "\x1b_Gi=1;EINVAL", 12) == 0);
+    mightty_term_free(r);
 
     /* Text extraction. */
     char text[64];
