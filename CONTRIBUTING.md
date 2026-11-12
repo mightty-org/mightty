@@ -24,6 +24,10 @@ scripts/bundle.sh --install         # Mightty.app in ~/Applications
 prints what it left on screen, which is the quickest way to check terminal
 behaviour by hand.
 
+`MIGHTTY_SNAPSHOT=path` makes the app write every frame it draws to a PNG,
+for debugging the renderer. `docs/performance.md` describes the benchmarks
+in `bench/` and how to run them.
+
 ## Rules the code follows
 
 - **No third-party crates.** Only Rust's standard library and what macOS

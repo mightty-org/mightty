@@ -37,8 +37,8 @@ scripts/bundle.sh --install                     # Mightty.app in ~/Applications
   default keys: `crates/mightty-macos/src/bindings.rs`.
 - Control socket methods: `crates/mightty-mux/src/rpc.rs`. `mightty ctl`:
   `crates/mightty/src/ctl.rs`. MCP tools: `crates/mightty-mcp/src/lib.rs`.
-- Benchmarks: `bench/`. Read `README.md`'s Performance section before
-  quoting numbers; the two benchmark scripts measure differently.
+- Benchmarks: `bench/`. Read `docs/performance.md` before quoting numbers;
+  the two benchmark scripts measure differently.
 - Releases: `.github/workflows/release.yml`, run by a `v*` tag; how to
   make one, and the signing secrets, are in `RELEASING.md`.
 

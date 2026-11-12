@@ -1,517 +1,184 @@
-# mightty
+<p align="center">
+  <img src="assets/icon.png" width="128" height="128" alt="Mightty">
+</p>
 
-The fast, lightweight terminal for macOS. Downloads and documentation are
-at [mightty.org](https://mightty.org).
+<h1 align="center">Mightty</h1>
 
-## Ground rules
+<p align="center">
+  The fast, lightweight terminal for macOS.<br>
+  <a href="https://mightty.org">Website</a> ·
+  <a href="https://mightty.org/docs/install/">Install</a> ·
+  <a href="https://mightty.org/docs/">Documentation</a> ·
+  <a href="https://mightty.org/changelog/">Changelog</a>
+</p>
 
-- **Zero third-party crates.** Only Rust `std` and APIs the OS ships
-  (Cocoa/Metal/CoreText, Wayland/X11, Win32/D3D, `openpty`, ConPTY).
-  `scripts/check-no-deps.sh` enforces it.
-- **Small core, everything else over one protocol.** Plugins, the CLI, and AI
-  agents all talk JSON-RPC to the same control socket. Plugins are separate
-  processes, so there is no embedded runtime and a crashing plugin can't take
-  the terminal down.
-- **The core knows nothing about AI.** It exposes structured context (OSC 133
-  command blocks, cwd, scrollback) and an MCP server; agents bring their own
-  networking.
+<p align="center">
+  <a href="https://github.com/mightty-org/mightty/actions/workflows/ci.yml"><img src="https://github.com/mightty-org/mightty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
-## Layout
+Mightty is a GPU-rendered terminal emulator for macOS, written in Rust with
+no third-party dependencies. It talks to AppKit, Metal and CoreText directly,
+starts in under 60 ms, and stays responsive under heavy output. It is also
+built to work with coding agents: it knows when one is waiting for you, and
+agents and scripts can drive it through MCP and a control socket.
 
-| Crate | Role |
-|---|---|
-| `mightty-vt` | Byte-level VT parser (Williams state machine + UTF-8, sub-params, APC) |
-| `mightty-term` | Terminal state: grids, scrollback, cursor, modes, OSC 133 marks, kitty graphics |
-| `mightty-pty` | PTY spawning via hand-written `openpty` FFI |
-| `mightty-render` | Platform-independent rendering: palette, procedural box drawing and block elements |
-| `mightty-image` | PNG and DEFLATE decoders in plain Rust, for colour emoji and kitty graphics |
-| `mightty-font` | Font files and glyph rasterization in plain Rust (TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji: sbix, CBDT and COLR, OpenType shaping: GSUB substitutions and GPOS mark positioning), for platforms without CoreText |
-| `mightty-ffi` | **libmightty**: stable C ABI over the core (`include/mightty.h`) |
-| `mightty-json` | Minimal JSON value, parser and serializer |
-| `mightty-mux` | Pane multiplexer, JSON-RPC control socket, zsh, bash and fish shell integration |
-| `mightty-mcp` | MCP server (stdio) exposing panes to AI agents |
-| `mightty-macos` | Cocoa window via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas |
-| `mightty` | The binary: window by default, `run` for headless |
+## Features
 
-## Try it
+- **Fast and light.** 239 MiB/s of plain text, a window with a shell in
+  57 ms, and 41 MiB of memory at idle. See [Performance](#performance).
+- **Tabs, splits and a quick terminal.** Tabs can be dragged between
+  windows, a closed tab can be brought back with its programs still
+  running, and a terminal can slide down over any app on a global key.
+- **Aware of coding agents.** Mightty marks the pane where Claude Code,
+  Codex or another agent is waiting, counts it on the Dock icon and sends a
+  notification. `mightty mcp` lets an agent open panes, run commands and
+  read their output.
+- **Scriptable.** Everything the app can do to a pane is available over a
+  JSON-RPC control socket and from `mightty ctl`.
+- **Modern terminal protocols.** Kitty graphics and keyboard protocols,
+  Unicode 17 with grapheme clusters, styled underlines, hyperlinks, and
+  shell integration for zsh, bash and fish with no dotfile changes.
+- **Settings you can browse.** A settings screen in a terminal tab with
+  completion and live previews, backed by a plain config file that uses
+  Ghostty's names. 819 themes are built in.
+- **Embeddable core.** The parser and terminal state are available as
+  `libmightty`, a C library with a stable ABI.
+
+## Install
+
+Download the latest release from [mightty.org](https://mightty.org), open
+the disk image and drag Mightty to Applications. Mightty runs on macOS 12 or
+later, on Apple Silicon and Intel.
+
+To build from source, you need the Xcode command line tools and Rust from
+[rustup.rs](https://rustup.rs):
+
+```sh
+git clone https://github.com/mightty-org/mightty.git
+cd mightty
+scripts/bundle.sh --install     # builds Mightty.app and copies it to ~/Applications
+```
+
+During development:
 
 ```sh
 cargo run --release                     # open a window with your login shell
-cargo run --release -- -e htop          # open a window running a program; closes when it exits
-cargo run --release -- run -- ls -la    # headless: run, print the final screen
-cargo test
+cargo run --release -- -e htop          # open a window running a program
+cargo run --release -- run -- ls -la    # no window: run a program and print its screen
+cargo test --workspace
 ```
 
-As an app, with an icon in the Dock and banners when a pane needs you while
-you're elsewhere (macOS delivers notifications only to app bundles):
+## Documentation
 
-```sh
-scripts/bundle.sh                       # target/release/Mightty.app, signed ad hoc
-scripts/bundle.sh --install             # copied to ~/Applications
-```
+The documentation is at [mightty.org/docs](https://mightty.org/docs/):
 
-Releases are built, signed and notarized by GitHub Actions when a version
-tag is pushed; see [RELEASING.md](RELEASING.md).
+| | |
+|---|---|
+| [First steps](https://mightty.org/docs/getting-started/) | The keys you will use every day |
+| [Settings](https://mightty.org/docs/settings/) | The settings screen, the config file and every setting |
+| [Key bindings](https://mightty.org/docs/keybindings/) | Changing keys, and every action |
+| [Agents and scripting](https://mightty.org/docs/agents/) | Agent attention, MCP and `mightty ctl` |
+| [Protocols](https://mightty.org/docs/protocols/) | The escape sequences Mightty supports |
+| [Architecture](https://mightty.org/docs/architecture/) | Layers, threads, data flow and trust boundaries |
 
-Clicking a banner brings its pane to the front. The icon is drawn by
-`scripts/make-icon.py` (`scripts/make-icon.sh` rebuilds `assets/mightty.icns`).
-
-Settings live in `~/.config/mightty/config` (or `$XDG_CONFIG_HOME/mightty/config`),
-one `name = value` per line, `#` for comments. Every setting also works as a
-`--name=value` flag, which wins over the file. Names are Ghostty's where the
-meaning is the same. `mightty --help` lists them all with current values.
-
-```
-# ~/.config/mightty/config
-font-family = JetBrains Mono
-font-size = 13
-window-width = 120
-window-height = 36
-scrollback-lines = 50000
-theme = Dracula
-cursor-color = #ff79c6
-```
-
-| Setting | Default | |
-|---|---|---|
-| `font-family`, `font-size` | `Menlo`, `14` | Font and size in points. Repeat `font-family` for fallbacks, tried in order before the ones macOS picks (Nerd Font icons come from a built-in Symbols Nerd Font, so prompts and file listers need no patched font); each source (the file, then flags) gives the whole list, and an empty value clears it, as in Ghostty. A name mightty can't find is reported |
-| `font-family-bold`, `font-family-italic`, `font-family-bold-italic` | from `font-family` | A different family for bold or italic text; unset, the family's own bold and italic, or ones made from it |
-| `font-feature` | | OpenType features, repeated: `ss01` (or `+ss01`) on, `-calt` off, `cv01=2` an alternate; they apply to single characters (`zero`) as well as ligatures. An empty value clears them |
-| `font-variation`, `font-variation-bold`, `font-variation-italic`, `font-variation-bold-italic` | | Variable font axes, repeated: `wght=450`, `slnt=-10` |
-| `window-width`, `window-height` | `100`, `30` | Size of new windows, in cells |
-| `scrollback-lines` | `10000` | Lines kept above the screen |
-| `window-vsync` | `true` | Show frames only at a display refresh; `false` cuts keypress-to-screen time (below) but may tear |
-| `undo-timeout` | `5s` | How long a closed tab, pane or window keeps running, hidden, so undo (⌘Z) brings it back as it was: `500ms`, `1m`, or `0` for not at all, as in Ghostty |
-| `quick-terminal-position` | `top` | `top`, `bottom`, `left`, `right` or `center`: where the quick terminal appears, on the screen with the mouse, sliding in from that edge |
-| `quick-terminal-size` | `40%` | How far the quick terminal comes in from its edge, then how much of the edge it runs along (all of it when left out), as a share of the screen (`40%`) or points (`500px`), as in Ghostty: `30%,1200px`. Centred: its width, then height |
-| `quick-terminal-autohide` | `true` | Hide the quick terminal when another window or app takes the keys |
-| `macos-auto-secure-input` | `true` | Turn on Secure Keyboard Entry while a program reads a password (a whole line, not echoed, as sudo and ssh ask), so other apps can't read the keys, as in Ghostty; off again once it's read, and while mightty isn't the active app |
-| `bell-features` | `system,title` | What a bell does, as in Ghostty: a comma list of `system` (the alert sound), `audio` (`bell-audio-path`'s sound), `attention` (the Dock icon bounces once while mightty is in the background), `title` (🔔 on the pane's tab and window title until it's typed in or looked at) and `border` (the pane's edge flashes in the accent colour); `no-NAME` turns one off. A bell in a pane you aren't looking at also marks it as needing you |
-| `bell-audio-path` | | A sound file for `bell-features = audio`: any format macOS plays (aiff, wav, mp3, m4a) |
-| `macos-titlebar-style` | `native` | `native`; `transparent`: the title bar in the terminal's background colour, so window and terminal are one surface; `tabs`: the tab bar in the title bar's place, beside the window's buttons; `hidden`: no title bar or window buttons, the terminal reaching the top (dragged by its top padding), the tab bar at the top from two tabs. As in Ghostty |
-| `macos-option-as-alt` | by layout | `true`, `false`, `left` or `right`: Option keys that act as Alt instead of typing characters (å, `@`, dead keys). Unset: `true` on the US and ABC layouts, else `false`, as in Ghostty |
-| `confirm-close-surface` | `true` | Ask before closing a pane (⌘W), a window or tab, or mightty: `true` while a command or agent runs in it, `always`, or `false`, as in Ghostty |
-| `font-ligatures` | `true` | Draw the font's ligatures and contextual alternates (`->`, `!=`, `===` in fonts such as JetBrains Mono and Fira Code), each kept to the cells it covers; never across the cursor or a change of colour or style |
-| `font-backend` | `coretext` | `mightty` draws glyphs with mightty's own rasterizer (`mightty-font`: TrueType and CFF fonts, variable fonts, colour emoji, ligatures, accents, and the fallback fonts CoreText picks; CoreText still finds fonts and draws fonts in Apple's own formats: `morx` composition, as in Menlo and Apple Color Emoji, and `hvgl` outlines). For testing: the rasterizer is for platforms without CoreText |
-| `grapheme-width` | `unicode` | `unicode` draws emoji written with VS16 (`❤️`, `☀️`, keycaps) two cells wide, as Ghostty and kitty do. `legacy` keeps them one cell (drawn shrunk to fit), as zsh and bash count them, so a command line holding one redraws cleanly; programs can still switch with mode 2027 |
-| `window-colorspace` | `srgb` | The colour space colours and images are taken to be in, as in Ghostty: `display-p3` shows the same numbers more saturated on a wide-gamut display, such as a MacBook's |
-| `window-save-state` | `default` | Reopen windows, tabs and splits where they were, each pane a new shell in its old directory: `always`, `never`, or `default`, which follows macOS (only when "Close windows when quitting an application" is off in System Settings → Desktop & Dock), as in Ghostty. Saved in `~/Library/Application Support/mightty/session.json` |
-| `background-opacity` | `1` | Opacity of the default background, 0 to 1; below 1 the desktop shows through (cells with their own background stay solid) |
-| `background-blur` | `false` | Blur what shows through a translucent background: `true` (radius 20), `false`, or a radius in points |
-| `window-padding-x`, `window-padding-y` | `6`, `6` | Space around the text, in points |
-| `cursor-style` | `block` | `block`, `bar`, `underline` or `block_hollow`, unless the program picks one |
-| `cursor-style-blink` | as the program asks | `true` or `false`; typing keeps it on for a moment |
-| `adjust-cell-width`, `adjust-cell-height` | `0` | Wider or taller cells than the font gives: points (`1`, `-1`) or a percentage (`10%`); taller cells space lines out |
-| `unfocused-split-opacity` | `0.7` | Panes keys aren't going to are dimmed to this, 0.15 to 1 |
-| `clipboard-write`, `clipboard-read` | `allow`, `ask` | Programs setting and reading the clipboard through OSC 52, as vim, tmux and ssh sessions do to copy: `allow`, `ask` (a sheet with the text, control characters shown, Deny first so Return refuses) or `deny`, as in Ghostty. Once you deny a pane, it isn't asked again for a minute |
-| `clipboard-paste-protection` | `true` | Ask before pasting text that would run at once (line breaks into a shell not using bracketed paste) or act as keys (control characters): a program may have set the clipboard |
-| `copy-on-select` | `false` | Copy text to the clipboard as soon as it's selected (a drag, or a double- or triple-click) |
-| `mouse-hide-while-typing` | `false` | Hide the pointer while typing, until the mouse moves |
-| `scrollbar` | `system` | `system`: macOS's overlay scrollbar at a pane's right edge while scrolling through history, to drag or click, hidden a moment after; not for output arriving, nor on the alternate screen. `never`: none, as in Ghostty |
-| `password-mask` | `true` | A `*` at the cursor for each character typed at a password prompt (a program reading a line without echoing it, as sudo and ssh do), so typing can be seen to work. mightty draws them; the program and scrollback never see them. Backspace takes one away; Ctrl-U clears them |
-| `mouse-scroll-multiplier` | `1` | Scroll this many times as far as the wheel or trackpad says |
-| `keybind` | below | `TRIGGER=ACTION`: a key and what it does (see Key bindings) |
-| `theme` | | Colours from `themes/NAME` in the config directory, else the bundled theme of that name (~800, iTerm2-Color-Schemes, MIT: `THEMES-LICENSE` in the app; each theme's own copyright is its author's), or a path. `light:NAME,dark:NAME` follows macOS's appearance and switches when it changes |
-| `config-file` | | Another config file to read after this one, relative to it (`?PATH` if it may be missing), as in Ghostty; in the file, or `--config-file` |
-| `background`, `foreground` | `#1e1e1e`, `#d8d8d8` | Default colours |
-| `cursor-color`, `cursor-text` | text colour, cell background | Cursor and the text under a block cursor |
-| `selection-background`, `selection-foreground` | `#3e4451`, unchanged | Selected text |
-| `search-background`, `search-foreground` | `#e5c07b`, `#1e1e1e` | Search matches |
-| `search-selected-background`, `search-selected-foreground` | `#ff8c32`, `#1e1e1e` | The match the search is on |
-| `palette` | xterm | `palette = N=#rrggbb`, one line per entry |
-| `command`, `working-directory` | login shell, home | First window only |
-
-Themes are config files containing only colour settings, in the same format
-as Ghostty's, so Ghostty's ~800 bundled themes work unchanged: copy one from
-`/Applications/Ghostty.app/Contents/Resources/ghostty/themes/` into
-`~/.config/mightty/themes/`. Settings after `theme` override it.
-
-⌘, (mightty → Settings…) opens the settings in a window of their own:
-`mightty config`, a full-screen list of every setting by section, with its
-value and help. Return edits one (or toggles it), suggesting the values it
-takes as you type (→ or Tab takes the suggestion, ↑↓ another), `d` puts it
-back to its default, `/` searches, `t` picks a theme from the ~800 bundled
-ones (the iTerm2-Color-Schemes collection, as Ghostty bundles them), and
-Return on a font picks one of those installed, monospaced or (Tab) all;
-both pickers preview each choice on the settings window as you move.
-`e` opens the file in your `$EDITOR`. Changes are written
-into the config file, its comments and order kept. Open Config File
-(`open_config`) opens the file in `$EDITOR` in a new tab, creating it from
-a commented template first. mightty applies the file whenever it changes,
-from any editor; Reload Configuration (⌘⇧,), or `kill -USR2`, as in Ghostty,
-does it at once.
-
-### Key bindings
-
-`keybind = TRIGGER=ACTION` binds a key, as in Ghostty; repeat it for more.
-A trigger is modifiers (`cmd`, `ctrl`, `alt`, `shift`) and a key joined by
-`+`: a character as typed without modifiers (`t`, `[`, `=`) or a name
-(`enter`, `tab`, `space`, `escape`, `backspace`, `delete`, arrows `up`/`down`/
-`left`/`right`, `home`, `end`, `page_up`, `page_down`, `f1`…`f12`, `plus`).
-`TRIGGER=unbind` removes a binding, and `keybind = clear` removes them all,
-defaults included. Menu items show the first key bound to their action.
-A trigger starting `global:` works whichever app is active, as in Ghostty;
-no Accessibility permission is needed, and keys are found by their place on
-a US keyboard.
-
-```
-keybind = cmd+shift+t=new_tab
-keybind = ctrl+shift+h=text:echo hello\r
-keybind = cmd+k=unbind
-keybind = global:ctrl+grave_accent=toggle_quick_terminal
-```
-
-| Action | Default | |
-|---|---|---|
-| `new_window`, `new_tab` | ⌘N, ⌘T | |
-| `new_split:right`, `new_split:down` | ⌘D, ⌘⇧D | |
-| `close_surface`, `close_window`, `minimize_window`, `quit` | ⌘W, ⌘⇧W, ⌘M, ⌘Q | |
-| `copy_to_clipboard`, `paste_from_clipboard` | ⌘C, ⌘V | |
-| `start_search`, `navigate_search:next`, `navigate_search:previous` | ⌘F, ⌘G, ⌘⇧G | |
-| `goto_split:previous`, `goto_split:next` | ⌘[, ⌘] | |
-| `goto_split:left` (`right`, `up`, `down`) | ⌘⌥ and an arrow | |
-| `resize_split:left,10` (`right`, `up`, `down`; points) | ⌘⌃ and an arrow | |
-| `toggle_split_zoom`, `equalize_splits` | ⌘⇧↩, ⌘⌃= | |
-| `goto_tab:N`, `last_tab`, `previous_tab`, `next_tab` | ⌘1…⌘8, ⌘9, ⌘⇧[, ⌘⇧] | |
-| `jump_to_attention` | ⌘⇧A | The pane waiting longest for you |
-| `open_settings`, `open_config`, `reload_config` | ⌘,, —, ⌘⇧, | The settings window (`mightty config`); the config file in `$EDITOR`; applying the file now |
-| `move_tab_to_new_window`, `close_other_tabs` | | The key window's tab out into a window of its own; its other tabs closed (each undoable). Also in the tab's right-click menu and the Window menu |
-| `undo` | ⌘Z | Undo Close (Edit menu): brings back the last tab, pane or window closed, as it was, within `undo-timeout`, as in Ghostty: its shell kept running meanwhile, hidden |
-| `reopen_closed` | ⌘⇧T | Reopen Closed (Shell menu): the last tab, pane or window closed, back in its place; still running within `undo-timeout`, else new shells in the same folders, with the same splits and titles (the last 20 closes) |
-| `prompt_surface_title` | | Change Title… (Shell menu, command palette): a title for the pane, shown in its tab and the window instead of its program's, and kept when windows are restored; empty goes back to the program's |
-| `toggle_command_palette` | ⌘⇧P | Actions by name, as in Ghostty: type to filter (`nt` finds New Tab), ↑↓ to choose, Return to run, Esc to close; each shows its key |
-| `toggle_quick_terminal` | | The quick terminal (Window → Quick Terminal): a window that drops from the top of the screen over any app, on every Space; again to hide it. Bind it globally: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` |
-| `toggle_secure_input` | | Secure Keyboard Entry (mightty → Secure Keyboard Entry): other apps can't read the keys typed |
-| `increase_font_size:1`, `decrease_font_size:1`, `reset_font_size` | ⌘=, ⌘-, ⌘0 | The pane keys go to, in points |
-| `clear_screen` | ⌘K | History and the screen above the prompt |
-| `scroll_to_top`, `scroll_to_bottom`, `scroll_page_up`, `scroll_page_down` | ⌘Home, ⌘End, ⌘PgUp, ⌘PgDn | |
-| `text:…`, `csi:…`, `esc:…` | | Send bytes to the program: `text:` takes `\n`, `\r`, `\t`, `\e`, `\\`, `\xHH`; `csi:2J` sends `ESC [ 2J` |
-| `ignore` | | The key does nothing |
-
-A typo in the config file is reported with its line number (on stderr, and in
-a sheet when reloading) and the rest still applies; a bad flag stops with an error.
-`--config-file=PATH` loads an extra file and `--config-default-files=false`
-skips the default one (the benchmark suite uses it).
-
-```sh
-mightty --window-width=120 --window-height=40 -e htop
-```
-
-`MIGHTTY_SNAPSHOT=path` writes every rendered frame to a PNG, for debugging
-and visual tests.
-
-## Agents and scripting
-
-Every mightty serves a JSON-RPC control socket (per-user directory, mode
-0700; mightty refuses a directory someone else owns or a symlink). Panes are owned by the mux, not the windows, so anything that speaks
-the protocol can open, drive and read them.
-
-```sh
-mightty ctl list                                  # panes, state, window/tab (* where keys go), cwd
-mightty ctl run --pane 1 -- make test             # types it, waits, prints output, exits with its code
-P=$(mightty ctl spawn -- npm run dev)             # new window
-mightty ctl spawn --right -- cargo watch          # split right of this pane (--down, --tab; --beside N)
-mightty ctl focus $P                              # bring it to the front
-mightty ctl attention                             # panes needing you, longest waiting first
-mightty ctl notify "Approve the migration?"       # flag this pane as needing you
-mightty ctl wait $P --text "ready" && mightty ctl read $P
-mightty ctl keys $P ctrl-c
-mightty ctl watch command.finished pane.title      # events as JSON lines (default: all)
-```
-
-**Events.** A connection that calls `events.subscribe` (`{"events":
-["pane.*", "command.finished"]}`, or no params for all) is sent JSON-RPC
-notifications named after the event: `pane.opened`, `pane.closed`,
-`pane.exited` (`exit_code`), `pane.focused`, `pane.title`, `pane.cwd`,
-`pane.status` (`status`, `attention`), and with shell integration
-`command.started` and `command.finished` (`command`, `exit_code`,
-`duration_ms`). Each carries the `pane` id. Replies and events share one
-writer per connection, so a slow listener holds up only itself.
-
-**AI agents** connect through MCP:
-
-```sh
-claude mcp add mightty -- mightty mcp
-```
-
-Tools: `run_command` (output + exit code; reuses a hidden shell so `cd`
-persists), `open_pane`, `read_pane`, `list_commands`, `wait_for`,
-`send_text`, `send_keys`, `list_panes`, `focus_pane`, `notify_user`, `close_pane`. Panes an
-agent opens go in a split beside the agent's own pane, further ones stacking
-below the first, without taking the keyboard from you (`placement` asks for
-a tab or window instead), and stay open after they exit. `list_panes` says
-which window and tab each pane is in and which one you're focused on. With
-no mightty running, `mightty mcp` hosts headless panes itself. An agent sees
-and drives only its own pane and the panes it opens, not your other sessions
-(`mightty mcp --all-panes` lifts that); tools take only the arguments they
-declare. This keeps an agent, or text on screen trying to steer it, to its
-own work; it isn't a sandbox, since an agent that runs commands can reach
-the control socket like any program of yours.
-
-**Agents that need you** are easy to miss in a background tab. mightty
-recognizes agents it runs (`claude`, `codex`, `gemini`, `aider`, `opencode`,
-…, by command name) and tells **working** (output flowing: their spinner)
-from **waiting** (gone quiet after working). A pane you aren't looking at
-needs you when its agent stops working, it rings the bell, or it asks for a
-notification (OSC 9, OSC 777, `mightty ctl notify`, `notify_user`). It gets
-an orange border and a ● on its tab or window title, the Dock icon shows how
-many panes need you (bouncing once while mightty is in the background; the
-app bundle also shows a banner), and
-⌘⇧A jumps to the one that has waited longest. `list_panes` reports all of
-this, so agents can watch each other. For Claude Code to say exactly when it
-needs a permission, add a notification hook to `~/.claude/settings.json`:
-
-```json
-{ "hooks": { "Notification": [{ "hooks": [{ "type": "command", "command": "mightty ctl notify 'Claude needs you'" }] }] } }
-```
-
-**Shell integration** (zsh, bash 3.2 and later, fish 3.0 and later) loads
-automatically in every pane, with no dotfile changes: it marks prompts, commands, output and exit codes (OSC 133,
-OSC 633;E, OSC 7). That's what lets `run`, `commands` and `run_command`
-return exact output and exit codes. Marks and the directory carry a random
-per-pane nonce that child processes never see, and mightty ignores them
-without it, so a program's output can't fake a finished command or choose
-where new tabs start; panes without the integration (`ssh` run directly,
-other shells) get a nonce too, so they take no marks at all. Titles and
-command lines lose control characters, and `mightty ctl` prints pane text
-with control characters made visible, so output can't smuggle escape
-sequences through them. Each shell is pointed at a
-small bootstrap that runs your startup files as usual, then loads the
-integration: zsh through `ZDOTDIR`, bash through `--rcfile` (it then reads
-the login files, `/etc/profile` and the first of `~/.bash_profile`,
-`~/.bash_login`, `~/.profile`; bash-preexec users keep theirs), fish
-through `XDG_DATA_DIRS`. To use it in another terminal, source
-`crates/mightty-mux/shell/mightty.{zsh,bash}` or
-`crates/mightty-mux/shell/fish/vendor_conf.d/mightty.fish`.
+`mightty --help` lists every setting with its current value, and
+`mightty ctl` lists every control command.
 
 ## Performance
 
-Throughput benchmark modelled on vtebench: each terminal `cat`s six 16 MiB
-workloads at 120×40, Menlo 14, timed from inside the terminal. Terminals are
-interleaved round by round (5 rounds × 3 runs) so they share system
-conditions; medians on an M2, macOS 15:
+Medians from `bench/suite.py` on an M2 with macOS 15. Each terminal is
+launched fresh at 120×40 in Menlo 14 with its other settings at their
+defaults.
 
-| workload | mightty | Ghostty 1.4.0 | kitty 0.49.2 | vs Ghostty | vs kitty |
-|---|---|---|---|---|---|
-| ascii | 237 MiB/s | 168 | 101 | **1.41×** | **2.35×** |
-| truecolor | 202 | 156 | 101 | **1.30×** | **2.00×** |
-| unicode | 166 | 151 | 89 | **1.10×** | **1.87×** |
-| cursor_motion | 186 | 171 | 95 | **1.09×** | **1.95×** |
-| scroll_region | 257 | 239 | 114 | **1.08×** | **2.25×** |
-| long_lines | 257 | 280 | 132 | 0.92×* | **1.95×** |
-
-\* Not a real difference: pooled over 63 runs, mightty and Ghostty have
-medians of 258 and 263 MiB/s (ratio 0.98, 95% CI 0.89–1.08). Both sit at the
-macOS PTY ceiling, where single runs range from 150 to 320 MiB/s.
-
-Ghostty and kitty are launched fresh for each round with their shipped
-defaults apart from grid and font (kitty with `--config NONE`). mightty is
-not: `bench/compare.sh` runs it as a pane of the mightty already open
-(`mightty ctl spawn`), with that instance's settings, so these numbers don't
-compare like for like. The full suite below launches all three fresh; there
-plain ASCII comes out at 239, 213 and 103 MiB/s. Single runs swing ±10% on a
-busy machine; long_lines and scroll_region sit at the PTY ceiling for both
-terminals and trade places between runs.
-
-### Full suite
-
-`bench/suite.py` launches each terminal fresh (120×40, Menlo 14, otherwise
-shipped defaults), runs `bench/probe.py` inside it, and samples the
-terminal's own process every 50 ms with `proc_pid_rusage`. Terminals take
-turns round by round: 10 startups and 3 sessions each, M2, macOS 15.
-
-- **Footprint** is macOS's physical footprint (Activity Monitor's "Memory"),
-  the nearest thing to Linux's PSS, which macOS doesn't have.
-- **Startup** is launch until the terminal's command runs in a ready PTY.
-- **Response latency** is a cursor-position query's round trip, measured
-  from inside the terminal. Under flood, a separate `cat` loop writes as fast
-  as the terminal reads; the kernel caps the backlog ahead of each query at
-  a few KiB, so this measures how responsive a busy terminal stays.
-- **Memory after output** counts all output since launch. Scrollback
-  defaults differ (mightty 10k lines, Ghostty 10 MB, kitty 2k lines).
-
-| | mightty | ghostty | kitty |
+| | Mightty | Ghostty 1.4.0 | kitty 0.49.2 |
 |---|---|---|---|
-| **Startup** | | | |
-| launch → command running (median) | **57 ms** | 157 ms | 370 ms |
-| **Idle (10 s)** | | | |
-| CPU, avg | **0.1 %** | 0.5 % | 0.5 % |
-| RSS, median | **58 MiB** | 91 MiB | 100 MiB |
-| footprint (≈PSS), median | **41 MiB** | 72 MiB | 102 MiB |
-| **Under load (throughput runs)** | | | |
-| CPU, avg | **89.0 %** | 227.7 % | 117.0 % |
-| RSS, median | 95 MiB | 150 MiB | **91 MiB** |
-| footprint (≈PSS), median | **78 MiB** | 130 MiB | 116 MiB |
-| **Distribution under load** | | | |
-| CPU avg | **89 %** | 228 % | 117 % |
-| CPU P50 | **89 %** | 227 % | 118 % |
-| CPU P75 | **91 %** | 240 % | 123 % |
-| CPU P90 | **95 %** | 250 % | 127 % |
-| CPU P95 | **96 %** | 264 % | 128 % |
-| RSS avg | **90 MiB** | 158 MiB | 93 MiB |
-| RSS P50 | 95 MiB | 150 MiB | **91 MiB** |
-| RSS P75 | 105 MiB | 164 MiB | **99 MiB** |
-| RSS P90 | 107 MiB | 191 MiB | **99 MiB** |
-| RSS P95 | 107 MiB | 201 MiB | **99 MiB** |
-| footprint avg | **73 MiB** | 140 MiB | 116 MiB |
-| footprint P50 | **78 MiB** | 130 MiB | 116 MiB |
-| footprint P75 | **85 MiB** | 148 MiB | 116 MiB |
-| footprint P90 | **85 MiB** | 171 MiB | 118 MiB |
-| footprint P95 | **87 MiB** | 180 MiB | 119 MiB |
-| **Memory after output** | | | |
-| RSS after ~140 MB | **65 MiB** | 138 MiB | 91 MiB |
-| footprint after ~140 MB | **53 MiB** | 79 MiB | 113 MiB |
-| RSS after ~260 MB | **68 MiB** | 139 MiB | 90 MiB |
-| footprint after ~260 MB | **55 MiB** | 82 MiB | 113 MiB |
-| **Throughput** (median) | | | |
-| plain ASCII | **239 MiB/s** | 213 MiB/s | 103 MiB/s |
-| SGR-colour heavy | **186 MiB/s** | 162 MiB/s | 121 MiB/s |
-| CJK / Unicode | **162 MiB/s** | 150 MiB/s | 87 MiB/s |
-| random cursor addressing (4 MB) | **171 MiB/s** | 136 MiB/s | 93 MiB/s |
-| **Response latency** (DSR round trip) | | | |
-| idle, median | **0.135 ms** | 0.193 ms | 0.196 ms |
-| idle, P95 | **0.336 ms** | 0.532 ms | 0.348 ms |
-| under flood, median | **0.046 ms** | 0.202 ms | 4.413 ms |
-| under flood, P95 | **0.111 ms** | 0.405 ms | 7.338 ms |
-| **Steady 250 lines/s** | | | |
-| CPU, avg | **8.8 %** | 28.6 % | 9.4 % |
+| Plain-text throughput | **239 MiB/s** | 213 MiB/s | 103 MiB/s |
+| Time to open a window with a shell | **57 ms** | 157 ms | 370 ms |
+| Memory at idle | **41 MiB** | 72 MiB | 102 MiB |
+| CPU under load | **89 %** | 228 % | 117 % |
+| Response time under heavy output | **0.05 ms** | 0.20 ms | 4.41 ms |
 
-Absolute numbers move with the machine from run to run, memory too: in an
-earlier run idle footprint was 28, 65 and 68 MiB, and the same build of
-mightty measured again beside this one idles where this table says.
-Compare across a row of one run.
+[docs/performance.md](docs/performance.md) has the full results, the method,
+and the design decisions behind them.
 
-```sh
-python3 -I bench/suite.py [ROUNDS] [STARTUPS] [TERMINALS]  # full suite above; launches each terminal itself
-bench/compare.sh                                       # throughput only; needs a running mightty; uses Ghostty and kitty if installed
-cargo run --release -p mightty-term --example feed -- bench/data/*.txt     # core only, no PTY
-cargo run --release -p mightty-mux --example pipeline -- $PWD/bench/data/*.txt
-cargo run --release -p mightty-term --example digest -- bench/data/*.txt   # a fingerprint of the terminal's state: the same before and after a change that shouldn't show
-```
+## Design
 
-What made the difference, measured along the way:
+Three rules shape the code:
 
-- **The PTY is the ceiling.** macOS hands out at most 1 KiB per read
-  (`examples/read_sizes.rs`), so end to end tops out around 200–300 MiB/s for
-  everyone. Reading and parsing on one thread is right: the writer refills
-  the kernel buffer while we parse; a separate parser thread only added
-  hand-off cost. Non-blocking reads drained to `EAGAIN` were slower still
-  (reader and writer contend for the tty lock), and raising the reader
-  thread's QoS class made no measurable difference.
-- **Parser fast paths**: printable ASCII is found 8 bytes at a time and
-  handed over as one run; complete CSI sequences parse in a tight loop
-  instead of the byte-wise state machine; other UTF-8 is validated and
-  decoded in one pass.
-- **Rows are written in bulk** and the **screen is a ring**: a scroll is a
-  pop and a push, and rows stay short until written, so scrolling costs
-  ~10 ns per line instead of ~100.
-- **8-byte cells**: a character plus a packed style id and layout flags;
-  colours and attributes live once in a per-terminal style table. Styles
-  are interned through a small cache of recent ones (a fresh colour per
-  cell, as in truecolor art, never touches a big index) and unused styles
-  are dropped when the table doubles.
-- **No branches on character width or UTF-8 length**: CJK and emoji text
-  mixes them unpredictably, and a mispredict per character cost more than
-  the work. Character starts are found 64 bytes at a time, sequences are
-  decoded from one 4-byte load, and every character writes a provisional
-  spacer cell instead of branching on whether it is wide.
-- **The renderer snapshots** the visible cells under the terminal lock and
-  builds the frame after releasing it, so drawing never stalls the reader.
-- **Memory** (footprint under load 101 → 71 MiB, idle 56 → 28 MiB): the
-  glyph atlas starts at 512² and doubles only when full (it was a fixed
-  2048², 16 MiB), the window keeps two drawables instead of three (each is
-  a full window image, ~11 MiB on Retina), vertex buffers and quad lists
-  are reused across frames, and the style table is compacted in place
-  through a bitmap of live ids and sized exactly, where a doubling `Vec`
-  plus a rebuilt copy briefly needed several times the live styles.
-- **Frame pacing**: output redraws wait for the display's next refresh on
-  a timer instead of in `nextDrawable`. Before, the main thread spent ~99 %
-  of a steady 250 lines/s stream blocked there, so keystrokes queued behind
-  it; now it is idle ~98 % of the time, and CPU fell from ~4.4 % to ~3.4 %
-  in an A/B run. Output after a pause (such as a typed key's echo) is
-  drawn at once; during a stream it waits at most one refresh.
+- **No third-party crates.** Mightty uses only Rust's standard library and
+  the APIs macOS ships, through hand-written bindings.
+  `scripts/check-no-deps.sh` enforces this in CI.
+- **A small core, with everything else over one protocol.** The app, the
+  command-line client and AI agents all use the same JSON-RPC control
+  socket. Panes belong to a multiplexer, not to windows.
+- **The core knows nothing about AI.** It exposes structured context, such
+  as command boundaries, exit codes and the working directory, and agents
+  bring their own networking.
 
-**Keypress to screen** (mightty only, 60 Hz display, 200 keys each): the
-probe types keys into the window through the app's event queue and reads
-Metal's presented time for the first frame showing each echo. It can't
-see the keyboard or the window server before the event reaches the app,
-and it can't run in other terminals; comparing those needs a camera or a
-tool like [Typometer](https://github.com/pavelfatin/typometer).
+### Repository layout
 
-Median time to screen, with the echo's frame built ~3 ms after the key
-while busy, ~0.3 ms when idle:
+| Crate | Role |
+|---|---|
+| `mightty-vt` | Escape-sequence parser |
+| `mightty-term` | Terminal state: screens, scrollback, modes, prompt marks, kitty graphics |
+| `mightty-pty` | Pseudo-terminals |
+| `mightty-mux` | Pane multiplexer, control socket and shell integration |
+| `mightty-mcp` | MCP server |
+| `mightty-json` | JSON parser and serializer |
+| `mightty-render` | Platform-independent drawing: palette, box drawing and block elements |
+| `mightty-font` | Font reader and rasterizer, for platforms without CoreText |
+| `mightty-image` | PNG and DEFLATE decoders |
+| `mightty-macos` | The macOS app: windows, input, the Metal renderer and the CoreText glyph atlas |
+| `mightty-ffi` | `libmightty`, the C library |
+| `mightty` | The `mightty` binary |
 
-| | `window-vsync=true` (default) | `window-vsync=false` |
-|---|---|---|
-| idle | 24.9 ms | 8.0 ms |
-| while streaming 250 lines/s | 33–37 ms | 11–13 ms |
-| while flooded | 36.1 ms | 8.9 ms |
+Benchmarks are in `bench/`, and scripts for bundling, releasing and
+installing the library are in `scripts/`.
+
+## libmightty
+
+The parser and the terminal state are also a C library. It does no I/O and
+starts no threads: you feed it bytes and read back cells.
 
 ```sh
-MIGHTTY_KEY_LATENCY=keys.tsv target/release/mightty -e python3 -I bench/keys.py [idle|stream|flood]
-```
-
-After a key press the window draws ~2 ms later, once the echo is in,
-instead of at the next refresh. With vsync on that barely shows: each
-frame still queues for a refresh, behind any frame already waiting (idle
-that is ~1.5 refreshes). With it off, macOS takes the newest frame, so the
-queue goes away, at the risk of tearing (mostly fullscreen; untested).
-The default follows kitty (`sync_to_monitor`) and Ghostty (`window-vsync`),
-which moved to on after macOS bugs with it off. These are Metal's
-presented times; a camera should confirm them.
-
-Next: SIMD (NEON) for the SGR-heavy path.
-
-## libmightty (C ABI)
-
-The core (parser + screen state, no I/O, no threads) is also a C library, so
-anything that speaks C can embed it: Swift/GTK front ends, Python or Node
-tooling, test harnesses, WebAssembly.
-
-```sh
-scripts/install-lib.sh /usr/local        # libmightty.{a,dylib|so}, mightty.h, mightty.pc
+scripts/install-lib.sh /usr/local        # libmightty.a, libmightty.dylib, mightty.h, mightty.pc
 cc app.c $(pkg-config --cflags --libs mightty)
 ```
 
-Rules the API follows (details at the top of `mightty.h`): opaque handles,
-caller-owned buffers with size queries, UTF-8 with explicit lengths, growable
-structs carrying a `size` field, error codes instead of unwinding, and an ABI
-version. `cargo test` compiles and runs a C11 program against the header and
-checks the header compiles as C++.
+The API uses opaque handles, caller-owned buffers with size queries, UTF-8
+with explicit lengths, structs that carry their own size, error codes, and
+an ABI version. The rules are documented at the top of
+[`mightty.h`](crates/mightty-ffi/include/mightty.h). `cargo test` compiles
+and runs a C program against the header.
 
-## Roadmap
+## Status
 
-1. ✅ VT parser, terminal state, PTY, headless runner
-2. ✅ macOS window: Cocoa via raw `objc_msgSend`, Metal renderer, CoreText glyph atlas, keyboard input
-   - ✅ Procedural box drawing, selection (click-drag, double-click word, triple-click line, ⌥-drag a block of columns) + copy, mouse reporting
-   - ✅ Grapheme clusters: combining marks, joined emoji, skin tones and flags stay in one cell, drawn with CoreText shaping; other fonts fill in missing characters. Character widths follow Unicode 17 (East Asian Width and combining marks), so CJK text and new emoji line up. Emoji written with VS16 (`❤️`, `☀️`, keycaps) take two cells, as in Ghostty and kitty: that's mode 2027, which programs can query and reset (`CSI ? 2027 l`) to count widths as `wcwidth` does, and `grapheme-width = legacy` starts reset. Programs can ask about any mode with DECRQM (`CSI ? n $ p`)
-   - ✅ Nerd Font icons built in (Symbols Nerd Font Mono, as in Ghostty and kitty): prompt, `eza` and editor icons show with any font, fitted to the cell, or to two when a space follows
-   - ✅ Bold and italic for families without them: made from the regular face (grown outlines, 12° slant)
-   - ✅ Ligatures (`font-ligatures`, on): `->`, `!=`, `===` and the rest in fonts that have them, drawn as one tile over exactly the cells they cover, shaped once per run of text and kept
-   - ✅ IME (`NSTextInputClient`): input methods and their candidate window; text being composed is drawn underlined at the cursor
-   - ✅ Kitty keyboard protocol, all five enhancements (disambiguate, event types, alternate keys, every key as an escape code, associated text), with a flag stack per screen: Neovim, Helix, fish and Kakoune can tell Ctrl-I from Tab, Esc from Alt, and see key releases; ⌘ chords no menu item uses reach them as Super
-   - ✅ Colours from programs: the palette (OSC 4), foreground, background and cursor (OSC 10, 11, 12) set and asked about, several at once as xterm takes them, and reset (OSC 104, 110–112), so theme scripts (base16, tinted-shell) and editors can recolour the terminal; a config reload keeps what programs set, RIS forgets it. XTVERSION (`CSI > q`) answers `mightty` and its version
-   - ✅ A pane's font family from its program (OSC 50, as in xterm; empty for the configured one), as the settings window previews fonts
-   - ✅ Progress bars (OSC 9 ; 4, as Ghostty and Windows Terminal show them): a thin bar along the pane's top edge, for progress, an error, paused, or busy; gone after 15 seconds without an update. The pointer's shape (OSC 22, CSS and X11 names as kitty takes them), except over a link
-   - ✅ Underline styles and colours: single, double, curly, dotted and dashed (`SGR 4:1`–`4:5`, `21`), coloured with `SGR 58` (reset with `59`), as Neovim uses for diagnostics
-   - ✅ Kitty graphics protocol: images sent inline, from files, temp files or shared memory, as PNG or raw RGB/RGBA, zlib-compressed or not, in chunks; placed at natural size or scaled to cells, cropped, offset within a cell, under the text or over it by z-index; they scroll with the text into history, each screen has its own, clearing the screen clears them, every delete command works, and a screen keeps up to 320 MB. Unicode placeholders (`U=1`, as `kitten icat --unicode-placeholder` and tmux setups use) show images through text, so they survive programs that only pass text along. Animation: frames sent whole or as changes over an earlier frame, played, looped, paused or stepped by the program, and composed (`a=f`, `a=a`, `a=c`), so `kitten icat` plays GIFs. Relative placements (`P=`, `Q=`, `H=`, `V=`) sit at an offset from another placement, or from a Unicode placeholder image, move with it and go with it. Pixel sizes are reported (`TIOCGWINSZ`, `CSI 14/16/18 t`).
-   - ✅ Search (Cmd-F): scrollback and screen, across wrapped lines, smart case, a match count, kept up to date as output arrives; Return/Cmd-G for older matches, Shift-Return/Cmd-Shift-G for newer, Esc to close; colours from the theme (`search-*`)
-   - ✅ Links: hold Cmd to underline an OSC 8 hyperlink or a URL in the text and see where it goes; Cmd-click opens web and mail links and local documents, media and folders (anything else, such as apps, scripts and executables, is shown in Finder instead); other schemes are ignored
-3. ✅ libmightty C ABI, pkg-config, install script
-4. ✅ Mux, control socket, `mightty ctl`, zsh integration, MCP server, multi-window
-5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; notification banners (app bundle: `scripts/bundle.sh`)
-6. ✅ bash and fish integration, config file, tabs: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9, in mightty's own tab bar, behaving as AppKit's (the close button under the pointer, tabs sliding as they come and go; past a minimum width they scroll, with momentum, the selected one pinned at the edge), double-click (or right-click → Rename Tab…) to rename it in place, right-click for Move Tab to New Window, Close Tab and Close Other Tabs, drag to reorder, drag off the bar for a window of its own (a preview following the pointer), or onto another window's bar or title bar to join it; a window dragged by its title bar onto another's joins it with all its tabs; splits (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag or move with ⌘⌃ and an arrow, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory; windows, tabs and splits come back on relaunch (`window-save-state`)
-7. Linux (raw Wayland protocol), own font rasterizer (in progress: TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji, ligatures and mark positioning ✅, matching CoreText within anti-aliasing; next Linux font discovery), Windows
+Mightty is approaching its first release, version 0.1.0, for macOS.
+
+| Area | Status |
+|---|---|
+| Terminal core, parser and pseudo-terminals | Done |
+| macOS app: Metal renderer, tabs, splits, search, links, input methods | Done |
+| Kitty graphics and keyboard protocols | Done |
+| Multiplexer, control socket, `mightty ctl` and MCP server | Done |
+| Agent attention, notifications and shell integration | Done |
+| `libmightty` C library | Done |
+| Signed and notarized releases | In progress |
+| Linux and Windows | Planned |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately,
-as [SECURITY.md](SECURITY.md) describes. Coding agents: read
-[AGENTS.md](AGENTS.md).
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how
+to build and what the project expects of a change, and
+[RELEASING.md](RELEASING.md) describes how releases are made. Report
+security problems privately, as [SECURITY.md](SECURITY.md) describes. Coding
+agents should read [AGENTS.md](AGENTS.md).
 
 ## License
 
-MIT, in [LICENSE](LICENSE). The bundled themes are MIT-licensed by their
-authors (`assets/THEMES-LICENSE`). Symbols Nerd Font is MIT-licensed
+Mightty is released under the [MIT License](LICENSE).
+
+The bundled themes are MIT-licensed by their authors
+(`assets/THEMES-LICENSE`). Symbols Nerd Font is MIT-licensed
 (`assets/fonts/SymbolsNerdFont-LICENSE`), and the icon sets in it keep their
 own licences, listed in `assets/fonts/SymbolsNerdFont-README.md`.
