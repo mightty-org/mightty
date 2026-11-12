@@ -28,6 +28,9 @@ usage: mightty ctl <command> [args]
                                         pane.opened, command.finished, pane.* ... (default: all)
   call METHOD [JSON]                    raw JSON-RPC call
 
+CMD is one argument, a line for the shell ('make && ./run | less'), or
+several, each one word to it (-- rm \"my file\").
+
 Connects to $MIGHTTY_SOCKET, or the most recent running mightty.";
 
 pub fn main(args: &[String]) -> Result<ExitCode, String> {
@@ -335,6 +338,29 @@ fn print_json(value: &Value) {
     }
 }
 
+/// What the shell is to run for the arguments after `--`: a single one as
+/// the shell line it is, several as words, each quoted if it needs to be.
+fn command_line(args: &[String]) -> Option<String> {
+    let line = match args {
+        [line] => line.clone(),
+        words => words
+            .iter()
+            .map(|w| {
+                let plain = !w.is_empty()
+                    && w.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"%+,-./:=@_".contains(&b));
+                if plain {
+                    w.clone()
+                } else {
+                    format!("'{}'", w.replace('\'', "'\\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
+    Some(line).filter(|l| !l.trim().is_empty())
+}
+
 /// Tiny argument scanner: flags and `--key value` anywhere, positionals in
 /// order, everything after `--` is a command line.
 struct Opts {
@@ -347,7 +373,7 @@ impl Opts {
         match args.iter().position(|a| a == "--") {
             Some(i) => Self {
                 args: args[..i].to_vec(),
-                command: Some(args[i + 1..].join(" ")).filter(|c| !c.is_empty()),
+                command: command_line(&args[i + 1..]),
             },
             None => Self {
                 args: args.to_vec(),
@@ -393,6 +419,22 @@ impl Opts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_lines() {
+        let line =
+            |args: &[&str]| command_line(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            line(&["make && ./run | less"]).unwrap(),
+            "make && ./run | less"
+        );
+        assert_eq!(line(&["rm", "my file"]).unwrap(), "rm 'my file'");
+        assert_eq!(
+            line(&["echo", "it's", "", "a=b"]).unwrap(),
+            "echo 'it'\\''s' '' a=b"
+        );
+        assert_eq!(line(&[]), None);
+    }
 
     #[test]
     fn pane_text_is_printed_without_controls() {
