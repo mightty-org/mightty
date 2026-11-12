@@ -54,7 +54,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>Mightty</string>
   <key>CFBundleExecutable</key><string>mightty</string>
   <key>CFBundleIconFile</key><string>mightty</string>
-  <key>CFBundleIdentifier</key><string>app.mightty</string>
+  <key>CFBundleIdentifier</key><string>org.mightty.Mightty</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Mightty</string>
   <key>CFBundlePackageType</key><string>APPL</string>

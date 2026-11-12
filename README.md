@@ -1,6 +1,7 @@
 # mightty
 
-A fast, lean, GPU-rendered terminal built for the agent era.
+The fast, lightweight terminal for macOS. Downloads and documentation are
+at [mightty.org](https://mightty.org).
 
 ## Ground rules
 
