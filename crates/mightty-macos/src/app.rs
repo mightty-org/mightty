@@ -2656,12 +2656,10 @@ impl App {
             }
         }
         // In the user's editor, in the terminal: a tab of the key window, else a window.
-        let command = format!(
-            "exec ${{VISUAL:-${{EDITOR:-vi}}}} {}",
-            shell_quote(&path.display().to_string())
-        );
+        let env = vec![("MIGHTTY_EDIT".into(), path.display().to_string())];
         self.open_command(
-            command,
+            config::EDIT_COMMAND.into(),
+            env,
             path.parent().map(Path::to_path_buf),
             "Config",
             true,
@@ -2672,14 +2670,22 @@ impl App {
     fn open_settings(&mut self) {
         let Ok(exe) = env::current_exe() else { return };
         let command = format!("exec {} config", shell_quote(&exe.display().to_string()));
-        self.open_command(command, None, "Settings", false);
+        self.open_command(command, Vec::new(), None, "Settings", false);
     }
 
-    /// Runs `command` (through the login shell) in a new tab of the key
-    /// window if `tab`, else a window, titled `title`.
-    fn open_command(&mut self, command: String, cwd: Option<PathBuf>, title: &str, tab: bool) {
+    /// Runs `command` (through the login shell, with `env` added) in a new
+    /// tab of the key window if `tab`, else a window, titled `title`.
+    fn open_command(
+        &mut self,
+        command: String,
+        env: Vec<(String, String)>,
+        cwd: Option<PathBuf>,
+        title: &str,
+        tab: bool,
+    ) {
         let opts = SpawnOptions {
             command: Some(command),
+            env,
             cwd,
             cols: self.config.cols.max(100),
             rows: self.config.rows.max(32),

@@ -756,15 +756,9 @@ impl App {
         print!("\x1b[0m\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let quoted = format!(
-            "'{}'",
-            self.path.display().to_string().replace('\'', "'\\''")
-        );
         let status = Command::new(shell)
-            .args([
-                "-lic",
-                &format!("exec ${{VISUAL:-${{EDITOR:-vi}}}} {quoted}"),
-            ])
+            .args(["-lic", config::EDIT_COMMAND])
+            .env("MIGHTTY_EDIT", &self.path)
             .status();
         print!("\x1b[?1049h\x1b[?25l");
         let _ = io::stdout().flush();

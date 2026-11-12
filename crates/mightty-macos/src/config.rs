@@ -301,6 +301,11 @@ pub enum Adjust {
 }
 
 /// Font sizes allowed, in points.
+/// For a login shell to run: `$VISUAL`, else `$EDITOR`, else vi, on the
+/// file `$MIGHTTY_EDIT` names. Through sh, as fish has no `${…:-…}`, and
+/// with the path in the environment, so no shell has to unquote it.
+pub const EDIT_COMMAND: &str = r#"exec /bin/sh -c 'exec ${VISUAL:-${EDITOR:-vi}} "$MIGHTTY_EDIT"'"#;
+
 pub const MIN_FONT_SIZE: f64 = 4.0;
 pub const MAX_FONT_SIZE: f64 = 200.0;
 /// The largest cell side an adjustment can make, in pixels: glyph tiles
@@ -1973,6 +1978,29 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Every shell runs the editor on the path as it is.
+    #[test]
+    fn edit_command_in_any_shell() {
+        let path = "/a b/it's $x \\y.conf";
+        for shell in [
+            "/bin/zsh",
+            "/bin/bash",
+            "/opt/homebrew/bin/fish",
+            "/usr/local/bin/fish",
+        ] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            let out = std::process::Command::new(shell)
+                .args(["-c", EDIT_COMMAND])
+                .env("VISUAL", "printf %s")
+                .env("MIGHTTY_EDIT", path)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), path, "{shell}");
+        }
     }
 
     /// A fresh directory for config files.
