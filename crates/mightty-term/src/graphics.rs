@@ -767,30 +767,42 @@ impl Graphics {
             lines_scrolled as i64 + top as i64,
             lines_scrolled as i64 + bottom as i64,
         );
+        let mut moved = false;
         // Relative placements follow their parents.
         self.placements.retain_mut(|p| {
             if p.parent.is_some() || !(top..=bottom).contains(&p.line) {
                 return true;
             }
+            moved = true;
             p.line += delta;
             p.line + p.cells[1] as i64 > top && p.line <= bottom
         });
-        self.settle();
+        // Only then: this runs for every line a region scrolls.
+        if moved {
+            self.settle();
+        }
     }
 
     /// Drops placements wholly above `line`: history that's gone.
     pub(crate) fn forget_above(&mut self, line: u64) {
+        let before = self.placements.len();
         self.placements
             .retain(|p| p.parent.is_some() || p.line + p.cells[1] as i64 > line as i64);
-        self.settle();
+        // This runs after every write.
+        if self.placements.len() != before {
+            self.settle();
+        }
     }
 
     /// Drops placements that touch lines `from..to`.
     pub(crate) fn clear_lines(&mut self, from: u64, to: u64) {
         let (from, to) = (from as i64, to as i64);
+        let before = self.placements.len();
         self.placements
             .retain(|p| p.line + p.cells[1] as i64 <= from || p.line >= to);
-        self.settle();
+        if self.placements.len() != before {
+            self.settle();
+        }
     }
 }
 
@@ -1980,6 +1992,24 @@ mod tests {
             send(&mut t, "a=p,i=2", b""),
             "\x1b_Gi=2;ENOENT:no such image\x1b\\"
         );
+    }
+
+    /// Relative placements are moved when their parents move, not on
+    /// every line a region scrolls: that made scrolling slow to a crawl.
+    #[test]
+    fn scrolling_past_relative_placements_is_cheap() {
+        let mut t = term();
+        send(&mut t, "a=t,f=32,s=1,v=1,i=1", &rgba(1, 1));
+        send(&mut t, "a=p,i=1,p=1,C=1", b"");
+        for p in 2..1000 {
+            send(&mut t, &format!("a=p,i=1,p={p},P=1,Q=1,C=1"), b"");
+        }
+        // A region below the parent, scrolled line by line.
+        t.feed(b"\x1b[5;24r\x1b[24;1H");
+        let start = std::time::Instant::now();
+        t.feed(&b"\n".repeat(5000));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(t.image_placements().len(), 999);
     }
 
     #[test]
