@@ -82,6 +82,10 @@ pub struct Parser {
     n_intermediates: usize,
     ignoring: bool,
     string: Vec<u8>,
+    /// The OSC or APC string grew past `MAX_STRING_LEN`: it's dropped, as
+    /// what's left of it could mean something else (a clipboard write cut
+    /// short, say).
+    too_long: bool,
     utf8: utf8::Decoder,
 }
 
@@ -292,7 +296,9 @@ impl Parser {
             },
             State::ApcString => match b {
                 0x07 => {
-                    p.apc_dispatch(&self.string);
+                    if !self.too_long {
+                        p.apc_dispatch(&self.string);
+                    }
                     self.state = State::Ground;
                 }
                 0x00..=0x1F => {}
@@ -331,7 +337,7 @@ impl Parser {
         match self.state {
             State::DcsPassthrough => p.unhook(),
             State::OscString if terminated => self.osc_dispatch(p, false),
-            State::ApcString if terminated => p.apc_dispatch(&self.string),
+            State::ApcString if terminated && !self.too_long => p.apc_dispatch(&self.string),
             _ => {}
         }
     }
@@ -345,6 +351,7 @@ impl Parser {
     fn enter(&mut self, state: State) {
         self.params.clear();
         self.string.clear();
+        self.too_long = false;
         self.state = state;
     }
 
@@ -360,6 +367,8 @@ impl Parser {
     fn push_string(&mut self, b: u8) {
         if self.string.len() < MAX_STRING_LEN {
             self.string.push(b);
+        } else {
+            self.too_long = true;
         }
     }
 
@@ -395,6 +404,9 @@ impl Parser {
     }
 
     fn osc_dispatch<P: Perform>(&mut self, p: &mut P, bell_terminated: bool) {
+        if self.too_long {
+            return;
+        }
         let mut parts: [&[u8]; MAX_OSC_PARAMS] = [&[]; MAX_OSC_PARAMS];
         let mut n = 0;
         let mut rest = &self.string[..];
@@ -823,6 +835,16 @@ mod tests {
             parse(b"\x1b]133;D;0\x1b\\"),
             ["osc 133|D|0 false", "esc \\"]
         );
+    }
+
+    /// A string past the limit isn't acted on cut short; the next one is.
+    #[test]
+    fn overlong_strings_are_dropped() {
+        let long = "A".repeat(MAX_STRING_LEN + 1);
+        let osc = format!("\x1b]52;c;{long}\x07\x1b]0;t\x07");
+        assert_eq!(parse(osc.as_bytes()), ["osc 0|t true"]);
+        let apc = format!("\x1b_G{long}\x1b\\\x1b_Gok\x1b\\");
+        assert_eq!(parse(apc.as_bytes()), ["esc \\", "apc Gok", "esc \\"]);
     }
 
     #[test]
