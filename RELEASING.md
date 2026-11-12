@@ -2,9 +2,10 @@
 
 Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`. It builds
 Mightty.app for Apple Silicon and Intel, signs it with the Developer ID,
-has Apple notarize it, and publishes a GitHub Release with `Mightty.zip`.
+has Apple notarize it, and publishes a GitHub Release with `Mightty.dmg`,
+the disk image people download, and `Mightty.zip`, the same app for scripts.
 The download button on [mightty.org](https://mightty.org) points at
-`https://github.com/mightty-org/mightty/releases/latest/download/Mightty.zip`,
+`https://github.com/mightty-org/mightty/releases/latest/download/Mightty.dmg`,
 so it serves the new release as soon as it's published.
 
 ## Making a release
@@ -83,4 +84,5 @@ scripts/bundle.sh --universal --sign "Developer ID Application: NAME (TEAM)"
 
 `rustup target add x86_64-apple-darwin` first. Notarize with
 `xcrun notarytool submit` as the workflow does, then
-`xcrun stapler staple target/release/Mightty.app`.
+`xcrun stapler staple target/release/Mightty.app`, and pack it with
+`scripts/make-dmg.sh --sign "Developer ID Application: NAME (TEAM)"`.
