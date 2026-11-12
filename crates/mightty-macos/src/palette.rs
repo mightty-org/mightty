@@ -51,6 +51,8 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Scroll Page Down", ScrollPageDown),
         ("Quick Terminal", ToggleQuickTerminal),
         ("Secure Keyboard Entry", ToggleSecureInput),
+        ("About Mightty", About),
+        ("Check for Updates", CheckForUpdates),
         ("Settings", OpenSettings),
         ("Open Config File", OpenConfig),
         ("Reload Configuration", ReloadConfig),

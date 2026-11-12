@@ -114,6 +114,10 @@ pub enum Action {
     ReloadConfig,
     /// Secure Keyboard Entry, on or off.
     ToggleSecureInput,
+    /// The About panel: version and licence.
+    About,
+    /// Asks whether a newer version has been released, and says.
+    CheckForUpdates,
     /// The quick terminal: a window dropping down from the top of the screen.
     ToggleQuickTerminal,
     /// The command palette: actions by name.
@@ -212,6 +216,8 @@ impl Action {
             ("open_settings", _) => bare(Self::OpenSettings),
             ("reload_config", _) => bare(Self::ReloadConfig),
             ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
+            ("about", _) => bare(Self::About),
+            ("check_for_updates", _) => bare(Self::CheckForUpdates),
             ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
             ("toggle_command_palette", _) => bare(Self::ToggleCommandPalette),
             ("prompt_surface_title", _) => bare(Self::PromptSurfaceTitle),
@@ -474,6 +480,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
     (
         "toggle_secure_input",
         "Secure Keyboard Entry: other apps can't read what you type",
+    ),
+    ("about", "About Mightty: its version and licence"),
+    (
+        "check_for_updates",
+        "Looks for a newer version of Mightty and offers to download it",
     ),
     ("open_settings", "The settings, in a window of their own"),
     (

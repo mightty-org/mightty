@@ -23,6 +23,7 @@ mod settings;
 mod snapshot;
 mod split;
 mod tabbar;
+mod update;
 
 pub use app::run;
 pub use config::Config;
