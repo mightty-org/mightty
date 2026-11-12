@@ -150,6 +150,27 @@ fn resize_keeps_cursor_row_visible() {
     assert_eq!(t.history_text(), "1\n2\n3\n4");
 }
 
+/// REP and CHT with large counts, many times over on a large screen,
+/// cost about what the text they make would.
+#[test]
+fn large_counts_are_cheap() {
+    let mut t = Term::new(500, 200);
+    let start = std::time::Instant::now();
+    t.feed(b"x");
+    t.feed(&b"\x1b[65535b".repeat(100));
+    t.feed(&b"\x1b[65535I".repeat(20_000));
+    assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+    assert_eq!(t.cursor(), (199, 499));
+}
+
+#[test]
+fn repeat() {
+    let t = term(10, 3, "ab\x1b[11b");
+    assert_eq!(t.screen_text(), "abbbbbbbbbbbb");
+    let t = term(5, 2, "中\x1b[2b");
+    assert_eq!(t.screen_text(), "中中中");
+}
+
 #[test]
 fn tabs() {
     let t = term(20, 1, "a\tb\x1b[2Zc");

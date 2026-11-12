@@ -1585,6 +1585,9 @@ impl Term {
 
     fn tab_forward(&mut self, n: usize) {
         for _ in 0..n {
+            if self.cursor.col + 1 >= self.cols {
+                break;
+            }
             let mut col = self.cursor.col + 1;
             while col < self.cols && !self.tabs[col] {
                 col += 1;
@@ -2262,9 +2265,15 @@ impl Perform for Term {
             ([], b'Z') => self.tab_back(arg(0, 1)),
             ([], b'b') => {
                 if let Some(c) = self.last_char {
-                    // More than a screenful only overwrites itself.
-                    for _ in 0..arg(0, 1).min(self.cols * self.rows) {
-                        self.input_char(c);
+                    // More than a screenful only overwrites itself. A row
+                    // at a time, as text is printed: a character at a time,
+                    // a few bytes could keep the terminal busy for long.
+                    let mut left = arg(0, 1).min(self.cols * self.rows);
+                    let row = vec![c; left.min(self.cols)];
+                    while left > 0 {
+                        let n = left.min(row.len());
+                        self.input_chars(&row[..n]);
+                        left -= n;
                     }
                 }
             }
