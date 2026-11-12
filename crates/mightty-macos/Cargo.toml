@@ -4,6 +4,7 @@ description = "macOS front end: Cocoa window, Metal renderer, CoreText glyphs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 mightty-term.workspace = true

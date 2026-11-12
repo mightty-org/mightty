@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question
+    url: https://github.com/mightty-org/mightty/discussions
+    about: How do I…? Ask in Discussions; issues are for bugs and features.
+  - name: Security problem
+    url: https://github.com/mightty-org/mightty/security/advisories/new
+    about: Report it privately, not as an issue. See SECURITY.md.
+  - name: Docs
+    url: https://mightty-org.github.io/mightty-website/docs/
+    about: Settings, key bindings, agents and scripting.

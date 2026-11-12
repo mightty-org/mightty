@@ -4,6 +4,7 @@ description = "A fast, lean, GPU-rendered terminal built for the agent era"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 mightty-term.workspace = true

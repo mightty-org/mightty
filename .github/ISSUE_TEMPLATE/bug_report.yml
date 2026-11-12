@@ -1,0 +1,36 @@
+name: Bug
+description: Something Mightty does wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what Mightty did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to make it happen
+      description: Steps, a command, or a file that shows it. If a program's output triggers it, a recording from `script` or `mightty run` helps.
+  - type: input
+    id: version
+    attributes:
+      label: Mightty version
+      description: "`mightty --version`, or the commit you built."
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: macOS 15.4, M2
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: The lines from `~/.config/mightty/config` that matter, if any.
+      render: text

@@ -4,6 +4,7 @@ description = "Model Context Protocol server exposing mightty panes to AI agents
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 mightty-json.workspace = true

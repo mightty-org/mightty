@@ -4,6 +4,7 @@ description = "libmightty: C ABI for the mightty terminal core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "mightty"

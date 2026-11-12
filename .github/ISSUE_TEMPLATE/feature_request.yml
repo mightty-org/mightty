@@ -1,0 +1,16 @@
+name: Feature
+description: Something you'd like Mightty to do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want to do
+      description: The task you're trying to get done, and where Mightty gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: elsewhere
+    attributes:
+      label: Elsewhere
+      description: If another terminal does this, which one and how. Mightty uses Ghostty's setting names where the meaning is the same.

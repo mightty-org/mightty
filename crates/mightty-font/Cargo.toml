@@ -4,6 +4,7 @@ description = "Font files and glyph rasterization, in plain Rust: for platforms 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 mightty-image.workspace = true

@@ -499,3 +499,16 @@ checks the header compiles as C++.
 5. ✅ Agent status detection (working / waiting for you), attention queue (⌘⇧A), Dock badge, OSC 9 / 777 notifications; notification banners (app bundle: `scripts/bundle.sh`)
 6. ✅ bash and fish integration, config file, tabs: ⌘T, ⌘⇧[ / ⌘⇧], ⌘1…⌘9, in mightty's own tab bar, behaving as AppKit's (the close button under the pointer, tabs sliding as they come and go; past a minimum width they scroll, with momentum, the selected one pinned at the edge), double-click (or right-click → Rename Tab…) to rename it in place, right-click for Move Tab to New Window, Close Tab and Close Other Tabs, drag to reorder, drag off the bar for a window of its own (a preview following the pointer), or onto another window's bar or title bar to join it; a window dragged by its title bar onto another's joins it with all its tabs; splits (agents open theirs beside them): ⌘D right, ⌘⇧D down, ⌘[ / ⌘] or ⌘⌥ and an arrow to move between them, ⌘⇧↩ to zoom one, ⌘⌃= or double-clicking a divider to even them out, dividers drag or move with ⌘⌃ and an arrow, ⌘W closes one, ⌘⇧W the window; panes keys aren't going to are dimmed; new tabs, windows and splits start in the current directory; windows, tabs and splits come back on relaunch (`window-save-state`)
 7. Linux (raw Wayland protocol), own font rasterizer (in progress: TrueType and CFF outlines, variable fonts, synthetic bold and italic, colour emoji, ligatures and mark positioning ✅, matching CoreText within anti-aliasing; next Linux font discovery), Windows
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately,
+as [SECURITY.md](SECURITY.md) describes. Coding agents: read
+[AGENTS.md](AGENTS.md).
+
+## License
+
+MIT, in [LICENSE](LICENSE). The bundled themes are MIT-licensed by their
+authors (`assets/THEMES-LICENSE`). Symbols Nerd Font is MIT-licensed
+(`assets/fonts/SymbolsNerdFont-LICENSE`), and the icon sets in it keep their
+own licences, listed in `assets/fonts/SymbolsNerdFont-README.md`.

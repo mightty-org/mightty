@@ -1,0 +1,43 @@
+name: Rendering with a theme or font
+description: Text, colours or icons that look wrong with a particular theme or font.
+labels: [rendering]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What looks wrong
+      description: A screenshot helps most. Say what you expected to see.
+    validations:
+      required: true
+  - type: input
+    id: font
+    attributes:
+      label: Font
+      description: The font-family lines from your config, and where you got the font if it isn't a common one.
+    validations:
+      required: true
+  - type: input
+    id: theme
+    attributes:
+      label: Theme
+      placeholder: Catppuccin Mocha
+  - type: textarea
+    id: text
+    attributes:
+      label: The text
+      description: The characters that draw wrong, copied in, or the command that prints them.
+      render: text
+  - type: dropdown
+    id: backend
+    attributes:
+      label: font-backend
+      options:
+        - coretext (the default)
+        - mightty
+  - type: input
+    id: version
+    attributes:
+      label: Mightty version and macOS version
+      placeholder: 0.1.0 (abc1234), macOS 15.4
+    validations:
+      required: true

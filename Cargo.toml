@@ -6,6 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mightty-org/mightty"
 
 # Policy: zero third-party crates. Only std and OS-provided APIs.
 # Enforced by scripts/check-no-deps.sh.
