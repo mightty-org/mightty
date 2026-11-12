@@ -39,10 +39,11 @@ A release is signed with the Developer ID, so three things guard it:
 
 ## Secrets, set up once
 
-Create an environment named `release` under Settings › Environments. Add
-yourself as a required reviewer, so each release waits for your approval,
-and limit its deployment tags to `v*`. Then add these as secrets of that
-environment:
+The `release` environment (Settings › Environments) holds the secrets and
+takes deployments from `v*` tags only. Once the repository is public, add
+yourself there as a required reviewer, so each release waits for your
+approval; GitHub doesn't offer that for a private repository on the free
+plan, nor the rulesets. Add these as secrets of the environment:
 
 | Secret | What it is |
 |---|---|
