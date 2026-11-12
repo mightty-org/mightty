@@ -1175,24 +1175,22 @@ impl App {
     }
 
     /// `window`'s tab `index` dragged onto `into`'s tab bar, to go at `at`.
-    fn transfer_tab(&mut self, window: Id, index: usize, into: Id, at: usize) {
+    /// Returns `window` if that emptied it, for the caller to close outside
+    /// `with_app`.
+    fn transfer_tab(&mut self, window: Id, index: usize, into: Id, at: usize) -> Option<Id> {
         if window == into || !self.windows.iter().any(|w| w.window == into) {
-            return self.move_tab(window, index, index);
+            self.move_tab(window, index, index);
+            return None;
         }
         let alone = self.tabs_of(window).len() == 1;
-        let Some(taken) = self.take_tab(window, index) else {
-            return;
-        };
+        let taken = self.take_tab(window, index)?;
         self.put_tab(taken, into, at);
-        if alone {
-            // Emptied: the window goes, its tab being elsewhere now.
-            // SAFETY: main thread; a live NSWindow.
-            unsafe { call!(window, c"close") };
-        }
+        alone.then_some(window)
     }
 
     /// `window` dragged by its title bar and let go over `into`'s tab bar:
-    /// its tabs go there from `at`, and it closes, as AppKit merges windows.
+    /// its tabs go there from `at`, and it's left empty for the caller to
+    /// close outside `with_app`, as AppKit merges windows.
     fn merge_window(&mut self, window: Id, into: Id, at: usize) {
         let count = self.tabs_of(window).len();
         for k in 0..count {
@@ -1201,8 +1199,6 @@ impl App {
             };
             self.put_tab(taken, into, at + k);
         }
-        // SAFETY: main thread; a live NSWindow, empty now.
-        unsafe { call!(window, c"close") };
     }
 
     /// Tabs are mightty's own, in the window, rather than AppKit's: always,
@@ -2459,6 +2455,28 @@ impl App {
         for surface in closed {
             self.release_pane(&surface);
         }
+        // Nothing may use the window once it's freed.
+        for c in &mut self.closed {
+            match &mut c.what {
+                Reopen::Pane { window: w, .. } | Reopen::Tab { tab_of: w, .. } if *w == window => {
+                    *w = NIL
+                }
+                _ => {}
+            }
+        }
+        if WINDOW_DRAG.get() == Some(window) {
+            WINDOW_DRAG.set(None);
+            tabbar::hover(None, NIL, &[]);
+        }
+        if let Some(Closing::Window(w)) = CLOSING.get()
+            && w == window
+        {
+            CLOSING.set(None);
+        }
+        // SAFETY: main thread; the window was made with
+        // setReleasedWhenClosed: NO, so this reference is ours. AppKit is
+        // still closing it: it goes when the event is done.
+        unsafe { call!(window, c"autorelease") };
     }
 
     /// Makes `view` the pane keys go to: the first responder of its window.
@@ -3435,11 +3453,16 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
         tabbar::Click::Detach(i, (x, y)) => {
             let _ = with_app(|app| app.detach_tab(window, i, CGPoint { x, y }));
         }
-        tabbar::Click::Transfer(i, bar, at) => drop(with_app(|app| {
-            let into = app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)?;
-            app.transfer_tab(window, i, into, at);
-            Some(())
-        })),
+        tabbar::Click::Transfer(i, bar, at) => {
+            let emptied = with_app(|app| {
+                let into = app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)?;
+                app.transfer_tab(window, i, into, at)
+            });
+            if let Some(window) = emptied.flatten() {
+                // SAFETY: main thread; a live NSWindow, its tab elsewhere now.
+                unsafe { call!(window, c"close") };
+            }
+        }
     }
 }
 
@@ -3531,11 +3554,15 @@ extern "C" fn on_window_drag_tick(_: *mut c_void) {
     // SAFETY: main thread; a live NSWindow.
     unsafe { call!(window, c"setAlphaValue:", 1.0f64) };
     if let Some((bar, at)) = target {
-        with_app(|app| {
+        let merged = with_app(|app| {
             let into = app.bars.iter().find(|b| b.1.bar == bar).map(|b| b.0)?;
             app.merge_window(window, into, at);
             Some(())
         });
+        if merged.flatten().is_some() {
+            // SAFETY: main thread; a live NSWindow, empty now.
+            unsafe { call!(window, c"close") };
+        }
     }
 }
 
