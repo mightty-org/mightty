@@ -15,11 +15,24 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
+    # The signing secrets belong to this environment, which can require a
+    # reviewer's approval before the job starts (see RELEASING.md).
+    environment: release
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit, as everything here runs beside the signing keys.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Check the tag is Cargo.toml's version
+      # A tag can point anywhere, a branch nobody reviewed included: only
+      # what was merged to main gets signed.
+      - name: Check the tag is on main and is Cargo.toml's version
         run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME isn't a commit on main"
+            exit 1
+          fi
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"

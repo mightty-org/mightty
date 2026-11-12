@@ -3,7 +3,7 @@
 Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`. It builds
 Mightty.app for Apple Silicon and Intel, signs it with the Developer ID,
 has Apple notarize it, and publishes a GitHub Release with `Mightty.zip`.
-The website's download button points at
+The download button on [mightty.org](https://mightty.org) points at
 `https://github.com/mightty-org/mightty/releases/latest/download/Mightty.zip`,
 so it serves the new release as soon as it's published.
 
@@ -26,9 +26,22 @@ the download link skips. Release tags can't be moved or deleted once
 pushed (see `.github/rulesets/tags.json`); fix a bad release with a new
 version.
 
+## Who can release
+
+A release is signed with the Developer ID, so three things guard it:
+
+- Only organization admins can create a `v*` tag (`.github/rulesets/tags.json`).
+- The workflow refuses a tag whose commit isn't on `main`, where every
+  change has been through a pull request.
+- The signing secrets belong to the `release` environment, not to the
+  repository, so no other workflow can read them.
+
 ## Secrets, set up once
 
-Under Settings › Secrets and variables › Actions in the repository:
+Create an environment named `release` under Settings › Environments. Add
+yourself as a required reviewer, so each release waits for your approval,
+and limit its deployment tags to `v*`. Then add these as secrets of that
+environment:
 
 | Secret | What it is |
 |---|---|
@@ -43,8 +56,8 @@ Under Settings › Secrets and variables › Actions in the repository:
 then File › Export Items… as a `.p12` with a strong password. Then:
 
 ```sh
-gh secret set MACOS_CERTIFICATE --repo mightty-org/mightty < <(base64 -i DeveloperID.p12)
-gh secret set MACOS_CERTIFICATE_PASSWORD --repo mightty-org/mightty
+gh secret set MACOS_CERTIFICATE --env release --repo mightty-org/mightty < <(base64 -i DeveloperID.p12)
+gh secret set MACOS_CERTIFICATE_PASSWORD --env release --repo mightty-org/mightty
 rm DeveloperID.p12
 ```
 
@@ -54,9 +67,9 @@ Download the `.p8` (it can only be downloaded once), and note its key ID
 and the issuer ID. Then:
 
 ```sh
-gh secret set NOTARY_KEY --repo mightty-org/mightty < AuthKey_XXXXXXXXXX.p8
-gh secret set NOTARY_KEY_ID --repo mightty-org/mightty
-gh secret set NOTARY_ISSUER_ID --repo mightty-org/mightty
+gh secret set NOTARY_KEY --env release --repo mightty-org/mightty < AuthKey_XXXXXXXXXX.p8
+gh secret set NOTARY_KEY_ID --env release --repo mightty-org/mightty
+gh secret set NOTARY_ISSUER_ID --env release --repo mightty-org/mightty
 ```
 
 Keep the `.p8` somewhere safe, or revoke the key once the secret is set and
