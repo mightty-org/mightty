@@ -17,4 +17,6 @@ published with credit to you, unless you'd rather not be named.
 
 ## Supported versions
 
-Mightty hasn't had a release yet. Fixes go into `main`.
+Security fixes go into `main` and ship in the next release. Only the latest
+release is supported: update to it from [mightty.org](https://mightty.org)
+or the [releases page](https://github.com/mightty-org/mightty/releases).
