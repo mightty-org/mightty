@@ -97,6 +97,17 @@ pub fn frame(window: Id, snapshot: &Snapshot) -> Option<&'static Block> {
     })
 }
 
+/// Ends a probe whose window closed: it posts keys to it.
+pub fn window_closed(window: Id) {
+    PROBE.with(|p| {
+        if let Ok(mut p) = p.try_borrow_mut()
+            && p.as_ref().is_some_and(|probe| probe.window == window)
+        {
+            *p = None;
+        }
+    });
+}
+
 extern "C" fn tick(_: *mut c_void) {
     let done = PROBE.with(|p| {
         let mut p = p.borrow_mut();

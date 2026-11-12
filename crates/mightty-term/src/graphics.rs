@@ -1024,7 +1024,9 @@ fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
     // checked before the rest: a file is no reason to read 400 MB.
     let size = match c.format {
         24 | 32 if !c.compressed => {
-            size.min(c.width as u64 * c.height as u64 * (c.format / 8) as u64)
+            // Saturating: the sizes are the command's own, checked later.
+            let pixels = (c.width as u64).saturating_mul(c.height as u64);
+            size.min(pixels.saturating_mul((c.format / 8) as u64))
         }
         _ => size,
     };
@@ -1065,9 +1067,11 @@ fn png_fits(data: &[u8]) -> bool {
         Some(6) => 4,
         _ => 1,
     };
-    let bits = channels * depth.unwrap_or(8).max(8) as usize;
-    let pixels = w as usize * h as usize;
-    pixels * 4 <= MAX_STORED && pixels * bits / 8 <= MAX_STORED
+    let bits = channels * depth.unwrap_or(8).max(8) as u64;
+    // In 64 bits and saturating: the header can claim 4 billion a side.
+    let pixels = w as u64 * h as u64;
+    let limit = MAX_STORED as u64;
+    pixels.saturating_mul(4) <= limit && pixels.saturating_mul(bits) / 8 <= limit
 }
 
 /// Pixels from transmitted bytes, as the command's format says.
@@ -2390,6 +2394,34 @@ mod tests {
             error(6)
         );
         assert!(!big.exists());
+    }
+
+    /// Sizes that overflow when multiplied are refused, not wrapped round
+    /// to something small.
+    #[test]
+    fn huge_sizes_are_refused() {
+        let mut t = term();
+        for side in [0xffff_ffffu32, 0x8000_0000] {
+            let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+            png.extend(side.to_be_bytes());
+            png.extend(side.to_be_bytes());
+            png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+            assert!(!png_fits(&png));
+            assert_eq!(
+                send(&mut t, "a=t,f=100,i=1", &png),
+                "\x1b_Gi=1;EBADPNG:can't decode the PNG\x1b\\"
+            );
+        }
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("tty-graphics-protocol-huge-{}", std::process::id()));
+        fs::write(&file, [0; 16]).unwrap();
+        let reply = send(
+            &mut t,
+            "a=t,t=t,f=32,s=4294967295,v=4294967295,i=2",
+            file.to_str().unwrap().as_bytes(),
+        );
+        assert!(reply.contains("i=2;E"), "{reply}");
+        let _ = fs::remove_file(&file);
     }
 
     #[test]

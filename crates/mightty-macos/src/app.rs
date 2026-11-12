@@ -43,6 +43,9 @@ use crate::tabbar::{self, TabBar};
 
 struct App {
     mux: Arc<Mux>,
+    /// Every NSWindow made and not yet closed, each holding a reference
+    /// that `window_closed` gives up, once.
+    open: Vec<Id>,
     windows: Vec<Window>,
     surfaces: Vec<Surface>,
     /// App delegate and delegate of every window.
@@ -716,6 +719,7 @@ pub fn run(config: Config) -> io::Result<()> {
         }
         let app = App {
             mux,
+            open: Vec::new(),
             windows: Vec::new(),
             surfaces: Vec::new(),
             delegate,
@@ -835,6 +839,7 @@ impl App {
             call!(window, c"setTitle:", nsstring("Mightty"));
             call!(window, c"setDelegate:", self.delegate);
             call!(window, c"setReleasedWhenClosed:", NO);
+            self.open.push(window);
             if quick {
                 call!(window, c"setTabbingMode:", 2isize); // disallowed
                 // Over other windows, on every Space, and over full-screen apps.
@@ -2405,6 +2410,12 @@ impl App {
 
     /// Forgets a closed window, ending its panes.
     fn window_closed(&mut self, window: Id) {
+        // Once per window: a second notification would release it twice.
+        let Some(i) = self.open.iter().position(|&w| w == window) else {
+            return;
+        };
+        self.open.swap_remove(i);
+        latency::window_closed(window);
         let mut reopen = Vec::new();
         if self.quick == Some(window) {
             self.quick = None;

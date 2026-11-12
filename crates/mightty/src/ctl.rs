@@ -108,7 +108,7 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
                     params.insert("beside", number(&beside)?);
                 }
             }
-            if let Some(cmd) = opts.command() {
+            if let Some(cmd) = opts.command()? {
                 params.insert("command", cmd);
             }
             opts.finish()?;
@@ -122,7 +122,7 @@ pub fn main(args: &[String]) -> Result<ExitCode, String> {
             if let Some(timeout) = opts.value("--timeout") {
                 params.insert("timeout_ms", number(&timeout)?);
             }
-            let cmd = opts.command().ok_or("run needs a command after --")?;
+            let cmd = opts.command()?.ok_or("run needs a command after --")?;
             params.insert("command", cmd);
             opts.finish()?;
             let result = client.call("pane.run", params)?;
@@ -339,33 +339,52 @@ fn print_json(value: &Value) {
 }
 
 /// What the shell is to run for the arguments after `--`: a single one as
-/// the shell line it is, several as words, each quoted if it needs to be.
-fn command_line(args: &[String]) -> Option<String> {
+/// the shell line it is, several as words, each escaped so the shell
+/// (zsh, bash or fish) takes it as written.
+fn command_line(args: &[String]) -> Result<Option<String>, String> {
     let line = match args {
         [line] => line.clone(),
         words => words
             .iter()
-            .map(|w| {
-                let plain = !w.is_empty()
-                    && w.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"%+,-./:=@_".contains(&b));
-                if plain {
-                    w.clone()
-                } else {
-                    format!("'{}'", w.replace('\'', "'\\''"))
-                }
-            })
-            .collect::<Vec<_>>()
+            .map(|w| word(w))
+            .collect::<Result<Vec<_>, _>>()?
             .join(" "),
     };
-    Some(line).filter(|l| !l.trim().is_empty())
+    Ok(Some(line).filter(|l| !l.trim().is_empty()))
+}
+
+/// `word` for the shell to read as one word, unchanged. A backslash before
+/// each character that could mean something, rather than quotes: fish
+/// reads `\'` and `\\` inside single quotes its own way, and zsh expands
+/// `=name` outside them. A control character can't be escaped for a
+/// terminal, which acts on it as a key (^C ends the line and what follows
+/// runs as a command), so a word with one is refused.
+fn word(word: &str) -> Result<String, String> {
+    if word.chars().any(char::is_control) {
+        return Err(format!(
+            "an argument has a control character in it: {}",
+            shown(word, false)
+        ));
+    }
+    if word.is_empty() {
+        return Ok("''".into());
+    }
+    let mut out = String::with_capacity(word.len());
+    for c in word.chars() {
+        let plain = !c.is_ascii() || c.is_ascii_alphanumeric() || "%+,-./:@_".contains(c);
+        if !plain {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    Ok(out)
 }
 
 /// Tiny argument scanner: flags and `--key value` anywhere, positionals in
 /// order, everything after `--` is a command line.
 struct Opts {
     args: Vec<String>,
-    command: Option<String>,
+    command: Result<Option<String>, String>,
 }
 
 impl Opts {
@@ -377,7 +396,7 @@ impl Opts {
             },
             None => Self {
                 args: args.to_vec(),
-                command: None,
+                command: Ok(None),
             },
         }
     }
@@ -404,8 +423,8 @@ impl Opts {
         number(&self.positional().ok_or("missing pane id")?)
     }
 
-    fn command(&mut self) -> Option<String> {
-        self.command.take()
+    fn command(&mut self) -> Result<Option<String>, String> {
+        std::mem::replace(&mut self.command, Ok(None))
     }
 
     fn finish(&self) -> Result<(), String> {
@@ -425,15 +444,62 @@ mod tests {
         let line =
             |args: &[&str]| command_line(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
         assert_eq!(
-            line(&["make && ./run | less"]).unwrap(),
+            line(&["make && ./run | less"]).unwrap().unwrap(),
             "make && ./run | less"
         );
-        assert_eq!(line(&["rm", "my file"]).unwrap(), "rm 'my file'");
+        assert_eq!(line(&["rm", "my file"]).unwrap().unwrap(), "rm my\\ file");
         assert_eq!(
-            line(&["echo", "it's", "", "a=b"]).unwrap(),
-            "echo 'it'\\''s' '' a=b"
+            line(&["echo", "it's", "", "a=b", "=ls", "~", "中文"])
+                .unwrap()
+                .unwrap(),
+            "echo it\\'s '' a\\=b \\=ls \\~ 中文"
         );
-        assert_eq!(line(&[]), None);
+        assert_eq!(line(&[]).unwrap(), None);
+        // ^C would end the line at the terminal and run the rest.
+        assert!(line(&["echo", "a\x03touch x\r"]).is_err());
+        assert!(line(&["echo", "a\tb"]).is_err());
+    }
+
+    /// Every shell hands each word to the command as it was given.
+    #[test]
+    fn words_survive_every_shell() {
+        let words = [
+            "x\\';touch MARK;echo \\'",
+            "a\\\\b",
+            "=ls",
+            "~root",
+            "$HOME `id` $(id) !! ^a^b",
+            "a b  c",
+            "*.rs {a,b} [x] ?",
+            "#no > < | & ; ( )",
+            "\"double\" 'single'",
+            "中文 é",
+            "",
+        ];
+        let mut args = vec!["printf".to_owned(), "%s\\n".to_owned()];
+        args.extend(words.iter().map(|w| w.to_string()));
+        let line = command_line(&args).unwrap().unwrap();
+        let expected: String = words.iter().map(|w| format!("{w}\n")).collect();
+        for shell in [
+            "/bin/zsh",
+            "/bin/bash",
+            "/opt/homebrew/bin/fish",
+            "/usr/local/bin/fish",
+        ] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            let out = std::process::Command::new(shell)
+                .args(["-c", &line])
+                .current_dir(std::env::temp_dir())
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                expected,
+                "{shell}: {line}"
+            );
+        }
     }
 
     #[test]
