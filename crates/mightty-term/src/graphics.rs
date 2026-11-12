@@ -1004,12 +1004,27 @@ fn read_file(c: &Command, path: &[u8]) -> Option<Vec<u8>> {
     if size > MAX_TRANSMIT as u64 {
         return None;
     }
-    let mut data = Vec::with_capacity(size as usize);
-    file.take(size).read_to_end(&mut data).ok()?;
+    // Nothing past what the image can use is read, and a PNG's header is
+    // checked before the rest: a file is no reason to read 400 MB.
+    let size = match c.format {
+        24 | 32 if !c.compressed => {
+            size.min(c.width as u64 * c.height as u64 * (c.format / 8) as u64)
+        }
+        _ => size,
+    };
+    let mut file = file.take(size);
+    let mut data = Vec::new();
+    let read = if c.format == 100 && !c.compressed {
+        (&mut file).take(33).read_to_end(&mut data).is_ok()
+            && png_fits(&data)
+            && file.read_to_end(&mut data).is_ok()
+    } else {
+        file.read_to_end(&mut data).is_ok()
+    };
     if temp {
         let _ = fs::remove_file(&path);
     }
-    Some(data)
+    read.then_some(data)
 }
 
 /// A PNG's width and height, from its header: the chunk that must come first.
@@ -2341,6 +2356,22 @@ mod tests {
             error(9)
         );
         fs::remove_file(&fifo).unwrap();
+        // A temp file whose PNG header is too big goes unread, and still goes.
+        let big = dir.join(format!("tty-graphics-protocol-big-{}", std::process::id()));
+        let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        header.extend([
+            0, 0, 0x27, 0x10, 0, 0, 0x27, 0x10, 8, 6, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        fs::write(&big, &header).unwrap();
+        assert_eq!(
+            send(
+                &mut t,
+                "a=t,t=t,f=100,i=6",
+                big.to_str().unwrap().as_bytes()
+            ),
+            error(6)
+        );
+        assert!(!big.exists());
     }
 
     #[test]
