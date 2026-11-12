@@ -7,7 +7,9 @@ approach before you spend time on it.
 ## Building
 
 You need macOS 12 or later, the Xcode command line tools
-(`xcode-select --install`) and Rust from [rustup.rs](https://rustup.rs).
+(`xcode-select --install`) and Rust from [rustup.rs](https://rustup.rs). rustup
+installs the version of Rust that `rust-toolchain.toml` names the first
+time you build.
 
 ```sh
 cargo run --release                 # a window with your login shell

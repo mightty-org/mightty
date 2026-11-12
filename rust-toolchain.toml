@@ -1,0 +1,7 @@
+# The Rust that CI and releases build with, so a new release of Rust (and
+# the lints it brings) can't fail a build nobody changed. Raise it in a
+# pull request of its own.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

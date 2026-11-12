@@ -354,7 +354,7 @@ impl Client {
             .filter(|p| p.extension().is_some_and(|e| e == "sock"))
             .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
             .collect();
-        sockets.sort_by(|a, b| b.0.cmp(&a.0));
+        sockets.sort_by_key(|socket| std::cmp::Reverse(socket.0));
         for (_, path) in sockets {
             match Self::connect(&path) {
                 Ok(client) => return Ok(client),

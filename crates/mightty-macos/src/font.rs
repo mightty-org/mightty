@@ -402,7 +402,9 @@ impl Font {
             raster.map(|r| RasterGlyph {
                 color: r
                     .pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|p| p[0] != p[1] || p[1] != p[2]),
                 ..r
             })
@@ -669,7 +671,7 @@ impl Font {
                     height as usize,
                 )
             {
-                for p in pixels.chunks_exact_mut(4) {
+                for p in pixels.as_chunks_mut::<4>().0 {
                     p.swap(0, 2);
                 }
                 return Some(RasterGlyph {
@@ -790,7 +792,7 @@ impl Font {
             height as usize,
         ) {
             // RGBA to BGRA.
-            for p in pixels.chunks_exact_mut(4) {
+            for p in pixels.as_chunks_mut::<4>().0 {
                 p.swap(0, 2);
             }
             return Some(RasterGlyph {

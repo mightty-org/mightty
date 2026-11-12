@@ -304,7 +304,7 @@ pub fn draw_color(
                 let outline = face.outline(g).ok()?;
                 let coverage = rasterize(&outline, scale, x, y, width, height);
                 let [r, gr, bl, a] = color.unwrap_or([255; 4]);
-                for (px, &c) in tile.chunks_exact_mut(4).zip(&coverage) {
+                for (px, &c) in tile.as_chunks_mut::<4>().0.iter_mut().zip(&coverage) {
                     // Source over, premultiplied: the layer's alpha times coverage.
                     let alpha = a as u32 * c as u32 / 255;
                     let keep = 255 - alpha;

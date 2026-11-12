@@ -435,7 +435,7 @@ impl<'a> Run<'a, '_> {
                     if !n.is_multiple_of(2) {
                         return None;
                     }
-                    for p in s.chunks_exact(2) {
+                    for p in s.as_chunks::<2>().0 {
                         self.line_to(p[0], p[1]);
                     }
                 }
@@ -457,7 +457,7 @@ impl<'a> Run<'a, '_> {
                     if !n.is_multiple_of(6) {
                         return None;
                     }
-                    for c in s.chunks_exact(6) {
+                    for c in s.as_chunks::<6>().0 {
                         self.curve_to([c[0], c[1], c[2], c[3], c[4], c[5]]);
                     }
                 }
@@ -467,7 +467,7 @@ impl<'a> Run<'a, '_> {
                     if n < 8 || !(n - 2).is_multiple_of(6) {
                         return None;
                     }
-                    for c in s[..n - 2].chunks_exact(6) {
+                    for c in s[..n - 2].as_chunks::<6>().0 {
                         self.curve_to([c[0], c[1], c[2], c[3], c[4], c[5]]);
                     }
                     self.line_to(s[n - 2], s[n - 1]);
@@ -478,7 +478,7 @@ impl<'a> Run<'a, '_> {
                     if n < 8 || !(n - 6).is_multiple_of(2) {
                         return None;
                     }
-                    for p in s[..n - 6].chunks_exact(2) {
+                    for p in s[..n - 6].as_chunks::<2>().0 {
                         self.line_to(p[0], p[1]);
                     }
                     let c = &s[n - 6..];
@@ -496,7 +496,7 @@ impl<'a> Run<'a, '_> {
                     if rest.is_empty() || !rest.len().is_multiple_of(4) {
                         return None;
                     }
-                    for c in rest.chunks_exact(4) {
+                    for c in rest.as_chunks::<4>().0 {
                         if b0 == 26 {
                             self.curve_to([lean, c[0], c[1], c[2], 0.0, c[3]]);
                         } else {

@@ -18,7 +18,6 @@ mightty-pty = { path = "crates/mightty-pty" }
 mightty-render = { path = "crates/mightty-render" }
 mightty-font = { path = "crates/mightty-font" }
 mightty-image = { path = "crates/mightty-image" }
-mightty-ffi = { path = "crates/mightty-ffi" }
 mightty-json = { path = "crates/mightty-json" }
 mightty-mux = { path = "crates/mightty-mux" }
 mightty-mcp = { path = "crates/mightty-mcp" }

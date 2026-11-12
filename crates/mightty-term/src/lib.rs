@@ -2064,8 +2064,10 @@ impl Term {
                         Some(4) => Some(Underline::Dotted),
                         Some(5) => Some(Underline::Dashed),
                         // Unknown: as it was.
-                        Some(_) => Some(attrs.underline())
-                            .filter(|_| attrs.flags.contains(Flags::UNDERLINE)),
+                        Some(_) => attrs
+                            .flags
+                            .contains(Flags::UNDERLINE)
+                            .then(|| attrs.underline()),
                     };
                     attrs.set_underline(underline);
                 }

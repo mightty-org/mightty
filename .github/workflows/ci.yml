@@ -16,7 +16,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      # The version rust-toolchain.toml names.
+      - run: rustup toolchain install
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target

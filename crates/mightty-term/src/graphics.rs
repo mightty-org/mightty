@@ -1156,7 +1156,8 @@ fn blit(
             to.copy_from_slice(from);
             continue;
         }
-        for (d, s) in to.chunks_exact_mut(4).zip(from.chunks_exact(4)) {
+        let (to, from) = (to.as_chunks_mut::<4>().0, from.as_chunks::<4>().0);
+        for (d, s) in to.iter_mut().zip(from) {
             let keep = 255 - s[3] as u32;
             for i in 0..4 {
                 d[i] = (s[i] as u32 + (d[i] as u32 * keep + 127) / 255).min(255) as u8;

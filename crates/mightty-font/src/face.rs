@@ -506,7 +506,9 @@ impl Face {
             match platform {
                 // UTF-16BE.
                 0 | 3 => String::from_utf16(
-                    &raw.chunks_exact(2)
+                    &raw.as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|p| u16::from_be_bytes([p[0], p[1]]))
                         .collect::<Vec<_>>(),
                 )

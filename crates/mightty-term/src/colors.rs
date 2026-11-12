@@ -132,7 +132,7 @@ impl Term {
 
     /// OSC 4 ; index ; spec [; index ; spec …].
     pub(crate) fn osc_palette(&mut self, pairs: &[&[u8]], terminator: &[u8]) {
-        for pair in pairs.chunks_exact(2) {
+        for pair in pairs.as_chunks::<2>().0 {
             let Some(i) = number(pair[0]).filter(|&i| i < 256) else {
                 continue;
             };

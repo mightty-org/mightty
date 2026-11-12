@@ -468,10 +468,8 @@ fn lead_bytes(window: &[u8]) -> u64 {
     const HIGH: u64 = 0x8080_8080_8080_8080;
     const LOW: u64 = 0x7F7F_7F7F_7F7F_7F7F;
     let mut mask = 0;
-    for (k, chunk) in window.chunks_exact(8).take(8).enumerate() {
-        let x = u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+    for (k, chunk) in window.as_chunks::<8>().0.iter().take(8).enumerate() {
+        let x = u64::from_le_bytes(*chunk);
         let t = (x & 0xC0C0_C0C0_C0C0_C0C0) ^ HIGH; // zero bytes are continuations
         let nonzero = (((t & LOW) + LOW) | t) & HIGH;
         // Gather each byte's flag into one bit per byte.
