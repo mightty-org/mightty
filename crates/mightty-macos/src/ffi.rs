@@ -184,6 +184,35 @@ impl Block {
     }
 }
 
+/// A `void (^)(NSInteger)` block, as for an alert's response, carrying a
+/// value for its function to read. Marked global, so the runtime never
+/// copies or frees it; nor do we, as AppKit may touch it after calling it.
+#[repr(C)]
+pub struct ResponseBlock<T: 'static> {
+    block: Block,
+    value: T,
+}
+
+impl<T> ResponseBlock<T> {
+    pub fn leak(invoke: unsafe extern "C" fn(*const Block, isize), value: T) -> &'static Self {
+        Box::leak(Box::new(Self {
+            block: Block::with_response(invoke),
+            value,
+        }))
+    }
+
+    pub fn get(&self) -> &T {
+        &self.value
+    }
+
+    /// # Safety
+    /// `block` must be the one a `ResponseBlock<T>` was called as.
+    pub unsafe fn value(block: *const Block) -> &'static T {
+        // SAFETY: the block is the first field of a leaked `ResponseBlock<T>`.
+        unsafe { &(*block.cast::<Self>()).value }
+    }
+}
+
 /// Calls `block`, a `void (^)(void)` handed to us (a completion handler).
 ///
 /// # Safety

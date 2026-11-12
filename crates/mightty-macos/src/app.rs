@@ -457,10 +457,6 @@ thread_local! {
     /// `config.behaviour`, for panes, which can't reach the app while it's
     /// borrowed for them; kept up to date on reload.
     static BEHAVIOUR: Cell<Behaviour> = Cell::new(Behaviour::default());
-    /// A clipboard request waiting on a sheet's answer, and its pane.
-    static ASKING: RefCell<Option<(Id, ClipboardRequest)>> = const { RefCell::new(None) };
-    /// A paste waiting on a sheet's answer: its pane and bytes.
-    static PASTING: RefCell<Option<(Id, Vec<u8>)>> = const { RefCell::new(None) };
 }
 
 thread_local! {
@@ -2468,11 +2464,7 @@ impl App {
             WINDOW_DRAG.set(None);
             tabbar::hover(None, NIL, &[]);
         }
-        if let Some(Closing::Window(w)) = CLOSING.get()
-            && w == window
-        {
-            CLOSING.set(None);
-        }
+        forget_sheets(window);
         // SAFETY: main thread; the window was made with
         // setReleasedWhenClosed: NO, so this reference is ours. AppKit is
         // still closing it: it goes when the event is done.
@@ -2896,16 +2888,154 @@ fn program(pane: &Pane) -> String {
     word.rsplit('/').next().unwrap_or(word).to_owned()
 }
 
-/// What a confirmed close sheet closes.
-#[derive(Clone, Copy)]
-enum Closing {
-    Pane(Id),
-    Window(Id),
+/// What a sheet over a window waits to do with the answer. Panes are
+/// named by id: a view's address may be another's by then.
+enum Asking {
+    /// Closing a pane, or the window the sheet is over.
+    ClosePane(PaneId),
+    CloseWindow,
+    Clipboard(PaneId, ClipboardRequest),
+    /// The text, encoded for the pane's modes once it's answered.
+    Paste(PaneId, String),
+    /// The field (retained) a new title is typed in.
+    Title(PaneId, Id),
 }
 
 thread_local! {
-    /// The close waiting on a sheet's answer: global blocks capture nothing.
-    static CLOSING: Cell<Option<Closing>> = const { Cell::new(None) };
+    /// The sheets up, by window, and what each is asking.
+    static SHEETS: RefCell<Vec<(Id, Asking)>> = const { RefCell::new(Vec::new()) };
+    /// The handler blocks, one per window address, made as needed.
+    static ANSWERS: RefCell<Vec<&'static ResponseBlock<Id>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Shows `alert` on a sheet over `window`, to do `asking` with the answer,
+/// unless the window already has a sheet. Returns whether it did.
+///
+/// # Safety
+/// Main thread; `window` a live NSWindow and `alert` an NSAlert.
+unsafe fn ask(window: Id, alert: Id, asking: Asking) -> bool {
+    unsafe extern "C" fn answered(block: *const Block, response: isize) {
+        // SAFETY: only `ask` hands out these blocks.
+        let window = *unsafe { ResponseBlock::<Id>::value(block) };
+        let asking = SHEETS.with_borrow_mut(|sheets| {
+            let i = sheets.iter().position(|(w, _)| *w == window)?;
+            Some(sheets.remove(i).1)
+        });
+        if let Some(asking) = asking {
+            answer(window, asking, response);
+        }
+    }
+    // SAFETY: as the caller promises; documented signatures.
+    unsafe {
+        let sheet: Id = msg!(window, c"attachedSheet");
+        if !sheet.is_null() || SHEETS.with_borrow(|s| s.iter().any(|(w, _)| *w == window)) {
+            forget(asking);
+            return false;
+        }
+        SHEETS.with_borrow_mut(|s| s.push((window, asking)));
+        let block = ANSWERS.with_borrow_mut(|blocks| {
+            if let Some(b) = blocks.iter().find(|b| *b.get() == window) {
+                return *b;
+            }
+            let b = ResponseBlock::leak(answered, window);
+            blocks.push(b);
+            b
+        });
+        call!(
+            alert,
+            c"beginSheetModalForWindow:completionHandler:",
+            window,
+            block
+        );
+        true
+    }
+}
+
+/// Lets go of what `asking` holds, unanswered.
+fn forget(asking: Asking) {
+    if let Asking::Title(_, field) = asking {
+        // SAFETY: main thread; retained for the sheet.
+        unsafe { call!(field, c"release") };
+    }
+}
+
+/// Drops the questions over `window`, which is closing.
+fn forget_sheets(window: Id) {
+    let gone = SHEETS.with_borrow_mut(|sheets| {
+        let (gone, kept) = mem::take(sheets)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(w, _)| *w == window);
+        *sheets = kept;
+        gone
+    });
+    for (_, asking) in gone {
+        forget(asking);
+    }
+}
+
+/// The view showing pane `id`.
+fn view_of(id: PaneId) -> Option<Id> {
+    with_app(|app| {
+        app.surfaces
+            .iter()
+            .find(|s| s.pane.id == id)
+            .map(|s| s.view)
+    })
+    .flatten()
+}
+
+/// Carries out what a sheet over `window` asked, as answered.
+fn answer(window: Id, asking: Asking, response: isize) {
+    match asking {
+        Asking::ClosePane(id) if response == ALERT_FIRST_BUTTON => {
+            close_surfaces(view_of(id).into_iter().collect())
+        }
+        // `close` skips windowShouldClose:, which asked already.
+        // SAFETY: main thread; the window is live while its sheet is.
+        Asking::CloseWindow if response == ALERT_FIRST_BUTTON => unsafe { call!(window, c"close") },
+        Asking::Clipboard(id, request) => {
+            if let Some(view) = view_of(id) {
+                with_surface(view, |s| {
+                    if response == ALERT_SECOND_BUTTON {
+                        s.do_clipboard(request);
+                    } else {
+                        s.clipboard_refused = Some(Instant::now());
+                    }
+                });
+            }
+        }
+        Asking::Paste(id, text) if response == ALERT_SECOND_BUTTON => {
+            if let Some(view) = view_of(id) {
+                with_surface(view, |s| {
+                    // Bracketed as the program wants it now, not when asked.
+                    let bracketed = s.pane.term.lock().unwrap().modes().bracketed_paste;
+                    s.write(&keys::paste(&text, bracketed));
+                });
+            }
+        }
+        Asking::Title(id, field) => {
+            // SAFETY: main thread; the field was retained when the sheet opened.
+            let text = unsafe {
+                let text = string_from_ns(msg!(field, c"stringValue"));
+                call!(field, c"release");
+                text
+            };
+            if response == ALERT_FIRST_BUTTON {
+                let title = text.trim();
+                with_app(|app| {
+                    let window = app.surfaces.iter_mut().find(|s| s.pane.id == id).map(|s| {
+                        s.title_override = (!title.is_empty()).then(|| title.to_owned());
+                        s.render();
+                        s.window
+                    })?;
+                    // The tab bar shows it at once, not with the next output.
+                    app.update_tab_bar(window);
+                    Some(())
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Written to a new config file by Settings… (⌘,).
@@ -3025,161 +3155,64 @@ unsafe fn close_alert(title: &str, detail: &str) -> Id {
     }
 }
 
-/// Asks on a sheet over `window` before carrying out `closing`.
-fn confirm(window: Id, closing: Closing, title: &str, detail: &str) {
-    static ANSWERED: Block = Block::with_response(answered);
-    unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some(closing) = CLOSING.with(Cell::take) else {
-            return;
-        };
-        if response != ALERT_FIRST_BUTTON {
-            return;
-        }
-        match closing {
-            Closing::Pane(view) => close_surfaces(vec![view]),
-            // `close` skips windowShouldClose:, which asked already.
-            // SAFETY: main thread; a live NSWindow.
-            Closing::Window(window) => unsafe { call!(window, c"close") },
-        }
-    }
-    // SAFETY: main thread; documented signatures; the handler is a global block.
+/// Asks on a sheet over `window` before closing what `asking` says.
+fn confirm(window: Id, asking: Asking, title: &str, detail: &str) {
+    // SAFETY: main thread; a live NSWindow.
     unsafe {
-        let sheet: Id = msg!(window, c"attachedSheet");
-        if !sheet.is_null() {
-            return; // already asking
-        }
-        CLOSING.with(|c| c.set(Some(closing)));
         let alert = close_alert(title, detail);
-        call!(
-            alert,
-            c"beginSheetModalForWindow:completionHandler:",
-            window,
-            &ANSWERED
-        );
+        ask(window, alert, asking);
     }
 }
 
 /// Asks on a sheet over `window` whether to carry out a program's
-/// clipboard `request` for the pane `view`. One at a time: while a sheet is
-/// up, other requests are refused.
-fn ask_clipboard(window: Id, view: Id, request: ClipboardRequest, question: &str, detail: &str) {
-    static ANSWERED: Block = Block::with_response(answered);
-    unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some((view, request)) = ASKING.with_borrow_mut(Option::take) else {
-            return;
-        };
-        with_surface(view, |s| {
-            if response == ALERT_SECOND_BUTTON {
-                s.do_clipboard(request);
-            } else {
-                s.clipboard_refused = Some(Instant::now());
-            }
-        });
+/// clipboard `request` for pane `id`. One at a time: while a sheet is up,
+/// other requests are refused.
+fn ask_clipboard(window: Id, id: PaneId, request: ClipboardRequest, question: &str, detail: &str) {
+    if SHEETS.with_borrow(|s| s.iter().any(|(_, a)| matches!(a, Asking::Clipboard(..)))) {
+        return;
     }
-    // SAFETY: main thread; documented signatures; the handler is a global block.
+    // SAFETY: main thread; documented signatures.
     unsafe {
-        let sheet: Id = msg!(window, c"attachedSheet");
-        if !sheet.is_null() || ASKING.with_borrow(Option::is_some) {
-            return;
-        }
-        ASKING.with_borrow_mut(|asking| *asking = Some((view, request)));
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring(question));
         call!(alert, c"setInformativeText:", nsstring(detail));
         // Deny first, so Return (typed as the sheet appears) refuses.
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Deny"));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Allow"));
-        call!(
-            alert,
-            c"beginSheetModalForWindow:completionHandler:",
-            window,
-            &ANSWERED
-        );
+        ask(window, alert, Asking::Clipboard(id, request));
     }
 }
 
-/// Asks on a sheet over `window` before pasting `bytes` into the pane
-/// `view`, showing `text` (see `keys::paste_is_risky`).
-fn ask_paste(window: Id, view: Id, text: &str, bytes: Vec<u8>) {
-    static ANSWERED: Block = Block::with_response(answered);
-    unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some((view, bytes)) = PASTING.with_borrow_mut(Option::take) else {
-            return;
-        };
-        if response == ALERT_SECOND_BUTTON {
-            with_surface(view, |s| s.write(&bytes));
-        }
-    }
-    // SAFETY: main thread; documented signatures; the handler is a global block.
+/// Asks on a sheet over `window` before pasting `text` into pane `id`
+/// (see `keys::paste_is_risky`).
+fn ask_paste(window: Id, id: PaneId, text: &str) {
+    let lines = text.lines().count();
+    let question = if lines > 1 {
+        format!("Paste {lines} lines?")
+    } else {
+        "Paste text with control characters?".to_owned()
+    };
+    let detail = format!(
+        "Pasted into a shell, each line may run as a command, and control characters act as keys.\n\n{}",
+        keys::visible_controls(text, 300)
+    );
+    // SAFETY: main thread; documented signatures.
     unsafe {
-        let sheet: Id = msg!(window, c"attachedSheet");
-        if !sheet.is_null() || PASTING.with_borrow(Option::is_some) {
-            return;
-        }
-        PASTING.with_borrow_mut(|pasting| *pasting = Some((view, bytes)));
-        let lines = text.lines().count();
-        let question = if lines > 1 {
-            format!("Paste {lines} lines?")
-        } else {
-            "Paste text with control characters?".to_owned()
-        };
-        let detail = format!(
-            "Pasted into a shell, each line may run as a command, and control characters act as keys.\n\n{}",
-            keys::visible_controls(text, 300)
-        );
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring(&question));
         call!(alert, c"setInformativeText:", nsstring(&detail));
         // Cancel first, so Return doesn't paste.
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
         let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Paste"));
-        call!(
-            alert,
-            c"beginSheetModalForWindow:completionHandler:",
-            window,
-            &ANSWERED
-        );
+        ask(window, alert, Asking::Paste(id, text.to_owned()));
     }
 }
 
-/// Asks on a sheet over `window` for a title for the pane `view`, starting
-/// from `current`. Empty goes back to the program's title.
-fn ask_title(window: Id, view: Id, current: &str) {
-    thread_local! {
-        /// The pane being renamed, and the field (retained) its title is typed in.
-        static RENAMING: Cell<Option<(Id, Id)>> = const { Cell::new(None) };
-    }
-    static ANSWERED: Block = Block::with_response(answered);
-    unsafe extern "C" fn answered(_: *const Block, response: isize) {
-        let Some((view, field)) = RENAMING.take() else {
-            return;
-        };
-        // SAFETY: main thread; the field was retained when the sheet opened.
-        let text = unsafe {
-            let text = string_from_ns(msg!(field, c"stringValue"));
-            call!(field, c"release");
-            text
-        };
-        if response == ALERT_FIRST_BUTTON {
-            let title = text.trim();
-            with_app(|app| {
-                let window = app.surfaces.iter_mut().find(|s| s.view == view).map(|s| {
-                    s.title_override = (!title.is_empty()).then(|| title.to_owned());
-                    s.render();
-                    s.window
-                })?;
-                // The tab bar shows it at once, not with the next output.
-                app.update_tab_bar(window);
-                Some(())
-            });
-        }
-    }
-    // SAFETY: main thread; documented signatures; the handler is a global block.
+/// Asks on a sheet over `window` for a title for pane `id`, starting from
+/// `current`. Empty goes back to the program's title.
+fn ask_title(window: Id, id: PaneId, current: &str) {
+    // SAFETY: main thread; documented signatures.
     unsafe {
-        let sheet: Id = msg!(window, c"attachedSheet");
-        if !sheet.is_null() {
-            return;
-        }
         let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
         call!(alert, c"setMessageText:", nsstring("Change Title"));
         call!(
@@ -3203,17 +3236,12 @@ fn ask_title(window: Id, view: Id, current: &str) {
         );
         call!(field, c"setStringValue:", nsstring(current));
         call!(alert, c"setAccessoryView:", field);
-        RENAMING.set(Some((view, field)));
-        call!(
-            alert,
-            c"beginSheetModalForWindow:completionHandler:",
-            window,
-            &ANSWERED
-        );
-        // Typing goes straight into the field, its text selected.
-        let sheet: Id = msg!(alert, c"window");
-        call!(sheet, c"makeFirstResponder:", field);
-        call!(field, c"selectText:", NIL);
+        if ask(window, alert, Asking::Title(id, field)) {
+            // Typing goes straight into the field, its text selected.
+            let sheet: Id = msg!(alert, c"window");
+            call!(sheet, c"makeFirstResponder:", field);
+            call!(field, c"selectText:", NIL);
+        }
     }
 }
 
@@ -4449,7 +4477,7 @@ impl Surface {
             Permission::Ask if refused => {}
             Permission::Allow => self.do_clipboard(request),
             Permission::Deny => {}
-            Permission::Ask => ask_clipboard(self.window, self.view, request, question, &detail),
+            Permission::Ask => ask_clipboard(self.window, self.pane.id, request, question, &detail),
         }
     }
 
@@ -5036,11 +5064,10 @@ unsafe fn register_view_class() -> Id {
             }
             with_surface(view, |w| {
                 let bracketed = w.pane.term.lock().unwrap().modes().bracketed_paste;
-                let bytes = keys::paste(&text, bracketed);
                 if BEHAVIOUR.get().paste_protection && keys::paste_is_risky(&text, bracketed) {
-                    ask_paste(w.window, view, &text, bytes);
+                    ask_paste(w.window, w.pane.id, &text);
                 } else {
-                    w.write(&bytes);
+                    w.write(&keys::paste(&text, bracketed));
                 }
             });
         }
@@ -5454,8 +5481,14 @@ unsafe fn register_delegate_class() -> Id {
         let Some((window, view)) = with_app(|app| app.key_window()).flatten() else {
             return;
         };
-        match with_app(|app| app.close_question(&[view])).flatten() {
-            Some(running) => confirm(window, Closing::Pane(view), "Close this pane?", &running),
+        let pane = with_surface(view, |s| s.pane.id);
+        match with_app(|app| app.close_question(&[view]))
+            .flatten()
+            .zip(pane)
+        {
+            Some((running, id)) => {
+                confirm(window, Asking::ClosePane(id), "Close this pane?", &running)
+            }
             None => close_surfaces(vec![view]),
         }
     }
@@ -5472,12 +5505,7 @@ unsafe fn register_delegate_class() -> Id {
         });
         match question.flatten() {
             Some(running) => {
-                confirm(
-                    window,
-                    Closing::Window(window),
-                    "Close this window?",
-                    &running,
-                );
+                confirm(window, Asking::CloseWindow, "Close this window?", &running);
                 NO
             }
             None => YES,
@@ -5806,10 +5834,14 @@ fn perform(view: Id, action: &Action) {
                         .trim_start_matches(['●', ' '])
                         .to_owned()
                 };
-                (s.window, s.title_override.clone().unwrap_or_else(program))
+                (
+                    s.window,
+                    s.pane.id,
+                    s.title_override.clone().unwrap_or_else(program),
+                )
             };
-            if let Some((window, current)) = with_surface(view, current) {
-                ask_title(window, view, &current);
+            if let Some((window, id, current)) = with_surface(view, current) {
+                ask_title(window, id, &current);
             }
         }
         Action::ToggleCommandPalette => drop(with_app(|app| {
