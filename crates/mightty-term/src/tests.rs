@@ -171,6 +171,17 @@ fn repeat() {
     assert_eq!(t.screen_text(), "中中中");
 }
 
+/// A region at the top of the screen scrolls into history; the rows
+/// under it, and the marks on them, stay where they are.
+#[test]
+fn rows_under_a_top_region_keep_their_marks() {
+    let mut t = Term::new(10, 5);
+    t.feed(b"\x1b[5;1H\x1b]133;A\x07$ \x1b[1;3r\x1b[3;1Ha\r\nb\r\nc");
+    assert_eq!(t.lines_scrolled(), 2);
+    assert_eq!(t.marks()[0].line, t.lines_scrolled() + 4);
+    assert_eq!(t.screen_text(), "a\nb\nc\n\n$");
+}
+
 #[test]
 fn tabs() {
     let t = term(20, 1, "a\tb\x1b[2Zc");

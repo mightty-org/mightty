@@ -783,6 +783,21 @@ impl Graphics {
         }
     }
 
+    /// Moves placements from `line` down by `by` lines, as the text there
+    /// is numbered on.
+    pub(crate) fn renumber_from(&mut self, line: u64, by: u64) {
+        let mut moved = false;
+        for p in &mut self.placements {
+            if p.parent.is_none() && p.line >= line as i64 {
+                p.line += by as i64;
+                moved = true;
+            }
+        }
+        if moved {
+            self.settle();
+        }
+    }
+
     /// Drops placements wholly above `line`: history that's gone.
     pub(crate) fn forget_above(&mut self, line: u64) {
         let before = self.placements.len();

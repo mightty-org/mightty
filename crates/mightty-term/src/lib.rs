@@ -1682,6 +1682,15 @@ impl Term {
                 self.scrollback.pop_front();
             }
             self.lines_scrolled += n as u64;
+            if !full_screen {
+                // The rows under the region stay put on screen, so their
+                // absolute lines go up with the count.
+                let below = self.lines_scrolled - n as u64 + bottom as u64 + 1;
+                for mark in self.marks.iter_mut().filter(|m| m.line >= below) {
+                    mark.line += n as u64;
+                }
+                self.graphics_mut().renumber_from(below, n as u64);
+            }
         } else {
             let scrolled = self.lines_scrolled;
             self.graphics_mut()
