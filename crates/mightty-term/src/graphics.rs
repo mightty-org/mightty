@@ -994,6 +994,24 @@ fn png_size(data: &[u8]) -> Option<(u32, u32)> {
     Some((be32(16)?, be32(20)?))
 }
 
+/// Whether a PNG of this header fits the quota, both decoded and as the
+/// inflated rows it's decoded from, which 16-bit colour makes twice as big.
+fn png_fits(data: &[u8]) -> bool {
+    let Some((w, h)) = png_size(data) else {
+        return false;
+    };
+    let (depth, color) = (data.get(24).copied(), data.get(25).copied());
+    let channels = match color {
+        Some(2) => 3,
+        Some(4) => 2,
+        Some(6) => 4,
+        _ => 1,
+    };
+    let bits = channels * depth.unwrap_or(8).max(8) as usize;
+    let pixels = w as usize * h as usize;
+    pixels * 4 <= MAX_STORED && pixels * bits / 8 <= MAX_STORED
+}
+
 /// Pixels from transmitted bytes, as the command's format says.
 fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
     let raw = matches!(c.format, 24 | 32);
@@ -1031,7 +1049,7 @@ fn decode(c: &Command, mut data: Vec<u8>) -> Result<ImageData, &'static str> {
             (w, h, pixels)
         }
         100 => {
-            if png_size(&data).is_none_or(|(w, h)| w as usize * h as usize * 4 > MAX_STORED) {
+            if !png_fits(&data) {
                 return Err("EBADPNG:can't decode the PNG");
             }
             let image = mightty_image::png::decode_limited(&data, MAX_SIDE)

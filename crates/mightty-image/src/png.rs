@@ -42,8 +42,12 @@ pub fn decode_limited(data: &[u8], max_side: u32) -> Option<Image> {
         let body = data.get(at + 8..(at + 8).checked_add(len)?)?;
         // The CRC after each chunk isn't checked, as in most decoders' release builds.
         at = at + 12 + len;
+        // IHDR comes first and once: a size checked from the first header
+        // (as callers do, before decoding) is then the size decoded.
         match kind {
-            b"IHDR" => header = Some(Header::parse(body, max_side)?),
+            b"IHDR" if header.is_none() => header = Some(Header::parse(body, max_side)?),
+            b"IHDR" => return None,
+            _ if header.is_none() => return None,
             b"PLTE" => palette = body,
             b"tRNS" => transparency = body,
             b"IDAT" => compressed.extend_from_slice(body),
@@ -393,6 +397,22 @@ pub(crate) mod tests {
             decode(&png(9, 9, 8, 0, 1, &[], &interlaced)),
             decode(&png(9, 9, 8, 0, 0, &[], &plain))
         );
+    }
+
+    #[test]
+    fn header_first_and_once() {
+        let image = png(1, 1, 8, 0, 0, &[], &[0, 7]);
+        let ihdr = &image[8..33];
+        // A second header can't change the size after it was checked.
+        let mut twice = image.clone();
+        twice.splice(33..33, ihdr.iter().copied());
+        assert_eq!(decode(&twice), None);
+        // Nor can a header after another chunk.
+        let mut late = image[..8].to_vec();
+        late.extend([0, 0, 0, 0, b't', b'E', b'X', b't', 0, 0, 0, 0]);
+        late.extend(&image[8..]);
+        assert_eq!(decode(&late), None);
+        assert!(decode(&image).is_some());
     }
 
     /// A 12×12 RGBA image from Python's zlib (dynamic codes, every filter),
