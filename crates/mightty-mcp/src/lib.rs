@@ -99,6 +99,10 @@ pub fn serve(
             output.flush()?;
         }
     }
+    // The hidden shell was this session's.
+    if let Some(id) = server.default_pane {
+        let _ = server.call("pane.close", Value::object([("pane", id.into())]));
+    }
     Ok(())
 }
 
@@ -320,6 +324,10 @@ impl Server {
             if alive && self.default_pane == Some(id) && self.may_use(id) {
                 args.insert("pane", id);
             }
+        }
+        if args["pane"].is_null() {
+            // Kept for the next call, so `cd` and exports carry over.
+            args.insert("keep", true);
         }
         let result = self.call("pane.run", args.clone())?;
         if args["pane"].is_null() {

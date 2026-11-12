@@ -411,10 +411,12 @@ fn wait(pane: &Pane, params: &Value) -> Result<Value> {
 
 /// Types a command into a shell pane and waits for it to finish, using shell
 /// integration to find its output and exit code. Without `pane`, starts a
-/// hidden shell first.
+/// hidden shell first, and closes it after unless `keep` is true or the
+/// command is still running.
 fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
     let command = params["command"].as_str().filter(|c| !c.trim().is_empty());
     let command = command.ok_or_else(|| RpcError::invalid("`command` is required"))?;
+    let hidden = params.get("pane").is_none_or(Value::is_null);
     let pane = match params.get("pane").filter(|v| !v.is_null()) {
         Some(_) => pane(mux, params)?,
         None => {
@@ -459,18 +461,30 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
         }
         finished_commands(&term)
     };
-    write(&pane, format!("{command}\r").as_bytes())?;
-    let max_output = max_output(params);
-    let finished = wait_until(&pane, timeout(params, DEFAULT_RUN_WAIT), |pane| {
+    let ran = write(&pane, format!("{command}\r").as_bytes()).map(|()| {
+        let max_output = max_output(params);
+        let finished = wait_until(&pane, timeout(params, DEFAULT_RUN_WAIT), |pane| {
+            let term = pane.term.lock().unwrap();
+            (finished_commands(&term) > baseline || !pane.is_alive()).then_some(Value::Null)
+        });
         let term = pane.term.lock().unwrap();
-        (finished_commands(&term) > baseline || !pane.is_alive()).then_some(Value::Null)
+        let mut result = match term.command_blocks().last() {
+            Some(block) => block_info(&term, block, max_output),
+            None => Value::object([("output", term.screen_text().into())]),
+        };
+        result.insert("timed_out", finished.is_none());
+        result
     });
-    let term = pane.term.lock().unwrap();
-    let mut result = match term.command_blocks().last() {
-        Some(block) => block_info(&term, block, max_output),
-        None => Value::object([("output", term.screen_text().into())]),
-    };
+    // A hidden shell nobody will use again would run until mightty quits.
+    let keep = params["keep"].as_bool() == Some(true)
+        || ran
+            .as_ref()
+            .is_ok_and(|r| r["timed_out"].as_bool() == Some(true));
+    if hidden && !keep {
+        mux.close(pane.id);
+        return ran;
+    }
+    let mut result = ran?;
     result.insert("pane", pane.id);
-    result.insert("timed_out", finished.is_none());
     Ok(result)
 }
