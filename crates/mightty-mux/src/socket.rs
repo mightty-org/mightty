@@ -21,6 +21,7 @@ use crate::{EVENTS, Mux, RpcError, rpc};
 
 unsafe extern "C" {
     fn getuid() -> u32;
+    fn kill(pid: i32, sig: i32) -> i32;
     #[cfg(target_os = "macos")]
     fn getpeereid(fd: i32, uid: *mut u32, gid: *mut u32) -> i32;
     #[cfg(target_os = "linux")]
@@ -303,6 +304,21 @@ impl From<CallError> for String {
     }
 }
 
+/// Whether the process a `<pid>.sock` is named for is running.
+fn owner_alive(path: &Path) -> bool {
+    let pid = path
+        .file_stem()
+        .and_then(|s| s.to_str()?.parse::<i32>().ok())
+        .filter(|&pid| pid > 0);
+    const EPERM: i32 = 1;
+    pid.is_some_and(|pid| {
+        // SAFETY: signal 0 checks the process exists and sends nothing.
+        let sent = unsafe { kill(pid, 0) } == 0;
+        // Refused permission: it exists, as someone else's.
+        sent || io::Error::last_os_error().raw_os_error() == Some(EPERM)
+    })
+}
+
 /// A connection to a running mightty.
 pub struct Client {
     reader: BufReader<UnixStream>,
@@ -342,7 +358,8 @@ impl Client {
         for (_, path) in sockets {
             match Self::connect(&path) {
                 Ok(client) => return Ok(client),
-                Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                // Refused can also mean a live one is too busy to accept.
+                Err(e) if e.kind() == io::ErrorKind::ConnectionRefused && !owner_alive(&path) => {
                     let _ = fs::remove_file(&path);
                 }
                 Err(_) => {}
@@ -414,6 +431,17 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_owners() {
+        let dir = Path::new("/nowhere");
+        assert!(owner_alive(&dir.join(format!("{}.sock", process::id()))));
+        // Past macOS's and Linux's default pid limits.
+        assert!(!owner_alive(&dir.join("2147483646.sock")));
+        assert!(!owner_alive(&dir.join("other.sock")));
+        // pid 1 runs as root: someone else's, still running.
+        assert!(owner_alive(&dir.join("1.sock")));
+    }
     use crate::{Headless, SpawnOptions};
     use std::time::{Duration, Instant};
 
