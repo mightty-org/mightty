@@ -44,9 +44,13 @@ A release is signed with the Developer ID, so these guard it:
   asks a reviewer to approve each run.
 - `main` takes changes by pull request only, and `v*` tags are for
   organization admins to make. The one exception is the release's deploy
-  key, which the rulesets let past both so the workflow can push the
-  version's commit and tag. The key is a secret of the `release`
-  environment and is used in a single step, after the build has passed.
+  key, which the rulesets let past exactly those two rules, so the workflow
+  can push the version's commit and create its tag. It can't delete `main`
+  or rewrite its history, nor move or delete a tag: those rules are in
+  rulesets of their own that only admins get past. The key is a secret of
+  the `release` environment and is used in a single step, after the build
+  has passed. The repository should have no other deploy key with write
+  access.
 
 ## Secrets, set up once
 
@@ -100,7 +104,8 @@ gh secret set RELEASE_DEPLOY_KEY --env release --repo mightty-org/mightty < rele
 rm release-key release-key.pub
 ```
 
-`scripts/apply-rulesets.sh` gives deploy keys their way past the rulesets.
+`scripts/apply-rulesets.sh` applies the rulesets in `.github/rulesets`,
+which give deploy keys their way past those two rules.
 
 ## Building a release by hand
 
