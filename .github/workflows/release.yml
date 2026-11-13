@@ -1,46 +1,82 @@
-# Pushing a version tag (v0.2.0) builds Mightty.app for Apple Silicon and
-# Intel, signs it with the Developer ID, has Apple notarize it, and attaches
-# it to a GitHub Release as Mightty.dmg (and Mightty.zip). The website's
-# download button links to releases/latest/download/Mightty.dmg. The secrets
-# it needs are in RELEASING.md.
+# Makes a release. Started by hand (Actions > Release > Run workflow) with
+# the part of the version to raise: it sets the new version in Cargo.toml
+# and Cargo.lock, builds Mightty.app for Apple Silicon and Intel, signs it
+# with the Developer ID, has Apple notarize it, pushes the version's commit
+# and tag to main, and publishes a GitHub Release with notes GitHub writes
+# from the pull requests merged since the last one. The website's download
+# button links to releases/latest/download/Mightty.dmg. The secrets it
+# needs are in RELEASING.md.
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to raise
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+        required: true
 
 permissions:
   contents: write
 
+# One at a time: two would both try to take the next version.
+concurrency: release
+
 jobs:
   release:
     runs-on: macos-15
-    # The signing secrets belong to this environment, which can require a
-    # reviewer's approval before the job starts (see RELEASING.md).
+    # The signing secrets and the key that may push to main belong to this
+    # environment, which can require a reviewer's approval before the job
+    # starts (see RELEASING.md).
     environment: release
     steps:
+      # Only main is released: every change there came through a pull request.
+      - name: Check this is main
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::releases are made from main, not $GITHUB_REF_NAME"
+            exit 1
+          fi
+
       # Pinned to a commit, as everything here runs beside the signing keys.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # A tag can point anywhere, a branch nobody reviewed included: only
-      # what was merged to main gets signed.
-      - name: Check the tag is on main and is Cargo.toml's version
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME isn't a commit on main"
-            exit 1
-          fi
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"
-            exit 1
-          fi
-
       # The version and targets rust-toolchain.toml names.
       - run: rustup toolchain install
+
+      # Committed and tagged here, pushed only once the build is signed and
+      # notarized: a release that fails leaves nothing behind.
+      - name: Set the version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          old=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          major=${old%%.*} rest=${old#*.}
+          minor=${rest%%.*} patch=${rest#*.}
+          case $BUMP in
+            major) version=$((major + 1)).0.0 ;;
+            minor) version=$major.$((minor + 1)).0 ;;
+            patch) version=$major.$minor.$((patch + 1)) ;;
+            *) echo "::error::unknown bump $BUMP"; exit 1 ;;
+          esac
+          if git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is tagged already"
+            exit 1
+          fi
+          sed -i '' "s/^version = \"$old\"/version = \"$version\"/" Cargo.toml
+          # The lock file names each crate's version too.
+          cargo update --quiet --workspace
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -am "Version $version"
+          git tag "v$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "### Mightty $version (was $old)" >> "$GITHUB_STEP_SUMMARY"
 
       - run: cargo test --workspace
 
@@ -109,16 +145,28 @@ jobs:
           ditto -c -k --keepParent "$app" Mightty.zip
           shasum -a 256 Mightty.dmg Mightty.zip > SHA256SUMS
 
-      # A tag with a hyphen (v0.2.0-beta.1) is a pre-release, which
-      # releases/latest skips.
+      # main takes changes by pull request and v* tags are for admins to
+      # make: the rulesets let this one key past both, and it is only here,
+      # after everything else has passed. Commit and tag go together or not
+      # at all; if main has moved on since the job began, neither does.
+      - name: Push the version and its tag
+        env:
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: |
+          key=$RUNNER_TEMP/deploy-key
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$RELEASE_DEPLOY_KEY" > "$key")
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+            git push --atomic "git@github.com:$GITHUB_REPOSITORY.git" HEAD:main "v$VERSION"
+
+      # Notes as GitHub writes them: the pull requests merged since the
+      # last release, grouped as .github/release.yml says.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prerelease=
-          case $GITHUB_REF_NAME in *-*) prerelease=--prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" Mightty.dmg Mightty.zip SHA256SUMS \
-            --title "Mightty ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag $prerelease
+          gh release create "v$VERSION" Mightty.dmg Mightty.zip SHA256SUMS \
+            --title "Mightty $VERSION" --generate-notes --verify-tag
 
       - name: Delete the keychain
         if: always()
