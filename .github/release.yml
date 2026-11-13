@@ -1,0 +1,16 @@
+# How GitHub groups the pull requests in a release's notes, by label.
+changelog:
+  exclude:
+    authors:
+      - github-actions
+  categories:
+    - title: New
+      labels: [enhancement, feature]
+    - title: Fixed
+      labels: [bug, fix]
+    - title: Security
+      labels: [security]
+    - title: Performance
+      labels: [performance]
+    - title: Other changes
+      labels: ["*"]
