@@ -10,17 +10,22 @@ so it serves the new release as soon as it's published.
 
 ## Making a release
 
-1. Set `version` in `Cargo.toml` (the workspace's) and commit it through a
-   pull request. The release fails if the tag and the version differ.
-2. Tag the merged commit on `main` and push the tag:
+```sh
+scripts/release.sh 0.2.0     # opens a pull request that sets the version
+scripts/release.sh --tag     # once it's merged: tags main and pushes the tag
+```
 
-   ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
-
-3. Follow the run under Actions. Notarization usually takes a few minutes.
-4. Add a section to the website's changelog.
+1. `scripts/release.sh 0.2.0` sets `version` in `Cargo.toml` and the crates'
+   versions in `Cargo.lock` on a branch, and opens a pull request. The
+   version is in the source because the app, its About panel and its update
+   check are built from it.
+2. Merge the pull request when CI has passed.
+3. `scripts/release.sh --tag` tags the merged commit with that version and
+   pushes the tag, which starts the release workflow. The workflow refuses a
+   tag that differs from `Cargo.toml` or isn't on `main`.
+4. Approve the run under Actions and follow it. Notarization usually takes
+   a few minutes.
+5. Add a section to the website's changelog.
 
 A tag with a hyphen, such as `v0.2.0-beta.1`, makes a pre-release, which
 the download link skips. Release tags can't be moved or deleted once
