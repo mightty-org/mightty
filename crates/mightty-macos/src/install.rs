@@ -8,7 +8,8 @@
 //! thrown away. The checks are macOS's own tools, by their full paths.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The Developer ID team releases are signed by.
@@ -50,7 +51,13 @@ pub fn target() -> Result<PathBuf, String> {
 pub fn stage(version: &str, app: &Path, zip: &[u8], sums: &str) -> Result<PathBuf, String> {
     let staging = staging(app)?;
     let _ = fs::remove_dir_all(&staging);
-    fs::create_dir(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    // Ours alone: the folder it's in (Applications) is one other users of
+    // this Mac may write to, and the update waits here until Mightty quits.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&staging)
+        .map_err(|e| format!("{}: {e}", staging.display()))?;
+    private(&staging)?;
     let staged = (|| {
         let archive = staging.join("Mightty.zip");
         fs::write(&archive, zip).map_err(|e| e.to_string())?;
@@ -62,8 +69,11 @@ pub fn stage(version: &str, app: &Path, zip: &[u8], sums: &str) -> Result<PathBu
         if sum.split_whitespace().next() != Some(expected.trim()) {
             return Err("The download was damaged.".to_owned());
         }
+        // Looked at before it's unpacked: what it holds is only known to be
+        // Mightty's once the signature is checked, after.
+        inspect(&archive)?;
         let unpacked = staging.join("new");
-        // ditto keeps what the signature covers: links, attributes, the ticket.
+        // ditto keeps what the signature covers: attributes, the ticket.
         let status = Command::new("/usr/bin/ditto")
             .args(["-x", "-k"])
             .arg(&archive)
@@ -119,10 +129,66 @@ fn verify(app: &Path, version: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `archive` holds only files and folders inside `Mightty.app`,
+/// of a size an app could be: no links, no names that lead out of the
+/// folder it's unpacked in, nothing that unpacks to gigabytes.
+fn inspect(archive: &Path) -> Result<(), String> {
+    const ODD: &str = "The download isn't an archive of Mightty.";
+    let names = run("/usr/bin/zipinfo", &["-1"], archive).map_err(|_| ODD)?;
+    let inside = |name: &str| {
+        let path = Path::new(name);
+        path.starts_with("Mightty.app")
+            && path.components().all(|c| matches!(c, Component::Normal(_)))
+            && !name.contains('\\')
+    };
+    if names.is_empty() || names.lines().count() > 100_000 || !names.lines().all(inside) {
+        return Err(ODD.into());
+    }
+    // Each entry's line starts with its type and permissions, as `ls -l` does.
+    let listing = run("/usr/bin/zipinfo", &[], archive).map_err(|_| ODD)?;
+    let entries = listing.lines().filter(|line| {
+        let kind = line.split_whitespace().next().unwrap_or_default();
+        kind.len() == 10 && kind.bytes().skip(1).all(|b| b"rwxsStT-".contains(&b))
+    });
+    let (mut count, mut bytes) = (0usize, 0u64);
+    for entry in entries {
+        if !entry.starts_with(['-', 'd']) {
+            return Err(ODD.into());
+        }
+        count += 1;
+        bytes += entry
+            .split_whitespace()
+            .nth(3)
+            .and_then(|n| n.parse::<u64>().ok())
+            .ok_or(ODD)?;
+    }
+    if count != names.lines().count() || bytes > 1 << 30 {
+        return Err(ODD.into());
+    }
+    Ok(())
+}
+
+/// Whether `folder` is a real folder of this user's that nobody else can
+/// look into or change.
+fn private(folder: &Path) -> Result<(), String> {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    let meta = fs::symlink_metadata(folder).map_err(|e| e.to_string())?;
+    // SAFETY: getuid takes nothing and always succeeds.
+    if !meta.is_dir() || meta.uid() != unsafe { getuid() } || meta.mode() & 0o077 != 0 {
+        return Err("The folder for the update isn't private.".into());
+    }
+    Ok(())
+}
+
 /// Puts `new` (from `stage`) in place of `app`, which is kept until the
-/// new one is there and put back if it can't be.
-pub fn swap(new: &Path, app: &Path) -> Result<(), String> {
+/// new one is there and put back if it can't be. `new` is checked again
+/// first, as version `version`: it may have waited hours for Mightty to quit.
+pub fn swap(new: &Path, app: &Path, version: &str) -> Result<(), String> {
     let staging = staging(app)?;
+    private(&staging)?;
+    verify(new, version)?;
     let old = staging.join("old.app");
     fs::rename(app, &old).map_err(|e| format!("The old version couldn't be moved: {e}."))?;
     if let Err(e) = fs::rename(new, app) {
@@ -210,17 +276,74 @@ mod tests {
     #[test]
     fn swapping_puts_the_old_one_back_when_it_fails() {
         let (folder, app) = applications("swap");
-        fs::create_dir(folder.join(STAGING)).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(folder.join(STAGING))
+            .unwrap();
         // No new app to move in: the old one stays where it was.
-        assert!(swap(&folder.join(STAGING).join("new/Mightty.app"), &app).is_err());
-        assert!(app.join("Contents/old").exists());
-        // With one, it takes the old one's place and the staging goes.
         let new = folder.join(STAGING).join("new/Mightty.app");
+        assert!(swap(&new, &app, "9.9.9").is_err());
+        assert!(app.join("Contents/old").exists());
+        // Nor one that isn't a signed Mightty, however it got there.
         fs::create_dir_all(new.join("Contents")).unwrap();
         fs::write(new.join("Contents/new"), "new").unwrap();
-        swap(&new, &app).unwrap();
-        assert!(app.join("Contents/new").exists() && !app.join("Contents/old").exists());
-        assert!(!folder.join(STAGING).exists());
+        let why = swap(&new, &app, "9.9.9").unwrap_err();
+        assert!(why.contains("signed"), "{why}");
+        assert!(app.join("Contents/old").exists());
+        let _ = fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn the_staging_folder_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (folder, app) = applications("private");
+        let staging = folder.join(STAGING);
+        fs::create_dir(&staging).unwrap();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).unwrap();
+        let why = swap(&staging.join("new/Mightty.app"), &app, "9.9.9").unwrap_err();
+        assert!(why.contains("private"), "{why}");
+        // A link standing where the folder should be is refused too.
+        fs::remove_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(std::env::temp_dir(), &staging).unwrap();
+        assert!(private(&staging).is_err());
+        let _ = fs::remove_dir_all(folder);
+    }
+
+    /// Archives that aren't just Mightty.app's files are refused unopened.
+    #[test]
+    fn odd_archives_are_refused() {
+        let (folder, _) = applications("zip");
+        let zip = |name: &str, make: &dyn Fn(&Path)| {
+            let root = folder.join(name);
+            fs::create_dir_all(&root).unwrap();
+            make(&root);
+            let archive = folder.join(format!("{name}.zip"));
+            let status = Command::new("/usr/bin/zip")
+                .current_dir(&root)
+                .args(["-q", "-r", "-y"])
+                .arg(&archive)
+                .arg(".")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            archive
+        };
+        let good = zip("good", &|root| {
+            fs::create_dir_all(root.join("Mightty.app/Contents")).unwrap();
+            fs::write(root.join("Mightty.app/Contents/Info.plist"), "x").unwrap();
+        });
+        assert!(inspect(&good).is_ok());
+        let link = zip("link", &|root| {
+            fs::create_dir_all(root.join("Mightty.app")).unwrap();
+            std::os::unix::fs::symlink("/etc", root.join("Mightty.app/out")).unwrap();
+        });
+        assert!(inspect(&link).is_err());
+        let other = zip("other", &|root| {
+            fs::create_dir_all(root.join("Mightty.app")).unwrap();
+            fs::write(root.join("beside.txt"), "x").unwrap();
+        });
+        assert!(inspect(&other).is_err());
+        assert!(inspect(&folder.join("missing.zip")).is_err());
         let _ = fs::remove_dir_all(folder);
     }
 
@@ -233,10 +356,18 @@ mod tests {
         let built = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/Mightty.app");
         assert!(built.exists(), "run scripts/bundle.sh first");
         let (folder, app) = applications("local");
+        // A copy under the name a release has, whatever the build's is on disk.
+        let named = folder.join("src/Mightty.app");
+        let copied = Command::new("/usr/bin/ditto")
+            .arg(&built)
+            .arg(&named)
+            .status()
+            .unwrap();
+        assert!(copied.success());
         let archive = folder.join("built.zip");
         let zipped = Command::new("/usr/bin/ditto")
             .args(["-c", "-k", "--keepParent"])
-            .arg(&built)
+            .arg(&named)
             .arg(&archive)
             .status()
             .unwrap();
@@ -273,7 +404,7 @@ mod tests {
         let why = stage("0.2.0", &app, &zip, &sums).unwrap_err();
         assert!(why.contains("different version"), "{why}");
         let new = stage("0.1.0", &app, &zip, &sums).unwrap();
-        swap(&new, &app).unwrap();
+        swap(&new, &app, "0.1.0").unwrap();
         assert!(app.join("Contents/MacOS/mightty").exists());
         assert!(verify(&app, "0.1.0").is_ok());
         let _ = fs::remove_dir_all(folder);

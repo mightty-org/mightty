@@ -3353,7 +3353,7 @@ fn install_staged() {
     let Some((version, new, app)) = STAGED.take() else {
         return;
     };
-    match install::swap(&new, &app) {
+    match install::swap(&new, &app, &version) {
         Ok(()) if RELAUNCH.get() => install::relaunch(&app),
         Ok(()) => {}
         Err(why) => eprintln!("mightty: {version} wasn't installed: {why}"),
