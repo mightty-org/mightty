@@ -7,6 +7,7 @@
 <p align="center">
   The fast, lightweight terminal for macOS.<br>
   <a href="https://mightty.org">Website</a> ·
+  <a href="https://mightty.org/download/">Download</a> ·
   <a href="https://mightty.org/docs/install/">Install</a> ·
   <a href="https://mightty.org/docs/">Documentation</a> ·
   <a href="https://mightty.org/changelog/">Changelog</a>
@@ -46,9 +47,10 @@ agents and scripts can drive it through MCP and a control socket.
 
 ## Install
 
-Download the latest release from [mightty.org](https://mightty.org), open
-the disk image and drag Mightty to Applications. Mightty runs on macOS 12 or
-later, on Apple Silicon and Intel.
+Download the latest release from
+[mightty.org/download](https://mightty.org/download/), open the disk image
+and drag Mightty to Applications. Mightty runs on macOS 12 or later, on
+Apple Silicon and Intel, and updates itself from then on.
 
 To build from source, you need the Xcode command line tools and Rust from
 [rustup.rs](https://rustup.rs):
@@ -153,7 +155,9 @@ and runs a C program against the header.
 
 ## Status
 
-Mightty is approaching its first release, version 0.1.0, for macOS.
+Mightty is released for macOS. The current version is on the
+[download page](https://mightty.org/download/), and the
+[changelog](https://mightty.org/changelog/) lists what each version changed.
 
 | Area | Status |
 |---|---|
@@ -163,7 +167,8 @@ Mightty is approaching its first release, version 0.1.0, for macOS.
 | Multiplexer, control socket, `mightty ctl` and MCP server | Done |
 | Agent attention, notifications and shell integration | Done |
 | `libmightty` C library | Done |
-| Signed and notarized releases | In progress |
+| Signed and notarized releases, as a disk image | Done |
+| About panel, update check and in-app updates | Done |
 | Linux and Windows | Planned |
 
 ## Contributing
