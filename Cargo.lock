@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "mightty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-json",
  "mightty-macos",
@@ -16,29 +16,29 @@ dependencies = [
 
 [[package]]
 name = "mightty-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-term",
 ]
 
 [[package]]
 name = "mightty-font"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-image",
 ]
 
 [[package]]
 name = "mightty-image"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "mightty-json"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "mightty-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-font",
  "mightty-json",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "mightty-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-json",
  "mightty-mux",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "mightty-mux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-json",
  "mightty-pty",
@@ -66,18 +66,18 @@ dependencies = [
 
 [[package]]
 name = "mightty-pty"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "mightty-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-term",
 ]
 
 [[package]]
 name = "mightty-term"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mightty-image",
  "mightty-vt",
@@ -85,4 +85,4 @@ dependencies = [
 
 [[package]]
 name = "mightty-vt"
-version = "0.1.0"
+version = "0.2.0"
