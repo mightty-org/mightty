@@ -4,6 +4,7 @@
 //! addresses offered are made here, not taken from it.
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 
@@ -39,7 +40,7 @@ pub fn check(manual: bool, done: extern "C" fn(*mut c_void)) {
             // `MIGHTTY_UPDATE_FROM=0.0.1` checks as that version would, to
             // see what a newer release looks like before there is one.
             let running = std::env::var("MIGHTTY_UPDATE_FROM");
-            let outcome = match fetch() {
+            let outcome = match fetch(LATEST, 1 << 20) {
                 Ok(body) => compare(&body, running.as_deref().unwrap_or(VERSION)),
                 Err(why) => Outcome::Failed(why),
             };
@@ -47,9 +48,50 @@ pub fn check(manual: bool, done: extern "C" fn(*mut c_void)) {
             run_on_main(done);
         });
     if spawned.is_err() {
-        *FOUND.lock().unwrap() = Some((Outcome::Failed("no thread to check on".into()), manual));
+        *FOUND.lock().unwrap() = Some((
+            Outcome::Failed("Mightty couldn't start the check.".into()),
+            manual,
+        ));
         run_on_main(done);
     }
+}
+
+/// A newer version unpacked and checked beside the app, waiting to be
+/// swapped in: its version, where it is, and the app it replaces.
+pub type Staged = (String, PathBuf, PathBuf);
+
+/// What the last `install` came to, until the main thread takes it.
+static INSTALLED: Mutex<Option<Result<Staged, String>>> = Mutex::new(None);
+
+/// Downloads version `version` in the background, unpacks it beside `app`
+/// and checks it (see `install::stage`), then calls `done` on the main
+/// thread (see `take_installed`). Nothing is replaced yet.
+pub fn install(version: String, app: PathBuf, done: extern "C" fn(*mut c_void)) {
+    let work = move || {
+        let base = format!("https://github.com/mightty-org/mightty/releases/download/v{version}");
+        // A release's archive is a few megabytes.
+        let zip = fetch(&format!("{base}/Mightty.zip"), 256 << 20)?;
+        let sums = fetch(&format!("{base}/SHA256SUMS"), 1 << 16)?;
+        let sums =
+            String::from_utf8(sums).map_err(|_| "The release's checksum file is unreadable.")?;
+        let new = crate::install::stage(&version, &app, &zip, &sums)?;
+        Ok((version, new, app))
+    };
+    let spawned = thread::Builder::new()
+        .name("update-install".into())
+        .spawn(move || {
+            *INSTALLED.lock().unwrap() = Some(work());
+            run_on_main(done);
+        });
+    if spawned.is_err() {
+        *INSTALLED.lock().unwrap() = Some(Err("Mightty couldn't start the download.".into()));
+        run_on_main(done);
+    }
+}
+
+/// What `install` came to, once.
+pub fn take_installed() -> Option<Result<Staged, String>> {
+    INSTALLED.lock().unwrap().take()
 }
 
 /// The outcome `check` left, once.
@@ -73,7 +115,7 @@ fn compare(body: &[u8], current: &str) -> Outcome {
         .and_then(|text| mightty_json::parse(text).ok())
         .and_then(|release| release["tag_name"].as_str().map(str::to_owned));
     let Some(latest) = tag.as_deref().and_then(version) else {
-        return Outcome::Failed("GitHub's answer didn't name a version".into());
+        return Outcome::Failed("GitHub's response didn't include a version.".into());
     };
     match version(current) {
         Some(running) if latest > running => {
@@ -97,13 +139,13 @@ fn version(text: &str) -> Option<(u32, u32, u32)> {
     parts.next().is_none().then_some(found)
 }
 
-/// The bytes at `LATEST`, read with the system's networking.
-fn fetch() -> Result<Vec<u8>, String> {
+/// The bytes at `address`, `limit` at most, read with the system's networking.
+fn fetch(address: &str, limit: usize) -> Result<Vec<u8>, String> {
     // SAFETY: documented signatures; Foundation's URL loading may be used
     // from any thread, and the pool frees what it autoreleases here.
     unsafe {
         let pool = objc_autoreleasePoolPush();
-        let url: Id = msg!(class(c"NSURL"), c"URLWithString:", nsstring(LATEST));
+        let url: Id = msg!(class(c"NSURL"), c"URLWithString:", nsstring(address));
         let mut error: Id = NIL;
         let data: Id = msg!(
             class(c"NSData"),
@@ -114,16 +156,15 @@ fn fetch() -> Result<Vec<u8>, String> {
         );
         let result = if data.is_null() {
             let why = if error.is_null() {
-                "no answer".to_owned()
+                "No response from the server.".to_owned()
             } else {
                 string_from_ns(msg!(error, c"localizedDescription"))
             };
             Err(why)
         } else {
             let (bytes, len): (*const u8, usize) = (msg!(data, c"bytes"), msg!(data, c"length"));
-            // An answer is a few kilobytes; more isn't one.
-            if bytes.is_null() || len > 1 << 20 {
-                Err("an answer that isn't a release".to_owned())
+            if bytes.is_null() || len > limit {
+                Err("The download was larger than expected.".to_owned())
             } else {
                 Ok(std::slice::from_raw_parts(bytes, len).to_vec())
             }
@@ -141,7 +182,7 @@ mod tests {
     #[test]
     #[ignore = "needs the network"]
     fn live_answer() {
-        let body = fetch().expect("an answer from GitHub");
+        let body = fetch(LATEST, 1 << 20).expect("an answer from GitHub");
         assert_eq!(
             compare(&body, "0.0.1"),
             Outcome::Newer(latest_for_test(&body))
