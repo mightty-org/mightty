@@ -38,7 +38,7 @@ pub struct Config {
     pub confirm_close: ConfirmClose,
     pub save_state: SaveState,
     /// `auto-update`: look for a new version at launch and daily.
-    pub auto_update: bool,
+    pub auto_update: AutoUpdate,
     pub font_backend: FontBackend,
     /// `grapheme-width`: whether VS16 emoji take two cells (unicode) or one (legacy).
     pub wide_emoji: bool,
@@ -511,7 +511,7 @@ impl Default for Config {
             option_as_alt: None,
             confirm_close: ConfirmClose::Running,
             save_state: SaveState::Default,
-            auto_update: true,
+            auto_update: AutoUpdate::Check,
             font_backend: FontBackend::CoreText,
             wide_emoji: true,
             colorspace: Colorspace::Srgb,
@@ -543,6 +543,16 @@ struct Setting {
     set: fn(&mut Config, &str) -> Result<(), String>,
     /// The current value for help text, or `None` when unset.
     get: fn(&Config) -> Option<String>,
+}
+
+/// `auto-update`: what Mightty does about new versions on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoUpdate {
+    Off,
+    /// Says when there is one.
+    Check,
+    /// Downloads and verifies it too, then asks when to install it.
+    Download,
 }
 
 /// A setting as `mightty config` shows it.
@@ -580,7 +590,7 @@ pub fn choices(name: &str) -> &'static [&'static str] {
         "grapheme-width" => &["unicode", "legacy"],
         "window-colorspace" => &["srgb", "display-p3"],
         "window-save-state" => &["default", "never", "always"],
-        "auto-update" => &["check", "off"],
+        "auto-update" => &["check", "download", "off"],
         "cursor-style" => &["block", "bar", "underline", "block_hollow"],
         "clipboard-read" | "clipboard-write" => &["allow", "ask", "deny"],
         "macos-titlebar-style" => &["native", "transparent", "tabs", "hidden"],
@@ -1088,19 +1098,29 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "auto-update",
         value: "WHEN",
-        help: "check or off: look for a new version of Mightty when it starts and once a day, \
-               and say when there is one. It asks GitHub for the latest release; nothing is \
-               downloaded or installed by itself. Check for Updates in the menu works either way",
+        help: "check, download or off: check looks for a new version at launch and once a day \
+               and tells you; download also fetches it, ready to install when you choose; off \
+               leaves it to Check for Updates in the menu",
         color: false,
         set: |c, v| {
             c.auto_update = match v {
-                "check" => true,
-                "off" => false,
-                _ => return Err("expects check or off".into()),
+                "check" => AutoUpdate::Check,
+                "download" => AutoUpdate::Download,
+                "off" => AutoUpdate::Off,
+                _ => return Err("expects check, download or off".into()),
             };
             Ok(())
         },
-        get: |c| Some(if c.auto_update { "check" } else { "off" }.into()),
+        get: |c| {
+            Some(
+                match c.auto_update {
+                    AutoUpdate::Check => "check",
+                    AutoUpdate::Download => "download",
+                    AutoUpdate::Off => "off",
+                }
+                .into(),
+            )
+        },
     },
     Setting {
         name: "background-opacity",
