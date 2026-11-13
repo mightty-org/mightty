@@ -11,7 +11,14 @@ Releases are made by the Release workflow
    `gh workflow run release.yml -f bump=minor`.
 2. Approve the run when GitHub asks; it waits for a reviewer of the
    `release` environment.
-3. Add a section to the website's changelog.
+3. Update the website, in the `mightty-website` repository:
+
+   ```sh
+   scripts/sync.sh       # the settings reference, and the releases for the download page
+   ```
+
+   Add a section for the version to `content/changelog.md`, then commit and
+   push. The site is published when the push reaches `main`.
 
 The run sets the new version in `Cargo.toml` and `Cargo.lock`, runs the
 tests, builds Mightty.app for Apple Silicon and Intel, signs it with the
