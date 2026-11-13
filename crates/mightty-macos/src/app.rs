@@ -23,12 +23,13 @@ use mightty_term::{
 
 use crate::bindings::{self, Action, Bindings, Trigger};
 use crate::config::{
-    self, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE, MIN_FONT_SIZE,
-    OptionAsAlt, Permission, QuickPosition, SaveState, Titlebar,
+    self, AutoUpdate, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE,
+    MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState, Titlebar,
 };
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::hotkey;
+use crate::install;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
 use crate::linkhint::{self, LinkHint};
@@ -754,6 +755,10 @@ pub fn run(config: Config) -> io::Result<()> {
         .flatten();
         CONFIG_SEEN.set(config_stamp(path.as_deref()));
         run_on_main_after(CONFIG_TICK, on_config_tick);
+        // What an update that was never installed left behind.
+        if let Ok(app) = install::target() {
+            install::clean(&app);
+        }
         run_on_main_after(UPDATE_FIRST, on_update_tick);
         // As in Ghostty: `kill -USR2` reloads the configuration.
         const SIGUSR2: i32 = 31;
@@ -2918,8 +2923,12 @@ enum Asking {
     Paste(PaneId, String),
     /// The field (retained) a new title is typed in.
     Title(PaneId, Id),
-    /// A newer version, to download or read about.
-    Update(String),
+    /// A newer version, to install (if it can be, here) or download, or
+    /// read about.
+    Update(String, bool),
+    /// A newer version unpacked and verified: restart into it now, or
+    /// leave it for when Mightty quits.
+    Staged,
 }
 
 thread_local! {
@@ -3034,12 +3043,24 @@ fn answer(window: Id, asking: Asking, response: isize) {
                 });
             }
         }
-        Asking::Update(version) => {
+        Asking::Update(version, installable) => {
             let (download, notes) = update::addresses(&version);
-            match response {
-                ALERT_FIRST_BUTTON => open::open(&download),
-                ALERT_SECOND_BUTTON => open::open(&notes),
+            match (response, installable.then(install::target)) {
+                (ALERT_FIRST_BUTTON, Some(Ok(app))) => {
+                    update::install(version, app, on_update_installed)
+                }
+                (ALERT_FIRST_BUTTON, _) => open::open(&download),
+                (ALERT_SECOND_BUTTON, _) => open::open(&notes),
                 _ => {}
+            }
+        }
+        // Quitting asks about running programs, as ⌘Q does.
+        Asking::Staged if response == ALERT_FIRST_BUTTON => {
+            RELAUNCH.set(true);
+            // SAFETY: main thread; documented signature.
+            unsafe {
+                let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+                call!(ns_app, c"terminate:", NIL);
             }
         }
         Asking::Title(id, field) => {
@@ -3172,7 +3193,9 @@ const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Looks for a newer version if the settings say to, and again tomorrow.
 extern "C" fn on_update_tick(_: *mut c_void) {
-    if with_app(|app| app.config.auto_update).unwrap_or(false) {
+    let wanted = with_app(|app| app.config.auto_update != AutoUpdate::Off).unwrap_or(false);
+    // Not while one is waiting to be installed.
+    if wanted && STAGED.with_borrow(Option::is_none) {
         update::check(false, on_update_checked);
     }
     run_on_main_after(UPDATE_EVERY, on_update_tick);
@@ -3187,21 +3210,36 @@ extern "C" fn on_update_checked(_: *mut c_void) {
     match outcome {
         update::Outcome::Newer(version) => {
             const TOLD: &str = "UpdateToldAbout";
+            let target = install::target().ok();
+            let download = with_app(|app| app.config.auto_update == AutoUpdate::Download);
             // SAFETY: main thread; documented signatures.
             unsafe {
                 let defaults: Id = msg!(class(c"NSUserDefaults"), c"standardUserDefaults");
                 let told = string_from_ns(msg!(defaults, c"stringForKey:", nsstring(TOLD)));
+                let tell = || {
+                    call!(
+                        defaults,
+                        c"setObject:forKey:",
+                        nsstring(&version),
+                        nsstring(TOLD)
+                    )
+                };
                 // Found on its own, a version is mentioned once.
                 if !manual && told == version {
                     return;
                 }
+                // `auto-update = download`: fetched and verified first, then asked about.
+                if let (false, Some(true), Some(app)) = (manual, download, &target) {
+                    tell();
+                    return update::install(version, app.clone(), on_update_installed);
+                }
+                let (address, _) = update::addresses(&version);
                 let Some(window) = free_window() else {
                     if manual {
-                        let (download, _) = update::addresses(&version);
                         show_problems(
                             &format!("Mightty {version} is available"),
                             &[format!(
-                                "You have {}. Download it from {download}",
+                                "Current version {}. Download it from {address}",
                                 update::VERSION
                             )],
                         );
@@ -3214,36 +3252,111 @@ extern "C" fn on_update_checked(_: *mut c_void) {
                     c"setMessageText:",
                     nsstring(&format!("Mightty {version} is available"))
                 );
+                let (first, how) = match target {
+                    Some(_) => ("Install Update", ""),
+                    None => (
+                        "Download",
+                        " Download the disk image, then drag Mightty to Applications to replace \
+                         this version.",
+                    ),
+                };
                 call!(
                     alert,
                     c"setInformativeText:",
-                    nsstring(&format!(
-                        "You have {}. Download opens the disk image in your browser: \
-                         drag the new Mightty over the old one in Applications.",
-                        update::VERSION
-                    ))
+                    nsstring(&format!("Current version {}.{how}", update::VERSION))
                 );
-                for button in ["Download", "Release Notes", "Later"] {
+                for button in [first, "Release Notes", "Later"] {
                     let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring(button));
                 }
-                if ask(window, alert, Asking::Update(version.clone())) {
-                    call!(
-                        defaults,
-                        c"setObject:forKey:",
-                        nsstring(&version),
-                        nsstring(TOLD)
-                    );
+                if ask(
+                    window,
+                    alert,
+                    Asking::Update(version.clone(), target.is_some()),
+                ) {
+                    tell();
                 }
             }
         }
         update::Outcome::UpToDate if manual => show_problems(
             "Mightty is up to date",
-            &[format!("Version {} is the latest.", update::VERSION)],
+            &[format!("Latest version: {}", update::VERSION)],
         ),
-        update::Outcome::Failed(why) if manual => {
-            show_problems("Mightty couldn't check for updates", &[why])
-        }
+        update::Outcome::Failed(why) if manual => show_problems(
+            "Mightty couldn't check for updates",
+            &[format!("Error: {why}")],
+        ),
         _ => {}
+    }
+}
+
+thread_local! {
+    /// A newer version waiting to be swapped in when Mightty quits.
+    static STAGED: RefCell<Option<update::Staged>> = const { RefCell::new(None) };
+    /// Mightty is quitting to restart into it.
+    static RELAUNCH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A download has been unpacked and verified, or couldn't be: asks when
+/// to install it, or says why not and where to get it by hand.
+extern "C" fn on_update_installed(_: *mut c_void) {
+    match update::take_installed() {
+        Some(Ok(staged)) => {
+            STAGED.set(Some(staged));
+            show_staged();
+        }
+        Some(Err(why)) => show_problems(
+            "Mightty couldn't install the update",
+            &[
+                why,
+                "Download it from https://mightty.org and replace Mightty in Applications.".into(),
+            ],
+        ),
+        None => {}
+    }
+}
+
+/// Asks whether to restart into the version waiting, on a sheet. With no
+/// window to ask on, it's installed when Mightty quits, as it would be.
+fn show_staged() {
+    let Some(version) = STAGED.with_borrow(|s| s.as_ref().map(|s| s.0.clone())) else {
+        return;
+    };
+    // SAFETY: main thread; documented signatures.
+    unsafe {
+        let Some(window) = free_window() else {
+            return;
+        };
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(
+            alert,
+            c"setMessageText:",
+            nsstring(&format!("Mightty {version} is ready to install"))
+        );
+        call!(
+            alert,
+            c"setInformativeText:",
+            nsstring(
+                "Installing now closes the programs running in Mightty. Your windows, tabs and \
+                 splits reopen afterwards. To keep working, choose Install on Quit."
+            )
+        );
+        for button in ["Install and Restart", "Install on Quit"] {
+            let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring(button));
+        }
+        ask(window, alert, Asking::Staged);
+    }
+}
+
+/// Mightty is quitting: swaps in the version waiting, if there is one,
+/// and opens it if that's what the quit was for.
+fn install_staged() {
+    let Some((version, new, app)) = STAGED.take() else {
+        return;
+    };
+    match install::swap(&new, &app) {
+        Ok(()) if RELAUNCH.get() => install::relaunch(&app),
+        Ok(()) => {}
+        Err(why) => eprintln!("mightty: {version} wasn't installed: {why}"),
     }
 }
 
@@ -3253,8 +3366,8 @@ fn show_about() {
     const CREDITS: &str = "The fast, lightweight terminal for macOS.\n\
         mightty.org\n\n\
         Released under the MIT License.\n\n\
-        Includes the themes of iTerm2-Color-Schemes and Symbols Nerd Font, \
-        both under the MIT License; the icon sets in the font keep their own licences.";
+        Themes — iTerm2-Color-Schemes (MIT)\n\
+        Icons — Symbols Nerd Font (MIT)";
     // SAFETY: main thread; documented signatures.
     unsafe {
         let attributes: Id = msg!(new_object(c"NSMutableDictionary"), c"autorelease");
@@ -5560,6 +5673,7 @@ unsafe fn register_delegate_class() -> Id {
                 let _ = fs::remove_file(socket);
             }
         });
+        install_staged();
     }
     extern "C" fn did_resize(_: Id, _: Sel, notification: Id) {
         let window = window_of(notification);
@@ -5690,6 +5804,8 @@ unsafe fn register_delegate_class() -> Id {
             if response == ALERT_FIRST_BUTTON {
                 TERMINATE_NOW
             } else {
+                // Not restarting into an update either: it waits for the next quit.
+                RELAUNCH.set(false);
                 TERMINATE_CANCEL
             }
         }
@@ -5960,6 +6076,8 @@ fn perform(view: Id, action: &Action) {
         Action::OpenConfig => drop(with_app(|app| app.open_config())),
         Action::OpenSettings => drop(with_app(App::open_settings)),
         Action::About => show_about(),
+        // One already waiting to be installed is offered again.
+        Action::CheckForUpdates if STAGED.with_borrow(Option::is_some) => show_staged(),
         Action::CheckForUpdates => update::check(true, on_update_checked),
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),

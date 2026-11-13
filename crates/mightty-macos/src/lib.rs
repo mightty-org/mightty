@@ -10,6 +10,7 @@ mod ffi;
 mod findbar;
 mod font;
 mod hotkey;
+mod install;
 mod keys;
 mod latency;
 mod linkhint;

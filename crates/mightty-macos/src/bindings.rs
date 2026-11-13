@@ -481,10 +481,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "toggle_secure_input",
         "Secure Keyboard Entry: other apps can't read what you type",
     ),
-    ("about", "About Mightty: its version and licence"),
+    ("about", "Shows Mightty's version and licence"),
     (
         "check_for_updates",
-        "Looks for a newer version of Mightty and offers to download it",
+        "Checks for a newer version of Mightty and offers to install it",
     ),
     ("open_settings", "The settings, in a window of their own"),
     (
