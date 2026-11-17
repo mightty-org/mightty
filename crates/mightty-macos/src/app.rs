@@ -177,6 +177,10 @@ struct Surface {
     /// After a key press, the next output redraw comes this early instead,
     /// so the echo doesn't wait out the refresh.
     echo_frame: Option<Instant>,
+    /// While the shell deletes a selection: until when, and the screen's
+    /// text before. Redraws wait for the text to change, so the steps on
+    /// the way (the selection gone, the cursor moved) aren't drawn.
+    deleting: Option<(Instant, String)>,
     /// When an animated image's next frame is due, to draw it then.
     animation_due: Option<Instant>,
     /// Where the pane's shell started, for new tabs until it reports one (OSC 7).
@@ -583,6 +587,9 @@ extern "C" fn on_pane_status(_: *mut c_void) {
     with_app(App::refresh_attention);
 }
 
+/// The longest a deletion's steps go undrawn (see `Surface::deleting`).
+const DELETE_WAIT: Duration = Duration::from_millis(100);
+
 /// How long after a key press output is gathered before drawing it: enough
 /// for a shell's echo (under a millisecond), far less than a refresh.
 const ECHO_WAIT: Duration = Duration::from_millis(2);
@@ -600,9 +607,17 @@ extern "C" fn on_redraw(_: *mut c_void) {
     let mut wait: Option<(Duration, Vec<PaneId>)> = None;
     with_app(|app| {
         for window in app.surfaces.iter_mut().filter(|w| ids.contains(&w.pane.id)) {
-            let due = window
+            let mut due = window
                 .echo_frame
                 .map_or(window.next_frame, |at| at.min(window.next_frame));
+            if let Some((until, before)) = &window.deleting {
+                let changed = window.pane.term.lock().unwrap().screen_text() != *before;
+                if changed || *until <= now {
+                    window.deleting = None;
+                } else {
+                    due = due.max(*until);
+                }
+            }
             if due <= now {
                 window.render();
             } else {
@@ -1455,6 +1470,7 @@ impl App {
                 autoscroll: 0,
                 next_frame: Instant::now(),
                 echo_frame: None,
+                deleting: None,
                 animation_due: None,
                 start_dir: None,
                 preedit: String::new(),
@@ -4409,6 +4425,53 @@ impl Surface {
         }
     }
 
+    /// Delete or Forward Delete with text selected in the command being
+    /// typed at the prompt: deletes that text, by moving the shell's cursor
+    /// to the end of it and deleting backwards, as typing those keys would.
+    fn delete_selection(&mut self, key: &Key, key_flags: u8) -> bool {
+        let m = key.mods;
+        if !matches!(key.code, 51 | 117)
+            || key.action == KeyAction::Release
+            || m.shift
+            || m.ctrl
+            || m.alt
+            || m.cmd
+            || self.scroll_offset != 0
+            || self.selection.is_none_or(|s| s.block)
+        {
+            return false;
+        }
+        let (keys, app_cursor) = {
+            let term = self.pane.term.lock().unwrap();
+            let Some((start, end)) = selection_range(self.selection, &term) else {
+                return false;
+            };
+            let Some(keys) = term.prompt_deletion(start, end) else {
+                return false;
+            };
+            (keys, term.modes().app_cursor)
+        };
+        let (moves, deletes) = keys;
+        let before = self.pane.term.lock().unwrap().screen_text();
+        self.deleting = Some((Instant::now() + DELETE_WAIT, before));
+        let press = |code| {
+            let key = Key {
+                code,
+                ..Key::default()
+            };
+            keys::kitty(&key, key_flags, app_cursor).unwrap_or_default()
+        };
+        let arrow = press(if moves < 0 { 123 } else { 124 });
+        let mut bytes = arrow.repeat(moves.unsigned_abs());
+        bytes.extend(press(51).repeat(deletes));
+        self.type_bytes(&bytes);
+        // Drawn by `DELETE_WAIT` even if the shell shows nothing.
+        if let Some(host) = HOST.get() {
+            host.pane_output(self.pane.id);
+        }
+        true
+    }
+
     /// Sends input to the pane and jumps back to the live screen.
     fn write(&mut self, bytes: &[u8]) {
         let _ = self.pane.write(bytes);
@@ -4427,7 +4490,9 @@ impl Surface {
         if self.scroll_offset != 0 || self.selection.is_some() {
             self.scroll_offset = 0;
             self.selection = None;
-            self.render();
+            if self.deleting.is_none() {
+                self.render();
+            }
         }
     }
 
@@ -4491,10 +4556,35 @@ impl Surface {
                 if picked && BEHAVIOUR.get().copy_on_select {
                     self.copy();
                 }
+                if !picked && clicks == 1 && !(mods.alt || mods.ctrl || mods.cmd) {
+                    self.click_to_move(point);
+                }
                 return;
             }
         }
         self.render();
+    }
+
+    /// A click in the command being typed at a prompt: moves the shell's
+    /// cursor there, as typing arrow keys would (`cursor-click-to-move`).
+    fn click_to_move(&mut self, point: (u64, usize)) {
+        if !BEHAVIOUR.get().click_to_move || self.scroll_offset != 0 {
+            return;
+        }
+        let (moves, key_flags, app_cursor) = {
+            let term = self.pane.term.lock().unwrap();
+            let Some(moves) = term.prompt_move(point).filter(|&m| m != 0) else {
+                return;
+            };
+            (moves, term.key_flags(), term.modes().app_cursor)
+        };
+        let code = if moves < 0 { 123 } else { 124 };
+        let key = Key {
+            code,
+            ..Key::default()
+        };
+        let arrow = keys::kitty(&key, key_flags, app_cursor).unwrap_or_default();
+        self.type_bytes(&arrow.repeat(moves.unsigned_abs()));
     }
 
     /// While selecting, moves the selection's end to the pointer
@@ -5049,6 +5139,9 @@ unsafe fn register_view_class() -> Id {
 
     fn send_key(view: Id, key: &Key, key_flags: u8) {
         with_surface(view, |w| {
+            if w.delete_selection(key, key_flags) {
+                return;
+            }
             let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
             if let Some(bytes) = keys::kitty(key, key_flags, app_cursor) {
                 w.type_bytes(&bytes);

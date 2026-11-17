@@ -210,6 +210,9 @@ pub struct Mark {
     /// Absolute line: scrollback line `k` is `lines_scrolled - scrollback.len() + k`,
     /// screen row `r` is `lines_scrolled + r`.
     pub line: u64,
+    /// The cursor's column when the mark came: where the prompt or the
+    /// typed command begins.
+    pub col: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1070,6 +1073,102 @@ impl Term {
             end += 1;
         }
         Some((start, end))
+    }
+
+    /// The command line the shell is editing, if its integration says it's
+    /// at a prompt.
+    fn prompt_line(&self) -> Option<PromptLine<'_>> {
+        if self.alt_active {
+            return None;
+        }
+        let begins = match self.marks.last()? {
+            m if m.kind == MarkKind::CommandStart => (m.line, m.col),
+            m if m.kind == MarkKind::PromptStart => (m.line, 0),
+            _ => return None, // a command is running
+        };
+        let cursor = (
+            self.lines_scrolled + self.cursor.row as u64,
+            self.cursor.col,
+        );
+        // The cursor's line, with the rows it wraps onto.
+        let wrapped = |line: u64| self.line(line).is_some_and(|r| r.wrapped);
+        let mut first = cursor.0;
+        while first > begins.0 && wrapped(first - 1) {
+            first -= 1;
+        }
+        let mut last = cursor.0;
+        while wrapped(last) && self.line(last + 1).is_some() {
+            last += 1;
+        }
+        Some(PromptLine {
+            term: self,
+            begins,
+            cursor,
+            first,
+            last,
+        })
+    }
+
+    /// The keys that delete the text from `start` to `end` (inclusive, start
+    /// first) out of the command being typed at the shell's prompt: how many
+    /// characters to move the cursor right (left when negative) to just after
+    /// the text, then how many to delete backwards. `None` unless the
+    /// shell's integration says it's at a prompt and the text is on the
+    /// cursor's line, after the prompt began.
+    ///
+    /// Without a mark where typing began (OSC 133;B), a selection may take in
+    /// some of the prompt; the shell ignores deletes past the start of what
+    /// was typed, so only the typed part goes.
+    pub fn prompt_deletion(
+        &self,
+        mut start: (u64, usize),
+        mut end: (u64, usize),
+    ) -> Option<(isize, usize)> {
+        let p = self.prompt_line()?;
+        // A selection dragged on past the end of the text, onto blank rows
+        // below, ends with the text.
+        let blank = |line: u64| {
+            self.line(line)
+                .is_none_or(|r| r.cells.iter().all(|c| c.c == ' '))
+        };
+        if end.0 > p.last && (p.last + 1..=end.0).all(blank) {
+            end = (p.last, usize::MAX);
+        }
+        if start < p.begins || start.0 < p.first || end.0 > p.last {
+            return None;
+        }
+        end.1 = end.1.min(self.cols - 1);
+        // Blanks past the end of the text aren't there to delete.
+        if end.0 == p.last {
+            end.1 = end.1.min(p.text_end()?.checked_sub(1)?);
+        }
+        if start.1 > 0 && p.cells(start.0).get(start.1).is_some_and(spacer) {
+            start.1 -= 1; // the right half of a wide character
+        }
+        if (end.0, end.1 + 1) <= start {
+            return None;
+        }
+        let (from, to) = (p.index(start), p.index((end.0, end.1 + 1)));
+        Some((to as isize - p.index(p.cursor) as isize, to - from))
+    }
+
+    /// How many characters to move the cursor right (left when negative) to
+    /// put it at `(line, col)` in the command being typed at the shell's
+    /// prompt, or at the end of the command when that's past it. `None`
+    /// unless the shell's integration says it's at a prompt and the point is
+    /// on the cursor's line, after the prompt began.
+    pub fn prompt_move(&self, (line, mut col): (u64, usize)) -> Option<isize> {
+        let p = self.prompt_line()?;
+        if (line, col) < p.begins || line < p.first || line > p.last {
+            return None;
+        }
+        if line == p.last {
+            col = col.min(p.text_end()?);
+        }
+        if col > 0 && p.cells(line).get(col).is_some_and(spacer) {
+            col -= 1; // the right half of a wide character
+        }
+        Some(p.index((line, col)) as isize - p.index(p.cursor) as isize)
     }
 
     /// Visible text, soft-wrapped rows joined, trailing blanks trimmed.
@@ -2198,6 +2297,7 @@ impl Term {
                     && let Some(&Mark {
                         kind: MarkKind::OutputStart,
                         line: started,
+                        ..
                     }) = self.marks.last()
                 {
                     let command = self
@@ -2207,7 +2307,11 @@ impl Term {
                         .map(|(_, c)| c.clone());
                     self.command_event(CommandEvent::Finished { command, exit_code });
                 }
-                self.marks.push(Mark { kind, line });
+                self.marks.push(Mark {
+                    kind,
+                    line,
+                    col: self.cursor.col,
+                });
                 if kind == MarkKind::OutputStart
                     && let Some(command) = self.pending_command.take()
                 {
@@ -2689,3 +2793,48 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests;
+
+/// The command line a shell is editing at its prompt: from `first` to `last`,
+/// rows joined by soft wraps, with typing begun at `begins`.
+struct PromptLine<'a> {
+    term: &'a Term,
+    begins: (u64, usize),
+    cursor: (u64, usize),
+    first: u64,
+    last: u64,
+}
+
+impl PromptLine<'_> {
+    fn cells(&self, line: u64) -> &[Cell] {
+        self.term.line(line).map_or(&[], |r| &r.cells[..])
+    }
+
+    /// The column after the text on the last row. Spaces typed before the
+    /// cursor count as text; blanks after it don't.
+    fn text_end(&self) -> Option<usize> {
+        let row = self.cells(self.last);
+        let text = row
+            .iter()
+            .rposition(|c| c.c != ' ' || spacer(c))
+            .map(|i| i + 1);
+        let typed = (self.cursor.0 == self.last).then_some(self.cursor.1);
+        text.max(typed)
+    }
+
+    /// Characters on the line before `(line, col)`: the keys from its start.
+    fn index(&self, (line, col): (u64, usize)) -> usize {
+        let full: usize = (self.first..line)
+            .map(|l| self.cells(l).iter().filter(|c| !spacer(c)).count())
+            .sum();
+        let row = self.cells(line);
+        full + (0..col)
+            .filter(|&i| !row.get(i).is_some_and(spacer))
+            .count()
+    }
+}
+
+/// The right half of a wide character, or the gap a wide character left at
+/// the end of a row: not a character of its own.
+fn spacer(c: &Cell) -> bool {
+    c.flags().contains(Flags::WIDE_SPACER) || c.flags().contains(Flags::WRAP_SPACER)
+}
