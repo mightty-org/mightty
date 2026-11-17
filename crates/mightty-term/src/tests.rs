@@ -1043,3 +1043,77 @@ fn underline_styles_and_colours() {
     assert_eq!(std::mem::size_of::<Style>(), 16);
     assert_eq!(t.lines()[0].cells[8].style(), StyleId::DEFAULT);
 }
+
+#[test]
+fn deleting_a_selection_from_the_prompt() {
+    let prompt = "\x1b]133;A\x07$ \x1b]133;B\x07";
+    // `$ echo hello world`, the cursor after it at column 18.
+    let t = term(40, 3, &format!("{prompt}echo hello world"));
+    // "hello": back 6 to just after it, then 5 deletes.
+    assert_eq!(t.prompt_deletion((0, 7), (0, 11)), Some((-6, 5)));
+    // "world" and the blanks after it: only the text goes.
+    assert_eq!(t.prompt_deletion((0, 13), (0, 39)), Some((0, 5)));
+    // On past the end, onto the blank rows below: the same.
+    assert_eq!(t.prompt_deletion((0, 13), (2, 20)), Some((0, 5)));
+    // From the start of the command, with the cursor moved back to it.
+    let t = term(40, 3, &format!("{prompt}echo hello world\x1b[16D"));
+    assert_eq!(t.prompt_deletion((0, 2), (0, 5)), Some((4, 4)));
+    // Not the prompt itself.
+    assert_eq!(t.prompt_deletion((0, 0), (0, 5)), None);
+    // Not while a command runs.
+    let t = term(40, 3, &format!("{prompt}sleep 9\r\n\x1b]133;C\x07zzz"));
+    assert_eq!(t.prompt_deletion((1, 0), (1, 1)), None);
+    // Not output above the prompt.
+    let t = term(40, 3, &format!("out\r\n{prompt}ls -la"));
+    assert_eq!(t.prompt_deletion((0, 0), (0, 2)), None);
+}
+
+#[test]
+fn deleting_a_selection_counts_characters_not_cells() {
+    let prompt = "\x1b]133;A\x07$ \x1b]133;B\x07";
+    // `$ a日本b`: the wide characters take two cells each, one key each.
+    let t = term(40, 3, &format!("{prompt}a日本b"));
+    assert_eq!(t.cursor(), (0, 8));
+    // From the right half of 日 to 本's left half: both.
+    assert_eq!(t.prompt_deletion((0, 4), (0, 5)), Some((-1, 2)));
+    // A command wrapped onto the next row is still one line.
+    let t = term(10, 3, &format!("{prompt}echo 0123456789"));
+    assert_eq!(t.cursor(), (1, 7));
+    assert_eq!(t.prompt_deletion((0, 7), (1, 1)), Some((-5, 5)));
+}
+
+#[test]
+fn deleting_a_selection_without_a_command_start_mark() {
+    // Some integrations mark only where the prompt begins; a selection
+    // that takes in the prompt deletes more than was typed, which the
+    // shell ignores.
+    let t = term(40, 3, "\x1b]133;A\x07$ ls -la");
+    assert_eq!(t.prompt_deletion((0, 0), (0, 3)), Some((-4, 4)));
+}
+
+#[test]
+fn clicking_in_the_command_moves_the_cursor() {
+    let prompt = "\x1b]133;A\x07$ \x1b]133;B\x07";
+    // `$ echo hello world`, the cursor after it at column 18.
+    let t = term(40, 3, &format!("{prompt}echo hello world"));
+    assert_eq!(t.prompt_move((0, 7)), Some(-11));
+    assert_eq!(t.prompt_move((0, 18)), Some(0));
+    // Past the end of the text: to the end.
+    assert_eq!(t.prompt_move((0, 30)), Some(0));
+    // Not the prompt, not the rows below.
+    assert_eq!(t.prompt_move((0, 1)), None);
+    assert_eq!(t.prompt_move((1, 0)), None);
+    // With the cursor moved back to the start of the command.
+    let t = term(40, 3, &format!("{prompt}echo hello world\x1b[16D"));
+    assert_eq!(t.prompt_move((0, 30)), Some(16));
+    // Wide characters are one key each, from either half.
+    let t = term(40, 3, &format!("{prompt}a日本b"));
+    assert_eq!(t.prompt_move((0, 6)), Some(-2));
+    assert_eq!(t.prompt_move((0, 7)), Some(-1));
+    // Onto the row a long command wrapped onto.
+    let t = term(10, 3, &format!("{prompt}echo 0123456789"));
+    assert_eq!(t.prompt_move((0, 4)), Some(-13));
+    // Not while a command runs.
+    let t = term(40, 3, &format!("{prompt}sleep 9\r\n\x1b]133;C\x07zzz"));
+    assert_eq!(t.prompt_move((1, 1)), None);
+}
