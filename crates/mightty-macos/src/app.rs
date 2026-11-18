@@ -169,6 +169,12 @@ struct Surface {
     clipboard_refused: Option<Instant>,
     /// The mouse button that started `selection` is still down.
     dragging: bool,
+    /// A mouse press is giving this pane the keys (set before AppKit sends
+    /// the press, taken by it).
+    focus_click: bool,
+    /// The press under way gave this pane the keys: the click only focuses
+    /// it, and `cursor-click-to-move` leaves the cursor alone.
+    clicked_to_focus: bool,
     /// While dragging past the top (> 0) or bottom edge: lines to scroll
     /// per `AUTOSCROLL_INTERVAL`.
     autoscroll: isize,
@@ -1478,6 +1484,8 @@ impl App {
                 selection: None,
                 clipboard_refused: None,
                 dragging: false,
+                focus_click: false,
+                clicked_to_focus: false,
                 autoscroll: 0,
                 next_frame: Instant::now(),
                 echo_frame: None,
@@ -4581,7 +4589,11 @@ impl Surface {
                 if picked && BEHAVIOUR.get().copy_on_select {
                     self.copy();
                 }
-                if !picked && clicks == 1 && !(mods.alt || mods.ctrl || mods.cmd) {
+                if !picked
+                    && !self.clicked_to_focus
+                    && clicks == 1
+                    && !(mods.alt || mods.ctrl || mods.cmd)
+                {
                     self.click_to_move(point);
                 }
                 return;
@@ -5491,6 +5503,7 @@ unsafe fn register_view_class() -> Id {
         }
     }
     extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
+        with_surface(view, |w| w.clicked_to_focus = mem::take(&mut w.focus_click));
         // Without a title bar, the top padding moves the window.
         if BEHAVIOUR.get().titlebar == Titlebar::Hidden
             && with_surface(view, |w| w.in_top_padding(event)) == Some(true)
@@ -5568,7 +5581,21 @@ unsafe fn register_view_class() -> Id {
     /// Clicked, or focused by AppKit: its pane becomes the active one. When
     /// the app is busy, the caller did that already (`App::focus`).
     extern "C" fn become_first_responder(view: Id, _: Sel) -> Bool {
+        const LEFT_MOUSE_DOWN: usize = 1;
         with_app(|app| app.activate(view));
+        // AppKit gives a clicked view the keys before its mouseDown.
+        // SAFETY: main thread; documented signatures.
+        let clicked = unsafe {
+            let event: Id = msg!(
+                msg!(class(c"NSApplication"), c"sharedApplication"),
+                c"currentEvent"
+            );
+            !event.is_null() && {
+                let kind: usize = msg!(event, c"type");
+                kind == LEFT_MOUSE_DOWN
+            }
+        };
+        with_surface(view, |w| w.focus_click = clicked);
         // SAFETY: `view` is a MighttyView, an NSView.
         unsafe { send_super(view, class(c"NSView"), c"becomeFirstResponder", ()) }
     }

@@ -461,6 +461,8 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
         }
         finished_commands(&term)
     };
+    pane.awaited
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let ran = write(&pane, format!("{command}\r").as_bytes()).map(|()| {
         let max_output = max_output(params);
         let finished = wait_until(&pane, timeout(params, DEFAULT_RUN_WAIT), |pane| {
@@ -475,6 +477,9 @@ fn run(mux: &Arc<Mux>, params: &Value) -> Result<Value> {
         result.insert("timed_out", finished.is_none());
         result
     });
+    // Past the timeout, the user hears when it finishes after all.
+    pane.awaited
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     // A hidden shell nobody will use again would run until mightty quits.
     let keep = params["keep"].as_bool() == Some(true)
         || ran

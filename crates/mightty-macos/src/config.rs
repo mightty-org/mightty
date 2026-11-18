@@ -1685,7 +1685,6 @@ fn show_variations(list: &[([u8; 4], f64)]) -> Option<String> {
     (!list.is_empty()).then(|| list.iter().map(show).collect::<Vec<_>>().join(", "))
 }
 
-/// A number from `min` to 1.
 /// A time up to an hour: 5s, 500ms, 1m, or 0.
 fn time(v: &str) -> Result<std::time::Duration, String> {
     let v = v.trim();
@@ -1710,6 +1709,7 @@ fn time(v: &str) -> Result<std::time::Duration, String> {
     Ok(std::time::Duration::from_secs_f64(n * unit))
 }
 
+/// A number from `min` to 1.
 fn fraction(v: &str, min: f64) -> Result<f64, String> {
     v.parse()
         .ok()

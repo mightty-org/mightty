@@ -158,6 +158,9 @@ pub struct Pane {
     ticked_at: AtomicU64,
     trimmed_at: AtomicU64,
     activity: Mutex<Activity>,
+    /// `pane.run` is waiting for its command: whoever ran it hears when it
+    /// finishes, so the user isn't told.
+    pub(crate) awaited: AtomicBool,
     /// The user is looking at it: it can't need them.
     focused: AtomicBool,
     events: Arc<Events>,
@@ -504,6 +507,7 @@ impl Mux {
             ticked_at: AtomicU64::new(u64::MAX),
             trimmed_at: AtomicU64::new(u64::MAX),
             activity: Mutex::new(Activity::new()),
+            awaited: AtomicBool::new(false),
             focused: AtomicBool::new(false),
             events: self.events.clone(),
         });
@@ -748,7 +752,8 @@ impl Watch {
                 CommandEvent::Finished { command, exit_code } => {
                     let took = self.command_started.take().map(|t| t.elapsed());
                     let duration = took.map(|t| t.as_millis() as u64);
-                    if let Some(took) = took.filter(|&t| status::finish_needs_user(t)) {
+                    let awaited = pane.awaited.load(Ordering::Relaxed);
+                    if let Some(took) = took.filter(|&t| !awaited && status::finish_needs_user(t)) {
                         finished = Some(Reason::Finished {
                             command: command.clone(),
                             exit_code,
