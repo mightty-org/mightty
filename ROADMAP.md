@@ -9,7 +9,6 @@ Small changes that most people would notice.
 
 | Feature | Why |
 |---|---|
-| Notify when a long command finishes | Start a build, switch to another app, and get a notification when it's done, with its exit status. Mightty already times every command through shell integration. |
 | Jump to the previous or next prompt | <kbd>⌘↑</kbd> and <kbd>⌘↓</kbd> to scroll back through earlier commands and their output. Mightty already marks every prompt. |
 | Light and dark reports (mode 2031, `CSI ? 996 n`) | Neovim, Helix and fish change their colours when macOS switches between light and dark. |
 | Capability queries (XTGETTCAP, DECRQSS) | Neovim and tmux ask these to find out about true colour, styled underlines and the cursor. |

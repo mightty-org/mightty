@@ -731,6 +731,7 @@ pub fn run(config: Config) -> io::Result<()> {
         let restore = config.command.is_none();
 
         BEHAVIOUR.set(config.behaviour);
+        mightty_mux::set_notify_after(config.notify_finish.then_some(config.notify_finish_after));
         if let Some(problem) = load_bell_sound(config.bell_audio.as_deref()) {
             eprintln!("mightty: {problem}");
         }
@@ -1025,7 +1026,17 @@ impl App {
         let Some(s) = self.surfaces.iter().find(|s| s.view == active) else {
             return String::new();
         };
-        let mark = if s.bell { "🔔 " } else { "" };
+        // Marked if any of the tab's panes needs the user, as the window is.
+        let needs_user = self.windows[index].tree.leaves().iter().any(|&view| {
+            self.surfaces
+                .iter()
+                .any(|s| s.view == view && s.pane.attention().is_some())
+        });
+        let mark = match (needs_user, s.bell) {
+            (true, _) => "● ",
+            (false, true) => "🔔 ",
+            (false, false) => "",
+        };
         if let Some(title) = &s.title_override {
             return format!("{mark}{title}");
         }
@@ -1757,8 +1768,15 @@ impl App {
                 surface.render();
             }
         }
+        let bars: Vec<Id> = self.bars.iter().map(|b| b.0).collect();
+        for window in bars {
+            self.update_tab_bar(window);
+        }
         let queue = self.mux.attention_queue();
         let count = queue.len();
+        if count > 0 {
+            notify::request_permission();
+        }
         // SAFETY: main thread; documented signatures.
         let active = unsafe {
             let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
@@ -1849,6 +1867,12 @@ impl App {
         };
         // SAFETY: main thread; documented signature.
         unsafe { call!(window, c"makeKeyAndOrderFront:", NIL) };
+        // A tab of mightty's own that's hidden shows first.
+        if let Some(tab) = self.tab_index(view).filter(|&t| !self.windows[t].shown)
+            && let Some(index) = self.tabs_of(window).iter().position(|&t| t == tab)
+        {
+            self.select_tab(window, index);
+        }
         self.focus(view);
         self.sync_key_focus();
         true
@@ -2633,6 +2657,7 @@ impl App {
             surface.resize();
         }
         BEHAVIOUR.set(config.behaviour);
+        mightty_mux::set_notify_after(config.notify_finish.then_some(config.notify_finish_after));
         let sound_problem = load_bell_sound(config.bell_audio.as_deref());
         self.config = config;
         let windows: Vec<Id> = self.windows.iter().map(|w| w.window).collect();

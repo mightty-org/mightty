@@ -38,16 +38,20 @@ unsafe extern "C" fn authorized(_: *const Block, _granted: Bool, _error: Id) {
     // Nothing to do either way: the user decides in System Settings.
 }
 
-/// Asks once for permission to show banners; macOS remembers the answer.
-fn request_permission() {
+/// Asks once for permission to show banners and the count on the Dock
+/// icon, which macOS hides without it; macOS remembers the answer.
+pub fn request_permission() {
+    if !available() {
+        return;
+    }
     static ASKED: std::sync::Once = std::sync::Once::new();
-    // UNAuthorizationOptionSound | UNAuthorizationOptionAlert.
+    // UNAuthorizationOptionBadge | UNAuthorizationOptionSound | UNAuthorizationOptionAlert.
     // SAFETY: documented signature; the handler is a global block.
     ASKED.call_once(|| unsafe {
         call!(
             center(),
             c"requestAuthorizationWithOptions:completionHandler:",
-            2usize | 4,
+            1usize | 2 | 4,
             &AUTHORIZED
         )
     });

@@ -32,7 +32,7 @@ pub use keys::key_bytes;
 pub use rpc::{RpcError, handle};
 pub use socket::{CallError, Client, listen, runtime_dir};
 use status::Activity;
-pub use status::{AGENTS, Attention, Reason, Status, is_agent};
+pub use status::{AGENTS, Attention, Reason, Status, is_agent, set_notify_after};
 
 pub type PaneId = u64;
 
@@ -643,6 +643,7 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
         .spawn(move || {
             let mut buf = vec![0; 64 * 1024];
             let mut watch = Watch::default();
+            let mut finished;
             loop {
                 let n = match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -654,7 +655,7 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                 let (replies, bells, notifications) = {
                     let mut term = pane.term.lock().unwrap();
                     term.feed(&buf[..n]);
-                    watch.check(&pane, &mut term);
+                    finished = watch.check(&pane, &mut term);
                     (
                         term.take_responses(),
                         term.bells(),
@@ -663,6 +664,11 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                 };
                 if !replies.is_empty() {
                     let _ = pane.write(&replies);
+                }
+                if let Some(reason) = finished
+                    && pane.request_attention(reason)
+                {
+                    host.pane_status(pane.id);
                 }
                 pane.notify();
                 host.pane_output(pane.id);
@@ -712,7 +718,10 @@ struct Watch {
 }
 
 impl Watch {
-    fn check(&mut self, pane: &Pane, term: &mut Term) {
+    /// Tells subscribers what changed. Returns why the pane needs the user,
+    /// if a command that ran a while finished.
+    fn check(&mut self, pane: &Pane, term: &mut Term) -> Option<Reason> {
+        let mut finished = None;
         let events = &pane.events;
         let commands = term.take_command_events();
         let id = || ("pane", pane.id.into());
@@ -737,10 +746,15 @@ impl Watch {
                     });
                 }
                 CommandEvent::Finished { command, exit_code } => {
-                    let duration = self
-                        .command_started
-                        .take()
-                        .map(|t| t.elapsed().as_millis() as u64);
+                    let took = self.command_started.take().map(|t| t.elapsed());
+                    let duration = took.map(|t| t.as_millis() as u64);
+                    if let Some(took) = took.filter(|&t| status::finish_needs_user(t)) {
+                        finished = Some(Reason::Finished {
+                            command: command.clone(),
+                            exit_code,
+                            took,
+                        });
+                    }
                     events.emit("command.finished", || {
                         Value::object([
                             id(),
@@ -752,6 +766,7 @@ impl Watch {
                 }
             }
         }
+        finished
     }
 }
 

@@ -5,6 +5,7 @@
 //! know), but they redraw a spinner while they work: an agent pane with
 //! recent output is working, and one gone quiet is waiting.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mightty_pty::Foreground;
@@ -67,6 +68,12 @@ pub enum Reason {
     Waiting,
     /// Through the API (`pane.notify`), e.g. from an agent's hook.
     Asked(String),
+    /// A command that ran a while finished (see [`set_notify_after`]).
+    Finished {
+        command: Option<String>,
+        exit_code: Option<i32>,
+        took: Duration,
+    },
 }
 
 impl Reason {
@@ -76,6 +83,7 @@ impl Reason {
             Reason::Notification(_) => "notification",
             Reason::Waiting => "waiting",
             Reason::Asked(_) => "asked",
+            Reason::Finished { .. } => "finished",
         }
     }
 
@@ -87,8 +95,56 @@ impl Reason {
             Reason::Notification(n) => format!("{}: {}", n.title, n.body),
             Reason::Waiting => "Waiting for you".into(),
             Reason::Asked(text) => text.clone(),
+            Reason::Finished {
+                command,
+                exit_code,
+                took,
+            } => {
+                let command = command.as_deref().map_or("The command".into(), |c| {
+                    let c: String = c.chars().take(60).collect();
+                    format!("“{c}”")
+                });
+                match exit_code {
+                    Some(code) if *code != 0 => {
+                        format!(
+                            "{command} failed with exit code {code} after {}",
+                            span(*took)
+                        )
+                    }
+                    _ => format!("{command} finished after {}", span(*took)),
+                }
+            }
         }
     }
+}
+
+/// `took` for people: 45s, 3m 20s, 1h 5m.
+fn span(took: Duration) -> String {
+    let s = took.as_secs();
+    match (s / 3600, s / 60 % 60, s % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, 0, _) => format!("{h}h"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
+
+/// How long a command must run for its end to need the user, in
+/// milliseconds; `u64::MAX` for never.
+static NOTIFY_AFTER: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Commands that run at least `after` need the user when they finish,
+/// in a pane they aren't looking at; `None` turns that off.
+pub fn set_notify_after(after: Option<Duration>) {
+    let ms = after.map_or(u64::MAX, |d| d.as_millis().min(u64::MAX as u128 - 1) as u64);
+    NOTIFY_AFTER.store(ms, Ordering::Relaxed);
+}
+
+/// Whether a command that ran for `took` needs the user when it finishes.
+pub(crate) fn finish_needs_user(took: Duration) -> bool {
+    let after = NOTIFY_AFTER.load(Ordering::Relaxed);
+    after != u64::MAX && took.as_millis() >= u128::from(after)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,6 +291,29 @@ mod tests {
             name: name.into(),
             args: args.iter().map(|a| a.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn finished_commands_say_how_they_went() {
+        let finished = |command: Option<&str>, exit_code, secs| Reason::Finished {
+            command: command.map(str::to_owned),
+            exit_code,
+            took: Duration::from_secs(secs),
+        };
+        assert_eq!(
+            finished(Some("cargo build"), Some(0), 45).message(),
+            "“cargo build” finished after 45s"
+        );
+        assert_eq!(
+            finished(Some("make"), Some(2), 200).message(),
+            "“make” failed with exit code 2 after 3m 20s"
+        );
+        assert_eq!(
+            finished(None, None, 3900).message(),
+            "The command finished after 1h 5m"
+        );
+        assert_eq!(span(Duration::from_secs(120)), "2m");
+        assert_eq!(span(Duration::from_secs(7200)), "2h");
     }
 
     #[test]
