@@ -419,7 +419,16 @@ impl Mux {
         // Stored first, so a pane spawned meanwhile gets them either way.
         *self.options.lock().unwrap() = options.clone();
         for pane in self.panes() {
-            pane.term.lock().unwrap().set_options(&options);
+            // A change of theme can answer programs (mode 2031), which
+            // otherwise would wait for the pane's next output.
+            let replies = {
+                let mut term = pane.term.lock().unwrap();
+                term.set_options(&options);
+                term.take_responses()
+            };
+            if !replies.is_empty() {
+                let _ = pane.write(&replies);
+            }
         }
     }
 

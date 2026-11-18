@@ -102,6 +102,9 @@ pub struct Modes {
     /// says otherwise, as in Ghostty; reset, a cluster takes its first
     /// character's width, as `wcwidth` counts.
     pub grapheme_cluster: bool,
+    /// Mode 2031: tell the program when the theme turns dark or light
+    /// (`CSI ? 997 ; 1 n` dark, `2` light), as `CSI ? 996 n` asks.
+    pub color_scheme_reports: bool,
     pub mouse: MouseMode,
     pub mouse_sgr: bool,
     /// DECSCUSR value (0 = default).
@@ -122,6 +125,7 @@ impl Default for Modes {
             focus_events: false,
             sync_output: false,
             grapheme_cluster: true,
+            color_scheme_reports: false,
             mouse: MouseMode::Off,
             mouse_sgr: false,
             cursor_shape: 0,
@@ -347,7 +351,11 @@ impl Term {
     }
 
     pub fn set_options(&mut self, options: &TermOptions) {
+        let was_dark = self.dark();
         self.theme = options.colors.clone();
+        if self.modes.color_scheme_reports && self.dark() != was_dark {
+            self.report_color_scheme();
+        }
         if options.wide_emoji != self.wide_emoji {
             self.wide_emoji = options.wide_emoji;
             self.modes.grapheme_cluster = options.wide_emoji;
@@ -1377,6 +1385,22 @@ impl Term {
         self.responses.extend_from_slice(bytes);
     }
 
+    /// Whether the theme is dark: its background, not one a program set,
+    /// by its luminance (Rec. 709).
+    pub fn dark(&self) -> bool {
+        let (r, g, b) = self.theme.background;
+        0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b) < 128.0
+    }
+
+    /// The answer to `CSI ? 996 n`, and what mode 2031 sends on a change.
+    fn report_color_scheme(&mut self) {
+        self.respond(if self.dark() {
+            b"\x1b[?997;1n"
+        } else {
+            b"\x1b[?997;2n"
+        });
+    }
+
     // ---- printing ----
 
     fn input_char(&mut self, c: char) {
@@ -2129,6 +2153,7 @@ impl Term {
             2004 => m.bracketed_paste,
             2026 => m.sync_output,
             2027 => m.grapheme_cluster,
+            2031 => m.color_scheme_reports,
             _ => return None,
         })
     }
@@ -2174,6 +2199,7 @@ impl Term {
                 2004 => self.modes.bracketed_paste = on,
                 2026 => self.modes.sync_output = on,
                 2027 => self.modes.grapheme_cluster = on,
+                2031 => self.modes.color_scheme_reports = on,
                 _ => {}
             }
         }
@@ -2537,6 +2563,7 @@ impl Perform for Term {
             ([], b's') => self.save_cursor(),
             ([], b'u') => self.restore_cursor(),
             // Kitty keyboard protocol: query, push, pop, set.
+            ([b'?'], b'n') if arg(0, 0) == 996 => self.report_color_scheme(),
             ([b'?'], b'u') => {
                 let reply = format!("\x1b[?{}u", self.key_flags());
                 self.respond(reply.as_bytes());
