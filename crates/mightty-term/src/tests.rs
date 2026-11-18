@@ -1117,3 +1117,35 @@ fn clicking_in_the_command_moves_the_cursor() {
     let t = term(40, 3, &format!("{prompt}sleep 9\r\n\x1b]133;C\x07zzz"));
     assert_eq!(t.prompt_move((1, 1)), None);
 }
+
+#[test]
+fn jumping_between_prompts() {
+    // Three commands with 4 lines of output each, then a prompt, on a
+    // 4-row screen: prompts at lines 0, 5, 10 and 15.
+    let mut t = Term::new(20, 4);
+    for n in 0..3 {
+        t.feed(format!("\x1b]133;A\x07$ cmd{n}\r\n\x1b]133;C\x07").as_bytes());
+        t.feed(b"a\r\nb\r\nc\r\nd\r\n\x1b]133;D;0\x07");
+    }
+    t.feed(b"\x1b]133;A\x07$ ");
+    assert_eq!(t.lines_scrolled(), 12);
+    // From the live screen (top line 12): back to line 10, then 5, then 0.
+    assert_eq!(t.prompt_offset(0, -1), Some(2));
+    assert_eq!(t.prompt_offset(2, -1), Some(7));
+    assert_eq!(t.prompt_offset(7, -1), Some(12));
+    assert_eq!(t.prompt_offset(0, -2), Some(7));
+    // None before the first.
+    assert_eq!(t.prompt_offset(12, -1), None);
+    // On: 0 to 5, then to the live screen, since 10 can't be scrolled to
+    // the top (only 2 lines below it are history).
+    assert_eq!(t.prompt_offset(12, 1), Some(7));
+    assert_eq!(t.prompt_offset(7, 1), Some(2));
+    assert_eq!(t.prompt_offset(2, 1), Some(0));
+    assert_eq!(t.prompt_offset(0, 1), None);
+    // From between prompts.
+    assert_eq!(t.prompt_offset(9, -1), Some(12));
+    assert_eq!(t.prompt_offset(9, 1), Some(7));
+    // Not on the alternate screen.
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.prompt_offset(0, -1), None);
+}

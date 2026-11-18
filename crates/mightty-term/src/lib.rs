@@ -1075,6 +1075,45 @@ impl Term {
         Some((start, end))
     }
 
+    /// Where to scroll to show a prompt at the top: from a view scrolled
+    /// `offset` lines back from the live screen, the offset for the prompt
+    /// `steps` prompts up (negative) or down. Past the last prompt down is
+    /// the live screen. `None` when it wouldn't move.
+    pub fn prompt_offset(&self, offset: usize, steps: isize) -> Option<usize> {
+        if self.alt_active || steps == 0 {
+            return None;
+        }
+        let first = self.first_line();
+        let mut prompts: Vec<u64> = self
+            .marks
+            .iter()
+            .filter(|m| m.kind == MarkKind::PromptStart && m.line >= first)
+            .map(|m| m.line)
+            .collect();
+        prompts.sort_unstable();
+        prompts.dedup();
+        let mut top = self.lines_scrolled - offset.min(self.scrollback.len()) as u64;
+        for _ in 0..steps.unsigned_abs() {
+            let next = if steps < 0 {
+                prompts.iter().rev().find(|&&l| l < top)
+            } else {
+                prompts.iter().find(|&&l| l > top)
+            };
+            match next {
+                Some(&line) => top = line,
+                None if steps > 0 => top = self.lines_scrolled,
+                None => break,
+            }
+            // Prompts on the live screen are as far as scrolling goes.
+            if top >= self.lines_scrolled {
+                top = self.lines_scrolled;
+                break;
+            }
+        }
+        let to = (self.lines_scrolled - top) as usize;
+        (to != offset).then_some(to)
+    }
+
     /// The command line the shell is editing, if its integration says it's
     /// at a prompt.
     fn prompt_line(&self) -> Option<PromptLine<'_>> {
