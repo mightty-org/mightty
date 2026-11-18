@@ -4,7 +4,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mightty_mux::{Headless, Mux, Reason, SpawnOptions, set_notify_after};
+use mightty_json as json;
+use mightty_mux::{Headless, Mux, Reason, SpawnOptions, handle, set_notify_after};
 
 fn wait_for(what: impl Fn() -> bool) -> bool {
     let start = Instant::now();
@@ -74,6 +75,18 @@ fn long_commands_need_the_user_when_they_finish() {
     set_notify_after(None);
     pane.write(b"sleep 0.5\r").unwrap();
     assert!(wait_for(|| screen().matches("ready>").count() == 5));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(pane.attention(), None);
+
+    // Nor for a command run through the API: its caller is waiting for it.
+    set_notify_after(Some(Duration::from_millis(300)));
+    let params = json::parse(&format!(
+        r#"{{"pane": {}, "command": "sleep 0.5"}}"#,
+        pane.id
+    ))
+    .unwrap();
+    let ran = handle(&mux, "pane.run", &params).unwrap_or_else(|e| panic!("{}", e.message));
+    assert_eq!(ran["exit_code"].as_i64(), Some(0), "{ran}");
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(pane.attention(), None);
     let _ = std::fs::remove_dir_all(&home);
