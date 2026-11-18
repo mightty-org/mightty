@@ -140,6 +140,8 @@ pub enum Action {
     ScrollToBottom,
     ScrollPageUp,
     ScrollPageDown,
+    /// `jump_to_prompt:N`: N prompts up (negative) or down.
+    JumpToPrompt(isize),
     /// `text:…`, `csi:…`, `esc:…`: bytes sent to the program.
     Text(Vec<u8>),
     /// The key does nothing, not even reach the program.
@@ -233,6 +235,14 @@ impl Action {
             ("scroll_to_bottom", _) => bare(Self::ScrollToBottom),
             ("scroll_page_up", _) => bare(Self::ScrollPageUp),
             ("scroll_page_down", _) => bare(Self::ScrollPageDown),
+            ("jump_to_prompt", Some(n)) => n
+                .parse()
+                .ok()
+                .filter(|&n: &isize| n != 0)
+                .map(Self::JumpToPrompt)
+                .ok_or(
+                    "`jump_to_prompt`: expects a number of prompts, -1 for the one before".into(),
+                ),
             ("text", Some(text)) => Ok(Self::Text(unescape(text)?)),
             ("csi", Some(text)) => Ok(Self::Text([b"\x1b[".as_slice(), text.as_bytes()].concat())),
             ("esc", Some(text)) => Ok(Self::Text([b"\x1b".as_slice(), text.as_bytes()].concat())),
@@ -506,6 +516,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("scroll_page_up", "A page up the history"),
     ("scroll_page_down", "A page down the history"),
     (
+        "jump_to_prompt:-1",
+        "To the prompt before, or with 1 the one after; needs shell integration",
+    ),
+    (
         "text:hello\\n",
         "Sends text to the program (\\n, \\r, \\t, \\e, \\xHH)",
     ),
@@ -569,6 +583,8 @@ impl Default for Bindings {
             ("cmd+end", ScrollToBottom),
             ("cmd+page_up", ScrollPageUp),
             ("cmd+page_down", ScrollPageDown),
+            ("cmd+up", JumpToPrompt(-1)),
+            ("cmd+down", JumpToPrompt(1)),
         ];
         let tabs: Vec<(String, Action)> =
             (1..=8).map(|n| (format!("cmd+{n}"), GotoTab(n))).collect();

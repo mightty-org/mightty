@@ -49,6 +49,8 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Scroll to Bottom", ScrollToBottom),
         ("Scroll Page Up", ScrollPageUp),
         ("Scroll Page Down", ScrollPageDown),
+        ("Jump to Previous Prompt", JumpToPrompt(-1)),
+        ("Jump to Next Prompt", JumpToPrompt(1)),
         ("Quick Terminal", ToggleQuickTerminal),
         ("Secure Keyboard Entry", ToggleSecureInput),
         ("About Mightty", About),

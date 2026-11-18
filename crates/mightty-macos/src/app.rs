@@ -4915,6 +4915,22 @@ impl Surface {
         }
     }
 
+    /// `jump_to_prompt`: scrolls a prompt to the top, or back to the live
+    /// screen after the last one.
+    fn jump_to_prompt(&mut self, steps: isize) {
+        let to = self
+            .pane
+            .term
+            .lock()
+            .unwrap()
+            .prompt_offset(self.scroll_offset, steps);
+        match to {
+            Some(to) => self.scroll_to(|_, _, _| to),
+            // SAFETY: plain AppKit call.
+            None => unsafe { NSBeep() },
+        }
+    }
+
     /// The mouse on the scrollbar: dragging the knob, or clicking beside it.
     fn scrollbar_mouse(&mut self, drag: scrollbar::Drag) {
         let (history, rows) = {
@@ -6261,6 +6277,7 @@ fn perform(view: Id, action: &Action) {
         Action::ScrollPageDown => drop(with_surface(view, |s| {
             s.scroll_to(|at, _, rows| at.saturating_sub(rows))
         })),
+        Action::JumpToPrompt(steps) => drop(with_surface(view, |s| s.jump_to_prompt(steps))),
         Action::Text(ref bytes) => drop(with_surface(view, |s| s.type_bytes(bytes))),
         Action::Ignore => {}
     }
