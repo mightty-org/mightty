@@ -1149,3 +1149,37 @@ fn jumping_between_prompts() {
     t.feed(b"\x1b[?1049h");
     assert_eq!(t.prompt_offset(0, -1), None);
 }
+
+#[test]
+fn color_scheme_reports() {
+    let light = TermOptions {
+        colors: Colors {
+            background: (250, 250, 250),
+            foreground: (20, 20, 20),
+            ..Colors::default()
+        },
+        ..TermOptions::default()
+    };
+    let mut t = Term::new(10, 2);
+    // Asked: the default theme is dark.
+    t.feed(b"\x1b[?996n");
+    assert_eq!(t.take_responses(), b"\x1b[?997;1n");
+    // Not told of a change unless it asked to be.
+    t.set_options(&light);
+    assert!(t.take_responses().is_empty());
+    t.feed(b"\x1b[?996n");
+    assert_eq!(t.take_responses(), b"\x1b[?997;2n");
+    // Mode 2031: told when the theme turns dark, not when it stays so.
+    t.feed(b"\x1b[?2031h\x1b[?2031$p");
+    assert_eq!(t.take_responses(), b"\x1b[?2031;1$y");
+    t.set_options(&TermOptions::default());
+    assert_eq!(t.take_responses(), b"\x1b[?997;1n");
+    t.set_options(&TermOptions::default());
+    assert!(t.take_responses().is_empty());
+    // A background a program sets isn't the theme.
+    t.feed(b"\x1b]11;#ffffff\x07\x1b[?996n");
+    assert_eq!(t.take_responses(), b"\x1b[?997;1n");
+    t.feed(b"\x1b[?2031l");
+    t.set_options(&light);
+    assert!(t.take_responses().is_empty());
+}

@@ -9,7 +9,6 @@ Small changes that most people would notice.
 
 | Feature | Why |
 |---|---|
-| Light and dark reports (mode 2031, `CSI ? 996 n`) | Neovim, Helix and fish change their colours when macOS switches between light and dark. |
 | Capability queries (XTGETTCAP, DECRQSS) | Neovim and tmux ask these to find out about true colour, styled underlines and the cursor. |
 | In-band resize reports (mode 2048) | Full-screen programs get the new size in their input, in order with keys, instead of from a signal. |
 | Copy with colours | Copied text also goes on the clipboard as HTML, so pasting into Notes, Mail or Slack keeps its colours. |
