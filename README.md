@@ -171,6 +171,8 @@ Mightty is released for macOS. The current version is on the
 | About panel, update check and in-app updates | Done |
 | Linux and Windows | Planned |
 
+[ROADMAP.md](ROADMAP.md) lists what's planned next.
+
 ## Contributing
 
 Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how
