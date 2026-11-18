@@ -1867,6 +1867,12 @@ impl App {
         };
         // SAFETY: main thread; documented signature.
         unsafe { call!(window, c"makeKeyAndOrderFront:", NIL) };
+        // A tab of mightty's own that's hidden shows first.
+        if let Some(tab) = self.tab_index(view).filter(|&t| !self.windows[t].shown)
+            && let Some(index) = self.tabs_of(window).iter().position(|&t| t == tab)
+        {
+            self.select_tab(window, index);
+        }
         self.focus(view);
         self.sync_key_focus();
         true
