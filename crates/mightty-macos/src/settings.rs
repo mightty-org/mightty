@@ -172,6 +172,7 @@ fn section(name: &str) -> &'static str {
             || n.starts_with("mouse-")
             || n == "copy-on-select"
             || n == "cursor-click-to-move"
+            || n.starts_with("notify-")
             || n == "password-mask"
             || n == "macos-auto-secure-input" =>
         {

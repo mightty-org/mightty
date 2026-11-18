@@ -49,6 +49,10 @@ pub struct Config {
     pub auto_secure_input: bool,
     /// `undo-timeout`: how long a closed pane's shell keeps running, for ⌘Z to bring it back.
     pub undo_timeout: std::time::Duration,
+    /// `notify-on-command-finish`: commands finishing in panes you aren't
+    /// looking at need you, once they ran `notify-on-command-finish-after`.
+    pub notify_finish: bool,
+    pub notify_finish_after: std::time::Duration,
     /// `bell-audio-path`: the sound a bell plays with `bell-features` audio.
     pub bell_audio: Option<PathBuf>,
     /// `quick-terminal-position`: the screen edge the quick terminal drops from.
@@ -522,6 +526,8 @@ impl Default for Config {
             ligatures: true,
             auto_secure_input: true,
             undo_timeout: std::time::Duration::from_secs(5),
+            notify_finish: true,
+            notify_finish_after: std::time::Duration::from_secs(10),
             bell_audio: None,
             quick_position: QuickPosition::Top,
             quick_autohide: true,
@@ -595,6 +601,7 @@ pub fn choices(name: &str) -> &'static [&'static str] {
         "window-colorspace" => &["srgb", "display-p3"],
         "window-save-state" => &["default", "never", "always"],
         "auto-update" => &["check", "download", "off"],
+        "notify-on-command-finish" => &["unfocused", "never"],
         "cursor-style" => &["block", "bar", "underline", "block_hollow"],
         "clipboard-read" | "clipboard-write" => &["allow", "ask", "deny"],
         "macos-titlebar-style" => &["native", "transparent", "tabs", "hidden"],
@@ -878,29 +885,47 @@ const SETTINGS: &[Setting] = &[
                5s, 500ms, 1m; 0 for never, as in Ghostty. Reopening (⌘⇧T) works after, with new shells",
         color: false,
         set: |c, v| {
-            let v = v.trim();
-            let (number, unit) = match (
-                v.strip_suffix("ms"),
-                v.strip_suffix('s'),
-                v.strip_suffix('m'),
-            ) {
-                (Some(n), ..) => (n, 0.001),
-                (None, Some(n), _) => (n, 1.0),
-                (None, None, Some(n)) => (n, 60.0),
-                _ if v == "0" => ("0", 1.0),
-                _ => return Err("expects a time: 5s, 500ms or 1m".into()),
-            };
-            let n: f64 = number
-                .trim()
-                .parse()
-                .map_err(|_| "expects a time: 5s, 500ms or 1m")?;
-            if !(0.0..=3600.0).contains(&(n * unit)) {
-                return Err("expects a time up to an hour".into());
-            }
-            c.undo_timeout = std::time::Duration::from_secs_f64(n * unit);
+            c.undo_timeout = time(v)?;
             Ok(())
         },
         get: |c| Some(format!("{}ms", c.undo_timeout.as_millis())),
+    },
+    Setting {
+        name: "notify-on-command-finish",
+        value: "WHEN",
+        help: "unfocused or never: a command that runs a while and finishes in a pane you aren't looking at \
+               marks it as needing you, with a notification when you're in another app; needs shell \
+               integration",
+        color: false,
+        set: |c, v| {
+            c.notify_finish = match v {
+                "unfocused" => true,
+                "never" => false,
+                _ => return Err("expects unfocused or never".into()),
+            };
+            Ok(())
+        },
+        get: |c| {
+            Some(
+                if c.notify_finish {
+                    "unfocused"
+                } else {
+                    "never"
+                }
+                .into(),
+            )
+        },
+    },
+    Setting {
+        name: "notify-on-command-finish-after",
+        value: "TIME",
+        help: "how long a command must run for notify-on-command-finish: 10s, 1m",
+        color: false,
+        set: |c, v| {
+            c.notify_finish_after = time(v)?;
+            Ok(())
+        },
+        get: |c| Some(format!("{}s", c.notify_finish_after.as_secs_f64())),
     },
     Setting {
         name: "quick-terminal-position",
@@ -1661,6 +1686,30 @@ fn show_variations(list: &[([u8; 4], f64)]) -> Option<String> {
 }
 
 /// A number from `min` to 1.
+/// A time up to an hour: 5s, 500ms, 1m, or 0.
+fn time(v: &str) -> Result<std::time::Duration, String> {
+    let v = v.trim();
+    let (number, unit) = match (
+        v.strip_suffix("ms"),
+        v.strip_suffix('s'),
+        v.strip_suffix('m'),
+    ) {
+        (Some(n), ..) => (n, 0.001),
+        (None, Some(n), _) => (n, 1.0),
+        (None, None, Some(n)) => (n, 60.0),
+        _ if v == "0" => ("0", 1.0),
+        _ => return Err("expects a time: 5s, 500ms or 1m".into()),
+    };
+    let n: f64 = number
+        .trim()
+        .parse()
+        .map_err(|_| "expects a time: 5s, 500ms or 1m")?;
+    if !(0.0..=3600.0).contains(&(n * unit)) {
+        return Err("expects a time up to an hour".into());
+    }
+    Ok(std::time::Duration::from_secs_f64(n * unit))
+}
+
 fn fraction(v: &str, min: f64) -> Result<f64, String> {
     v.parse()
         .ok()
