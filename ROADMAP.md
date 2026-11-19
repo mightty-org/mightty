@@ -9,7 +9,6 @@ Small changes that most people would notice.
 
 | Feature | Why |
 |---|---|
-| Capability queries (XTGETTCAP, DECRQSS) | Neovim and tmux ask these to find out about true colour, styled underlines and the cursor. |
 | In-band resize reports (mode 2048) | Full-screen programs get the new size in their input, in order with keys, instead of from a signal. |
 | Copy with colours | Copied text also goes on the clipboard as HTML, so pasting into Notes, Mail or Slack keeps its colours. |
 | `selection-word-chars` | Choose which characters a double-click treats as part of a word. |
