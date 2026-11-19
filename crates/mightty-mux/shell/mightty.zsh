@@ -42,9 +42,23 @@ _mightty_preexec() {
   _mightty_running=1
 }
 
+# Where typing begins, once the prompt is drawn: here rather than at the
+# end of PS1, which prompt themes rebuild before every prompt.
+_mightty_line_init() {
+  printf '\e]133;B%s\a' "$_mightty_mark"
+}
+
+# The line editor isn't loaded yet while startup files run, so this hooks
+# in at the first prompt.
+_mightty_hook_zle() {
+  add-zsh-hook -d precmd _mightty_hook_zle
+  autoload -Uz add-zle-hook-widget && add-zle-hook-widget line-init _mightty_line_init
+}
+
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _mightty_precmd
 add-zsh-hook preexec _mightty_preexec
+add-zsh-hook precmd _mightty_hook_zle
 
 # Home and End as Mightty sends them, which zsh leaves unbound (macOS's
 # /etc/zshrc binds only the application-mode forms). Startup files that

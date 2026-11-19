@@ -1119,6 +1119,26 @@ fn clicking_in_the_command_moves_the_cursor() {
 }
 
 #[test]
+fn reading_the_command_for_keyboard_selection() {
+    let prompt = "\x1b]133;A\x07$ \x1b]133;B\x07";
+    let t = term(40, 3, &format!("{prompt}echo hi\x1b[2D"));
+    let text = t.prompt_text().unwrap();
+    assert_eq!(text.chars.iter().collect::<String>(), "$ echo hi");
+    assert_eq!((text.begins, text.cursor), (2, 7));
+    assert_eq!(t.prompt_cells(2, 6), Some(((0, 2), (0, 5))));
+    assert_eq!(t.prompt_cells(3, 3), None);
+    // Wide characters are one character; a wrapped command is one line.
+    let t = term(6, 3, &format!("{prompt}a日本bcd"));
+    let text = t.prompt_text().unwrap();
+    assert_eq!(text.chars.iter().collect::<String>(), "$ a日本bcd");
+    assert_eq!(text.cursor, 8);
+    assert_eq!(t.prompt_cells(3, 6), Some(((0, 3), (1, 2))));
+    // Not while a command runs.
+    let t = term(40, 3, &format!("{prompt}sleep 9\r\n\x1b]133;C\x07"));
+    assert_eq!(t.prompt_text(), None);
+}
+
+#[test]
 fn jumping_between_prompts() {
     // Three commands with 4 lines of output each, then a prompt, on a
     // 4-row screen: prompts at lines 0, 5, 10 and 15.

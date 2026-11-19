@@ -62,4 +62,6 @@ These are possible, but there's little to gain for now.
 | tmux control mode | A large feature, used by few people. |
 | Installing terminfo on ssh hosts | Mightty reports itself as `xterm-256color`, which every host already knows. |
 | Screen checksums (DECRQCRA, XTCHECKSUM) | Used by terminal test suites, not by programs. |
+| ⌘Z to undo an edit in the command | ⌘Z already reopens a closed tab. Ctrl-_ undoes in zsh and bash. |
+| Editing the command in a text box | Multi-line editing with the mouse means replacing the shell's own line editor: a large change. |
 | Linux and Windows | Planned, after the macOS app. |

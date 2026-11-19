@@ -1218,6 +1218,45 @@ impl Term {
         Some(p.index((line, col)) as isize - p.index(p.cursor) as isize)
     }
 
+    /// The command being typed at the shell's prompt, one entry per
+    /// character, with the cursor's index into it and where typing began
+    /// (characters before that belong to the prompt). `None` unless the
+    /// shell's integration says it's at a prompt.
+    pub fn prompt_text(&self) -> Option<PromptText> {
+        let p = self.prompt_line()?;
+        let end = (p.last, p.text_end().unwrap_or(0));
+        let chars = (p.first..=p.last)
+            .flat_map(|line| {
+                let cells = p.cells(line);
+                let cols = if line == end.0 { end.1 } else { cells.len() };
+                cells[..cols.min(cells.len())].iter()
+            })
+            .filter(|c| !spacer(c))
+            .map(|c| c.c)
+            .collect::<Vec<_>>();
+        let begins = if p.begins.0 == p.first {
+            p.index(p.begins)
+        } else {
+            0
+        };
+        let cursor = p.index(p.cursor).min(chars.len());
+        Some(PromptText {
+            begins: begins.min(cursor),
+            cursor,
+            chars,
+        })
+    }
+
+    /// The cells of characters `from..to` of the command being typed at the
+    /// prompt (see [`Term::prompt_text`]): the first one's and the last one's.
+    pub fn prompt_cells(&self, from: usize, to: usize) -> Option<((u64, usize), (u64, usize))> {
+        let p = self.prompt_line()?;
+        if from >= to {
+            return None;
+        }
+        Some((p.point(from)?, p.point(to - 1)?))
+    }
+
     /// Visible text, soft-wrapped rows joined, trailing blanks trimmed.
     pub fn screen_text(&self) -> String {
         self.rows_to_text(self.lines().iter())
@@ -2887,6 +2926,22 @@ impl PromptLine<'_> {
         text.max(typed)
     }
 
+    /// The cell of the line's `index`th character.
+    fn point(&self, mut index: usize) -> Option<(u64, usize)> {
+        for line in self.first..=self.last {
+            for (col, c) in self.cells(line).iter().enumerate() {
+                if spacer(c) {
+                    continue;
+                }
+                if index == 0 {
+                    return Some((line, col));
+                }
+                index -= 1;
+            }
+        }
+        None
+    }
+
     /// Characters on the line before `(line, col)`: the keys from its start.
     fn index(&self, (line, col): (u64, usize)) -> usize {
         let full: usize = (self.first..line)
@@ -2897,6 +2952,14 @@ impl PromptLine<'_> {
             .filter(|&i| !row.get(i).is_some_and(spacer))
             .count()
     }
+}
+
+/// The command being typed at a prompt: see [`Term::prompt_text`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptText {
+    pub chars: Vec<char>,
+    pub cursor: usize,
+    pub begins: usize,
 }
 
 /// The right half of a wide character, or the gap a wide character left at

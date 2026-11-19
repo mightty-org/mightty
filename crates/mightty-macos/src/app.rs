@@ -187,6 +187,9 @@ struct Surface {
     /// text before. Redraws wait for the text to change, so the steps on
     /// the way (the selection gone, the cursor moved) aren't drawn.
     deleting: Option<(Instant, String)>,
+    /// ⇧-arrow selection in the command: where it began and where the
+    /// cursor is, as character indices, and the selection that made.
+    key_selection: Option<(usize, usize, Option<Selection>)>,
     /// When an animated image's next frame is due, to draw it then.
     animation_due: Option<Instant>,
     /// Where the pane's shell started, for new tabs until it reports one (OSC 7).
@@ -307,7 +310,7 @@ enum Granularity {
 }
 
 /// A selection in absolute lines, so it stays on its text while output scrolls.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Selection {
     granularity: Granularity,
     anchor: (u64, usize),
@@ -1490,6 +1493,7 @@ impl App {
                 next_frame: Instant::now(),
                 echo_frame: None,
                 deleting: None,
+                key_selection: None,
                 animation_due: None,
                 start_dir: None,
                 preedit: String::new(),
@@ -4459,19 +4463,40 @@ impl Surface {
     }
 
     /// Delete or Forward Delete with text selected in the command being
-    /// typed at the prompt: deletes that text, by moving the shell's cursor
-    /// to the end of it and deleting backwards, as typing those keys would.
+    /// typed at the prompt: deletes that text.
     fn delete_selection(&mut self, key: &Key, key_flags: u8) -> bool {
         let m = key.mods;
-        if !matches!(key.code, 51 | 117)
-            || key.action == KeyAction::Release
-            || m.shift
-            || m.ctrl
-            || m.alt
-            || m.cmd
-            || self.scroll_offset != 0
-            || self.selection.is_none_or(|s| s.block)
-        {
+        matches!(key.code, 51 | 117)
+            && key.action != KeyAction::Release
+            && !(m.shift || m.ctrl || m.alt || m.cmd)
+            && self.replace_selection(&[], key_flags)
+    }
+
+    /// Typing with text selected in the command at the prompt: the typed
+    /// text replaces it, as in any text field.
+    fn type_over_selection(&mut self, key: &Key, key_flags: u8) -> bool {
+        let m = key.mods;
+        let typed = !key.text.is_empty()
+            && key
+                .text
+                .chars()
+                .all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c));
+        if !typed || key.action == KeyAction::Release || m.ctrl || m.alt || m.cmd {
+            return false;
+        }
+        let app_cursor = self.pane.term.lock().unwrap().modes().app_cursor;
+        let Some(bytes) = keys::kitty(key, key_flags, app_cursor) else {
+            return false;
+        };
+        self.replace_selection(&bytes, key_flags)
+    }
+
+    /// With text selected in the command being typed at the prompt,
+    /// deletes it and types `bytes` in its place: moves the shell's cursor
+    /// to the end of the text and deletes backwards, as typing those keys
+    /// would. False, doing nothing, for any other selection.
+    fn replace_selection(&mut self, bytes: &[u8], key_flags: u8) -> bool {
+        if self.scroll_offset != 0 || self.selection.is_none_or(|s| s.block) {
             return false;
         }
         let (keys, app_cursor) = {
@@ -4495,9 +4520,10 @@ impl Surface {
             keys::kitty(&key, key_flags, app_cursor).unwrap_or_default()
         };
         let arrow = press(if moves < 0 { 123 } else { 124 });
-        let mut bytes = arrow.repeat(moves.unsigned_abs());
-        bytes.extend(press(51).repeat(deletes));
-        self.type_bytes(&bytes);
+        let mut out = arrow.repeat(moves.unsigned_abs());
+        out.extend(press(51).repeat(deletes));
+        out.extend_from_slice(bytes);
+        self.type_bytes(&out);
         // Drawn by `DELETE_WAIT` even if the shell shows nothing.
         if let Some(host) = HOST.get() {
             host.pane_output(self.pane.id);
@@ -4505,9 +4531,91 @@ impl Surface {
         true
     }
 
+    /// ⇧ with ← or →, at a shell prompt: selects the command's text from
+    /// the cursor, a character at a time, a word with ⌥, or to the start
+    /// or end with ⌘, moving the shell's cursor along. Not for programs
+    /// that asked for keys to be told apart (kitty's protocol), which
+    /// handle these themselves.
+    fn select_by_key(&mut self, code: u16, mods: Mods) -> bool {
+        if !mods.shift || mods.ctrl || !matches!(code, 123 | 124) || self.scroll_offset != 0 {
+            return false;
+        }
+        let (text, app_cursor) = {
+            let term = self.pane.term.lock().unwrap();
+            if term.key_flags() != 0 {
+                return false;
+            }
+            let Some(text) = term.prompt_text() else {
+                return false;
+            };
+            (text, term.modes().app_cursor)
+        };
+        // Carry on from the last press while its selection is still the one shown.
+        let (anchor, head) = match self.key_selection {
+            Some((anchor, head, shown))
+                if self.selection == shown && anchor.max(head) <= text.chars.len() =>
+            {
+                (anchor, head)
+            }
+            _ => (text.cursor, text.cursor),
+        };
+        let (begins, len) = (text.begins, text.chars.len());
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let to = match (code == 124, mods.cmd, mods.alt) {
+            (false, true, _) => begins,
+            (true, true, _) => len,
+            (false, _, true) => {
+                let mut i = head;
+                while i > begins && !word(text.chars[i - 1]) {
+                    i -= 1;
+                }
+                while i > begins && word(text.chars[i - 1]) {
+                    i -= 1;
+                }
+                i
+            }
+            (true, _, true) => {
+                let mut i = head;
+                while i < len && !word(text.chars[i]) {
+                    i += 1;
+                }
+                while i < len && word(text.chars[i]) {
+                    i += 1;
+                }
+                i
+            }
+            (false, ..) => head.saturating_sub(1).max(begins),
+            (true, ..) => (head + 1).min(len),
+        };
+        let to = to.clamp(begins.min(head), len.max(head));
+        if to != head {
+            let key = Key {
+                code: if to < head { 123 } else { 124 },
+                ..Key::default()
+            };
+            let arrow = keys::kitty(&key, 0, app_cursor).unwrap_or_default();
+            self.type_bytes(&arrow.repeat(to.abs_diff(head)));
+        }
+        let cells = {
+            let term = self.pane.term.lock().unwrap();
+            term.prompt_cells(anchor.min(to), anchor.max(to))
+        };
+        self.selection = cells.map(|(first, last)| Selection {
+            granularity: Granularity::Cell,
+            anchor: first,
+            head: last,
+            dragged: true,
+            block: false,
+        });
+        self.key_selection = Some((anchor, to, self.selection));
+        self.render();
+        true
+    }
+
     /// Sends input to the pane and jumps back to the live screen.
     fn write(&mut self, bytes: &[u8]) {
         let _ = self.pane.write(bytes);
+        self.key_selection = None;
         if BEHAVIOUR.get().password_mask {
             let before = self.password;
             self.password = if self.pane.hides_input() {
@@ -5112,6 +5220,14 @@ unsafe fn register_view_class() -> Id {
                 return perform(view, &action);
             }
             let flags: usize = msg!(event, c"modifierFlags");
+            let code: u16 = msg!(event, c"keyCode");
+            let mods = modifiers(flags);
+            if with_surface(view, |w| {
+                w.preedit.is_empty() && w.select_by_key(code, mods)
+            }) == Some(true)
+            {
+                return;
+            }
             let key_flags =
                 with_surface(view, |w| w.pane.term.lock().unwrap().key_flags()).unwrap_or(0);
             // Command shortcuts belong to the menu; ones it hasn't go to
@@ -5119,7 +5235,6 @@ unsafe fn register_view_class() -> Id {
             if flags & CMD != 0 && key_flags == 0 {
                 return;
             }
-            let mods = modifiers(flags);
             // Option not acting as Alt types what the layout gives it (å, @,
             // dead keys); keys it types nothing for, like arrows, still get Alt.
             let alt = mods.alt && {
@@ -5134,7 +5249,6 @@ unsafe fn register_view_class() -> Id {
                 w.ime_used_key = false;
                 !w.preedit.is_empty()
             });
-            let code: u16 = msg!(event, c"keyCode");
             let chars = string_from_ns(msg!(event, c"characters"));
             let shifted = string_from_ns(msg!(event, c"charactersIgnoringModifiers"));
             let unshifted = if key_flags == 0 {
@@ -5192,7 +5306,7 @@ unsafe fn register_view_class() -> Id {
 
     fn send_key(view: Id, key: &Key, key_flags: u8) {
         with_surface(view, |w| {
-            if w.delete_selection(key, key_flags) {
+            if w.delete_selection(key, key_flags) || w.type_over_selection(key, key_flags) {
                 return;
             }
             let app_cursor = w.pane.term.lock().unwrap().modes().app_cursor;
@@ -5362,7 +5476,11 @@ unsafe fn register_view_class() -> Id {
                 w.typed = Some(text);
                 return;
             }
-            w.type_bytes(text.as_bytes());
+            // Typed over text selected in the command, it replaces it.
+            let key_flags = w.pane.term.lock().unwrap().key_flags();
+            if !w.replace_selection(text.as_bytes(), key_flags) {
+                w.type_bytes(text.as_bytes());
+            }
             if had_preedit {
                 w.render();
             }
@@ -5483,11 +5601,18 @@ unsafe fn register_view_class() -> Id {
                 return;
             }
             with_surface(view, |w| {
-                let bracketed = w.pane.term.lock().unwrap().modes().bracketed_paste;
+                let (bracketed, key_flags) = {
+                    let term = w.pane.term.lock().unwrap();
+                    (term.modes().bracketed_paste, term.key_flags())
+                };
                 if BEHAVIOUR.get().paste_protection && keys::paste_is_risky(&text, bracketed) {
                     ask_paste(w.window, w.pane.id, &text);
                 } else {
-                    w.write(&keys::paste(&text, bracketed));
+                    // Over text selected in the command, the paste replaces it.
+                    let bytes = keys::paste(&text, bracketed);
+                    if !w.replace_selection(&bytes, key_flags) {
+                        w.write(&bytes);
+                    }
                 }
             });
         }
@@ -5578,6 +5703,24 @@ unsafe fn register_view_class() -> Id {
     extern "C" fn copy(view: Id, _: Sel, _sender: Id) {
         with_surface(view, Surface::copy);
     }
+    /// Only text in the command being typed can be cut; anything else beeps.
+    extern "C" fn cut(view: Id, _: Sel, _sender: Id) {
+        with_surface(view, |w| {
+            let in_command = w.selection.is_some_and(|s| !s.block) && {
+                let term = w.pane.term.lock().unwrap();
+                selection_range(w.selection, &term)
+                    .and_then(|(start, end)| term.prompt_deletion(start, end))
+                    .is_some()
+            };
+            if !in_command || w.scroll_offset != 0 {
+                // SAFETY: plain C function.
+                return unsafe { NSBeep() };
+            }
+            w.copy();
+            let key_flags = w.pane.term.lock().unwrap().key_flags();
+            w.replace_selection(&[], key_flags);
+        });
+    }
     /// Clicked, or focused by AppKit: its pane becomes the active one. When
     /// the app is busy, the caller did that already (`App::focus`).
     extern "C" fn become_first_responder(view: Id, _: Sel) -> Bool {
@@ -5625,6 +5768,7 @@ unsafe fn register_view_class() -> Id {
                 (c"scrollWheel:", action(scroll_wheel), c"v@:@"),
                 (c"paste:", action(paste), c"v@:@"),
                 (c"copy:", action(copy), c"v@:@"),
+                (c"cut:", action(cut), c"v@:@"),
                 (c"mouseDown:", action(mouse_down), c"v@:@"),
                 (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
                 (c"mouseUp:", action(mouse_up), c"v@:@"),
@@ -6207,6 +6351,7 @@ fn perform(view: Id, action: &Action) {
         Action::MinimizeWindow => send(c"performMiniaturize:", NIL),
         Action::Quit => send(c"terminate:", NIL),
         Action::Copy => send(c"copy:", view),
+        Action::Cut => send(c"cut:", view),
         Action::Paste => send(c"paste:", view),
         Action::StartSearch => send(c"performFind:", view),
         Action::NavigateSearch(step) => send(
@@ -6441,6 +6586,7 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         let edit_menu = submenu(bar, "Edit");
         add_action(edit_menu, "Undo Close", Action::Undo);
         separator(edit_menu);
+        add_item(edit_menu, "Cut", c"cut:", Action::Cut);
         add_item(edit_menu, "Copy", c"copy:", Action::Copy);
         add_item(edit_menu, "Paste", c"paste:", Action::Paste);
         add_action(edit_menu, "Clear Screen", Action::ClearScreen);

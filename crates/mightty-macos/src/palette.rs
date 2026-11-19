@@ -29,6 +29,7 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Reopen Closed", ReopenClosed),
         ("Close Window", CloseWindow),
         ("Minimize Window", MinimizeWindow),
+        ("Cut", Cut),
         ("Copy", Copy),
         ("Paste", Paste),
         ("Find…", StartSearch),
