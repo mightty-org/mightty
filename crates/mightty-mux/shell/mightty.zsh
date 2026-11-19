@@ -45,3 +45,16 @@ _mightty_preexec() {
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _mightty_precmd
 add-zsh-hook preexec _mightty_preexec
+
+# Home and End as Mightty sends them, which zsh leaves unbound (macOS's
+# /etc/zshrc binds only the application-mode forms). Startup files that
+# run after this one can still bind them to something else.
+() {
+  local keymap seq widget
+  for keymap in emacs viins vicmd; do
+    for seq widget in '\e[H' beginning-of-line '\e[F' end-of-line; do
+      [[ $(bindkey -M $keymap $seq) == *undefined-key ]] &&
+        bindkey -M $keymap $seq $widget
+    done
+  done
+}

@@ -585,6 +585,13 @@ impl Default for Bindings {
             ("cmd+page_down", ScrollPageDown),
             ("cmd+up", JumpToPrompt(-1)),
             ("cmd+down", JumpToPrompt(1)),
+            ("cmd+left", Text(b"\x01".to_vec())),
+            ("cmd+right", Text(b"\x05".to_vec())),
+            ("alt+left", Text(b"\x1bb".to_vec())),
+            ("alt+right", Text(b"\x1bf".to_vec())),
+            ("cmd+backspace", Text(b"\x15".to_vec())),
+            ("alt+delete", Text(b"\x1bd".to_vec())),
+            ("cmd+delete", Text(b"\x0b".to_vec())),
         ];
         let tabs: Vec<(String, Action)> =
             (1..=8).map(|n| (format!("cmd+{n}"), GotoTab(n))).collect();
@@ -758,6 +765,14 @@ mod tests {
         let mut b = Bindings::default();
         assert_eq!(b.find(trigger("cmd+t")), Some(&Action::NewTab));
         assert_eq!(b.find(trigger("cmd+3")), Some(&Action::GotoTab(3)));
+        assert_eq!(
+            b.find(trigger("alt+left")),
+            Some(&Action::Text(b"\x1bb".to_vec()))
+        );
+        assert_eq!(
+            b.find(trigger("cmd+right")),
+            Some(&Action::Text(b"\x05".to_vec()))
+        );
         b.apply("cmd+t=new_window").unwrap();
         assert_eq!(b.find(trigger("cmd+t")), Some(&Action::NewWindow));
         assert_eq!(b.trigger_for(&Action::NewWindow), Some(trigger("cmd+n")));
