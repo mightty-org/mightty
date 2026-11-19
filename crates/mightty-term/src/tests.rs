@@ -1203,3 +1203,45 @@ fn color_scheme_reports() {
     t.set_options(&light);
     assert!(t.take_responses().is_empty());
 }
+
+#[test]
+fn capability_queries() {
+    let mut t = Term::new(10, 4);
+    let reply = |t: &mut Term, query: &[u8]| {
+        t.feed(query);
+        String::from_utf8(t.take_responses()).unwrap()
+    };
+    // XTGETTCAP, names in hex: TN, a boolean (RGB), and one Mightty lacks (xx).
+    assert_eq!(
+        reply(&mut t, b"\x1bP+q544E;524742;7878\x1b\\"),
+        concat!(
+            "\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\",
+            "\x1bP1+r524742\x1b\\",
+            "\x1bP0+r7878\x1b\\",
+        )
+    );
+    // Lowercase hex works too; text that isn't hex isn't echoed.
+    assert_eq!(
+        reply(&mut t, b"\x1bP+q436f\x1b\\"),
+        "\x1bP1+r436F=323536\x1b\\"
+    );
+    assert_eq!(reply(&mut t, b"\x1bP+qz\x07z\x1b\\"), "\x1bP0+r\x1b\\");
+    // DECRQSS: the pen, with truecolour as Neovim checks for it.
+    t.feed(b"\x1b[1;4:3;48;2;1;2;3;58;5;9m");
+    assert_eq!(
+        reply(&mut t, b"\x1bP$qm\x1b\\"),
+        "\x1bP1$r0;1;4:3;48;2;1;2;3;58;5;9m\x1b\\"
+    );
+    t.feed(b"\x1b[0;31;102m");
+    assert_eq!(reply(&mut t, b"\x1bP$qm\x1b\\"), "\x1bP1$r0;31;102m\x1b\\");
+    // The cursor's shape and the scrolling region.
+    t.feed(b"\x1b[5 q\x1b[2;3r");
+    assert_eq!(reply(&mut t, b"\x1bP$q q\x1b\\"), "\x1bP1$r5 q\x1b\\");
+    assert_eq!(reply(&mut t, b"\x1bP$qr\x1b\\"), "\x1bP1$r2;3r\x1b\\");
+    // Settings it doesn't report, and other DCS strings, are refused or ignored.
+    assert_eq!(reply(&mut t, b"\x1bP$q\"p\x1b\\"), "\x1bP0$r\x1b\\");
+    assert_eq!(reply(&mut t, b"\x1bP1$qm\x1b\\"), "");
+    // An overlong query isn't answered.
+    let long = [b"\x1bP+q".as_slice(), &[b'4'; 2000], b"\x1b\\"].concat();
+    assert_eq!(reply(&mut t, &long), "");
+}

@@ -9,6 +9,7 @@ mod colors;
 mod graphemes;
 mod graphics;
 mod links;
+mod queries;
 mod styles;
 mod width;
 mod window;
@@ -296,6 +297,9 @@ pub struct Term {
     /// Kitty graphics may read images from files and shared memory.
     image_files: bool,
     responses: Vec<u8>,
+    /// A query being received in a DCS string: XTGETTCAP (`+`) or
+    /// DECRQSS (`$`), and its text so far. `None` for any other DCS.
+    dcs: Option<(u8, Vec<u8>)>,
     bell: bool,
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
     bells: u64,
@@ -404,6 +408,7 @@ impl Term {
             wide_emoji: true,
             image_files: cfg!(unix),
             responses: Vec::new(),
+            dcs: None,
             bell: false,
             bells: 0,
             notifications: Vec::new(),
@@ -1432,6 +1437,23 @@ impl Term {
     }
 
     /// The answer to `CSI ? 996 n`, and what mode 2031 sends on a change.
+    /// DECRQSS: the current value of `setting`, named by the final bytes of
+    /// the sequence that sets it, as `DCS 1 $ r value setting ST`, or
+    /// `DCS 0 $ r ST` for one Mightty doesn't report.
+    fn report_setting(&mut self, setting: &[u8]) {
+        let value = match setting {
+            b"m" => Some(queries::sgr(&self.cursor.pen)),
+            b" q" => Some(self.modes.cursor_shape.to_string()),
+            b"r" => Some(format!("{};{}", self.top + 1, self.bottom + 1)),
+            _ => None,
+        };
+        let reply = match value {
+            Some(value) => [b"\x1bP1$r", value.as_bytes(), setting, b"\x1b\\"].concat(),
+            None => b"\x1bP0$r\x1b\\".to_vec(),
+        };
+        self.respond(&reply);
+    }
+
     fn report_color_scheme(&mut self) {
         self.respond(if self.dark() {
             b"\x1b[?997;1n"
@@ -2702,7 +2724,41 @@ impl Perform for Term {
     fn apc_dispatch(&mut self, data: &[u8]) {
         self.apc(data);
     }
+
+    fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
+        self.dcs = match (intermediates, action) {
+            ([kind @ (b'+' | b'$')], b'q') if !ignore && params.is_empty() => {
+                Some((*kind, Vec::new()))
+            }
+            _ => None,
+        };
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some((_, text)) = &mut self.dcs {
+            // Longer than any real query: dropped, not answered.
+            if text.len() >= MAX_QUERY {
+                self.dcs = None;
+            } else {
+                text.push(byte);
+            }
+        }
+    }
+
+    fn unhook(&mut self) {
+        match self.dcs.take() {
+            Some((b'+', names)) => {
+                let reply = queries::xtgettcap(&names);
+                self.respond(&reply);
+            }
+            Some((_, setting)) => self.report_setting(&setting),
+            None => {}
+        }
+    }
 }
+
+/// The longest XTGETTCAP or DECRQSS query answered.
+const MAX_QUERY: usize = 1024;
 
 /// SGR 38/48/58 colour starting at group `i`. Returns the colour and the
 /// number of extra groups consumed (semicolon form spreads over groups).
