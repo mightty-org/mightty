@@ -34,9 +34,10 @@ _mightty_precmd() {
 }
 
 # Last before each prompt, after anything that sets PS1: marks where
-# typing begins, at the end of the prompt.
+# typing begins, at the end of the prompt. The mark goes in by name, not
+# value: an exported PS1 would hand the nonce to every command.
 _mightty_prompt_end() {
-  [[ $PS1 == *'133;B'* ]] || PS1=$PS1'\[\e]133;B'$_mightty_mark'\a\]'
+  [[ $PS1 == *'133;B'* ]] || PS1=$PS1'\[\e]133;B${_mightty_mark}\a\]'
 }
 
 # As a command starts: its command line, and that its output follows.
