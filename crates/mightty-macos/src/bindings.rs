@@ -89,6 +89,7 @@ pub enum Action {
     MinimizeWindow,
     Quit,
     Copy,
+    Cut,
     Paste,
     StartSearch,
     /// `navigate_search:next` (+1) or `:previous` (-1).
@@ -184,6 +185,7 @@ impl Action {
             ("minimize_window", _) => bare(Self::MinimizeWindow),
             ("quit", _) => bare(Self::Quit),
             ("copy_to_clipboard", _) => bare(Self::Copy),
+            ("cut_to_clipboard", _) => bare(Self::Cut),
             ("paste_from_clipboard", _) => bare(Self::Paste),
             ("start_search", _) => bare(Self::StartSearch),
             ("navigate_search", Some("next")) => Ok(Self::NavigateSearch(1)),
@@ -432,6 +434,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("quit", "Quits Mightty"),
     ("copy_to_clipboard", "Copies the selection"),
     (
+        "cut_to_clipboard",
+        "Copies the selection and deletes it, when it's in the command being typed",
+    ),
+    (
         "paste_from_clipboard",
         "Pastes, asking first when it could run commands",
     ),
@@ -549,6 +555,7 @@ impl Default for Bindings {
             ("cmd+m", MinimizeWindow),
             ("cmd+q", Quit),
             ("cmd+c", Copy),
+            ("cmd+x", Cut),
             ("cmd+v", Paste),
             ("cmd+f", StartSearch),
             ("cmd+g", NavigateSearch(1)),
