@@ -107,6 +107,9 @@ pub struct Modes {
     /// Mode 2031: tell the program when the theme turns dark or light
     /// (`CSI ? 997 ; 1 n` dark, `2` light), as `CSI ? 996 n` asks.
     pub color_scheme_reports: bool,
+    /// Mode 2048: tell the program the size, as `CSI 48 ; rows ; cols ;
+    /// height ; width t` in its input, when it's set and on each resize.
+    pub in_band_resize: bool,
     pub mouse: MouseMode,
     pub mouse_sgr: bool,
     /// DECSCUSR value (0 = default).
@@ -128,6 +131,7 @@ impl Default for Modes {
             sync_output: false,
             grapheme_cluster: true,
             color_scheme_reports: false,
+            in_band_resize: false,
             mouse: MouseMode::Off,
             mouse_sgr: false,
             cursor_shape: 0,
@@ -460,6 +464,23 @@ impl Term {
     pub fn set_cell_pixels(&mut self, width: u32, height: u32) -> bool {
         let size = (width.max(1), height.max(1));
         mem::replace(&mut self.cell_pixels, size) != size
+    }
+
+    /// With mode 2048 on, the size as the program's input: the grid in
+    /// cells, then the text area in pixels. [`Term::resize`] sends it; call
+    /// this after a change of cell size alone.
+    pub fn report_size(&mut self) {
+        if self.modes.in_band_resize {
+            let (cw, ch) = self.cell_pixels;
+            let reply = format!(
+                "\x1b[48;{};{};{};{}t",
+                self.rows,
+                self.cols,
+                ch as usize * self.rows,
+                cw as usize * self.cols
+            );
+            self.respond(reply.as_bytes());
+        }
     }
 
     /// Query replies waiting to be sent, without consuming them.
@@ -1274,7 +1295,8 @@ impl Term {
         self.rows_to_text(self.scrollback.iter().chain(self.primary.iter()))
     }
 
-    /// Resizes without reflow (TODO: rewrap soft-wrapped lines).
+    /// Resizes without reflow (TODO: rewrap soft-wrapped lines), and tells
+    /// the program if it asked (mode 2048).
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let (cols, rows) = (cols.max(1), rows.max(1));
         if (cols, rows) == (self.cols, self.rows) {
@@ -1330,6 +1352,7 @@ impl Term {
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
         self.cursor.pending_wrap = false;
+        self.report_size();
     }
 
     fn lines_mut(&mut self) -> &mut VecDeque<Row> {
@@ -2217,6 +2240,7 @@ impl Term {
             2026 => m.sync_output,
             2027 => m.grapheme_cluster,
             2031 => m.color_scheme_reports,
+            2048 => m.in_band_resize,
             _ => return None,
         })
     }
@@ -2263,6 +2287,10 @@ impl Term {
                 2026 => self.modes.sync_output = on,
                 2027 => self.modes.grapheme_cluster = on,
                 2031 => self.modes.color_scheme_reports = on,
+                2048 => {
+                    self.modes.in_band_resize = on;
+                    self.report_size();
+                }
                 _ => {}
             }
         }

@@ -1208,6 +1208,28 @@ fn color_scheme_reports() {
 }
 
 #[test]
+fn in_band_resize() {
+    let mut t = Term::new(10, 4);
+    t.set_cell_pixels(8, 16);
+    // Not told unless it asked.
+    t.resize(20, 5);
+    assert!(t.take_responses().is_empty());
+    // Mode 2048: the size at once, then on each resize; rows first.
+    t.feed(b"\x1b[?2048h");
+    assert_eq!(t.take_responses(), b"\x1b[48;5;20;80;160t");
+    t.feed(b"\x1b[?2048$p");
+    assert_eq!(t.take_responses(), b"\x1b[?2048;1$y");
+    t.resize(30, 6);
+    assert_eq!(t.take_responses(), b"\x1b[48;6;30;96;240t");
+    // The same size isn't a resize.
+    t.resize(30, 6);
+    assert!(t.take_responses().is_empty());
+    t.feed(b"\x1b[?2048l");
+    t.resize(20, 5);
+    assert!(t.take_responses().is_empty());
+}
+
+#[test]
 fn capability_queries() {
     let mut t = Term::new(10, 4);
     let reply = |t: &mut Term, query: &[u8]| {

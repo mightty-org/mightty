@@ -243,7 +243,11 @@ impl Pane {
         if (term.cols(), term.rows()) == (cols.into(), rows.into()) && !cell_changed {
             return;
         }
+        if (term.cols(), term.rows()) == (cols.into(), rows.into()) {
+            term.report_size();
+        }
         term.resize(cols.into(), rows.into());
+        let replies = term.take_responses();
         drop(term);
         let _ = self.pty.lock().unwrap().resize(WindowSize {
             cols,
@@ -251,6 +255,10 @@ impl Pane {
             pixel_width,
             pixel_height,
         });
+        // The size report (mode 2048), after the pty has the new size too.
+        if !replies.is_empty() {
+            let _ = self.write(&replies);
+        }
     }
 
     /// Whether the program is reading a password: a whole line, not echoed.
