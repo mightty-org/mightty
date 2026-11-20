@@ -36,7 +36,7 @@ const FILES: &[(&str, &str)] = &[
 /// - zsh reads `$ZDOTDIR/.zshenv` first, so ZDOTDIR points at ours, which
 ///   restores the user's ZDOTDIR.
 /// - bash reads `--rcfile` in place of ~/.bashrc, in an interactive shell
-///   that isn't a login shell (`--posix` with `$ENV`, which Ghostty uses,
+///   that isn't a login shell (`--posix` with `$ENV`
 ///   isn't read by macOS's bash 3.2), so it starts as one with ours, which
 ///   reads the login shell's files.
 /// - fish loads `fish/vendor_conf.d` from each of `$XDG_DATA_DIRS`, so our

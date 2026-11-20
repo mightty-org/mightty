@@ -1,4 +1,4 @@
-//! Key bindings: `keybind = TRIGGER=ACTION` settings, written as in Ghostty
+//! Key bindings: `keybind = TRIGGER=ACTION` settings
 //! (`cmd+shift+d=new_split:down`), the defaults, and matching key presses.
 //!
 //! A trigger is modifiers and a key joined by `+`. Keys are a character
@@ -620,7 +620,7 @@ impl Default for Bindings {
 impl Bindings {
     /// Applies one `keybind` value: `TRIGGER=ACTION`, `TRIGGER=unbind`, or
     /// `clear`, which drops every binding (the defaults too). A trigger
-    /// starting `global:` acts whichever app is active, as in Ghostty.
+    /// starting `global:` acts whichever app is active.
     pub fn apply(&mut self, value: &str) -> Result<(), String> {
         if value == "clear" {
             self.keys.clear();

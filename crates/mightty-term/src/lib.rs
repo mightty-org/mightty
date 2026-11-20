@@ -122,7 +122,7 @@ pub struct Modes {
     pub sync_output: bool,
     /// Mode 2027: emoji written with VS16 (U+FE0F) take two cells, as
     /// Unicode's grapheme clusters say. On unless [`TermOptions::wide_emoji`]
-    /// says otherwise, as in Ghostty; reset, a cluster takes its first
+    /// says otherwise; reset, a cluster takes its first
     /// character's width, as `wcwidth` counts.
     pub grapheme_cluster: bool,
     /// Mode 2031: tell the program when the theme turns dark or light
@@ -901,8 +901,8 @@ impl Term {
     }
 
     /// Clears history and the rows above the cursor, moving the cursor's
-    /// row (usually the prompt) to the top, as ⌘K does in Terminal.app and
-    /// Ghostty. Not on the alternate screen, which belongs to its program.
+    /// row (usually the prompt) to the top, for ⌘K. Not on the alternate
+    /// screen, which belongs to its program.
     pub fn clear_above_cursor(&mut self) {
         if self.alt_active {
             return;
@@ -1588,8 +1588,8 @@ impl Term {
     /// emoji modifier after an emoji, anything after a zero-width joiner,
     /// or a flag's second letter. Returns whether `c` was used up.
     ///
-    /// The cluster keeps its first character's width, as in kitty and
-    /// Ghostty, except that a flag takes the second letter's cell too, and
+    /// The cluster keeps its first character's width, except that a flag
+    /// takes the second letter's cell too, and
     /// so does a narrow character with an emoji style followed by VS16
     /// (in [mode 2027](Modes::grapheme_cluster)).
     fn join(&mut self, c: char, width: usize) -> bool {
@@ -2140,7 +2140,7 @@ impl Term {
                 for r in 0..self.rows {
                     self.clear_row(r);
                 }
-                // As in kitty, clearing the screen clears its images.
+                // Clearing the screen clears its images too.
                 let (from, rows) = (self.lines_scrolled, self.rows as u64);
                 self.graphics_mut().clear_lines(from, from + rows);
             }
@@ -2429,9 +2429,9 @@ impl Term {
                 }
             }
             [b"9", b"4", rest @ ..] => self.set_progress(rest),
-            // ConEmu's other OSC 9 ; n ; …, not notifications.
+            // Other OSC 9 ; n ; … sequences, which aren't notifications.
             [b"9", n, ..] if (1..=2).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => {}
-            // iTerm2's notification: OSC 9 ; text.
+            // A notification: OSC 9 ; text.
             [b"9", text @ ..] => self.notify(b"", &text.join(&b';')),
             [b"777", b"notify", title, body @ ..] => self.notify(title, &body.join(&b';')),
             // OSC 52 ; targets ; base64 text, or `?` to read. Every target

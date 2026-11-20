@@ -78,7 +78,7 @@ pub struct Config {
     default_file: Option<PathBuf>,
     args: Vec<String>,
     /// The next `font-family` starts a new list: each source (a file, the
-    /// flags) gives the whole list, as in Ghostty.
+    /// flags) gives the whole list.
     fresh_families: bool,
     /// macOS is in dark mode, for `theme = light:…,dark:…`.
     dark_mode: bool,
@@ -248,7 +248,7 @@ impl Default for Behaviour {
     }
 }
 
-/// Whether programs may do something: as in Ghostty's `clipboard-read`.
+/// Whether programs may do something, as `clipboard-read` says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Permission {
     Allow,
@@ -302,7 +302,7 @@ impl Default for Look {
     }
 }
 
-/// `cursor-style`, as in Ghostty: the cursor unless the program picks one.
+/// `cursor-style`: the cursor unless the program picks one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -373,7 +373,7 @@ fn intern(text: String) -> &'static str {
     s
 }
 
-/// `\t`, `\"` and `\\` in a `selection-word-chars` value, as Ghostty reads them.
+/// `\t`, `\"` and `\\` in a `selection-word-chars` value.
 fn unescape_chars(v: &str) -> String {
     let mut out = String::new();
     let mut chars = v.chars();
@@ -393,7 +393,7 @@ fn unescape_chars(v: &str) -> String {
     out
 }
 
-/// `bell-features`, as in Ghostty: what a bell (BEL) does.
+/// `bell-features`: what a bell (BEL) does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bell {
     /// The system's alert sound.
@@ -408,7 +408,7 @@ pub struct Bell {
     pub border: bool,
 }
 
-/// `macos-titlebar-style`, as in Ghostty.
+/// `macos-titlebar-style`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Titlebar {
     /// The system's.
@@ -421,7 +421,7 @@ pub enum Titlebar {
     Tabs,
 }
 
-/// `quick-terminal-position`, as in Ghostty.
+/// `quick-terminal-position`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuickPosition {
     Top,
@@ -494,7 +494,7 @@ pub enum FontBackend {
     Mightty,
 }
 
-/// `window-save-state`, as in Ghostty: whether windows, tabs and splits
+/// `window-save-state`: whether windows, tabs and splits
 /// come back the next time mightty opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaveState {
@@ -505,7 +505,7 @@ pub enum SaveState {
     Always,
 }
 
-/// `confirm-close-surface`, as in Ghostty: when closing a pane, window or
+/// `confirm-close-surface`: when closing a pane, window or
 /// mightty asks first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfirmClose {
@@ -515,7 +515,7 @@ pub enum ConfirmClose {
     Always,
 }
 
-/// `macos-option-as-alt`, as in Ghostty.
+/// `macos-option-as-alt`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptionAsAlt {
     None,
@@ -720,8 +720,7 @@ pub fn write_setting(path: &Path, name: &str, value: Option<&str>) -> std::io::R
     fs::write(path, out)
 }
 
-/// Names are Ghostty's where the meaning is the same, so Ghostty theme
-/// files work unchanged.
+/// Every setting, in the order `mightty config` lists them.
 const SETTINGS: &[Setting] = &[
     Setting {
         name: "font-family",
@@ -914,7 +913,7 @@ const SETTINGS: &[Setting] = &[
         name: "macos-auto-secure-input",
         value: "BOOL",
         help: "turn on Secure Keyboard Entry while a program reads a password (input not echoed), so other apps \
-               can't read the keys, as in Ghostty",
+               can't read the keys",
         color: false,
         set: |c, v| {
             c.auto_secure_input = v.parse().map_err(|_| "expects true or false")?;
@@ -926,7 +925,7 @@ const SETTINGS: &[Setting] = &[
         name: "undo-timeout",
         value: "TIME",
         help: "how long a closed tab or pane keeps running, hidden, so undo (⌘Z) brings it back as it was: \
-               5s, 500ms, 1m; 0 for never, as in Ghostty. Reopening (⌘⇧T) works after, with new shells",
+               5s, 500ms, 1m; 0 for never. Reopening (⌘⇧T) works after, with new shells",
         color: false,
         set: |c, v| {
             c.undo_timeout = time(v)?;
@@ -974,8 +973,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "quick-terminal-position",
         value: "EDGE",
-        help: "top, bottom, left, right or center: where the quick terminal (toggle_quick_terminal) appears, as \
-               in Ghostty",
+        help: "top, bottom, left, right or center: where the quick terminal (toggle_quick_terminal) appears",
         color: false,
         set: |c, v| {
             c.quick_position = match v {
@@ -994,7 +992,7 @@ const SETTINGS: &[Setting] = &[
         name: "quick-terminal-size",
         value: "SIZE[,SIZE]",
         help: "how far the quick terminal comes in from its edge, then how much of the edge it runs along \
-               (all of it when left out): a percentage of the screen (40%) or points (500px), as in Ghostty; \
+               (all of it when left out): a percentage of the screen (40%) or points (500px); \
                centred, its width then height",
         color: false,
         set: |c, v| {
@@ -1104,8 +1102,8 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "grapheme-width",
         value: "METHOD",
-        help: "unicode or legacy: unicode draws emoji written with VS16 (\u{2764}\u{FE0F}) two cells wide, as Ghostty \
-               and kitty do; legacy keeps them one, as shells count them, so command lines with them redraw cleanly",
+        help: "unicode or legacy: unicode draws emoji written with VS16 (\u{2764}\u{FE0F}) two cells wide, \
+               as Unicode says; legacy keeps them one, as shells count them, so command lines with them redraw cleanly",
         color: false,
         set: |c, v| {
             c.wide_emoji = match v {
@@ -1120,7 +1118,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "window-colorspace",
         value: "SPACE",
-        help: "srgb or display-p3: the colour space colours and images are taken to be in, as in Ghostty; \
+        help: "srgb or display-p3: the colour space colours and images are taken to be in; \
                display-p3 shows them more saturated on a wide-gamut display",
         color: false,
         set: |c, v| {
@@ -1403,7 +1401,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "selection-word-chars",
         value: "CHARS",
-        help: "the characters that end a word when you double-click, as in Ghostty; spaces and tabs always do. \
+        help: "the characters that end a word when you double-click; spaces and tabs always do. \
                Write \\t for a tab and \\\\ for a backslash. Default: '\"`()[]{}<>|│,;",
         color: false,
         set: |c, v| {
@@ -1423,7 +1421,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "bell-features",
         value: "FEATURES",
-        help: "what a bell does, as in Ghostty: a comma list of system (the alert sound), audio (bell-audio-path), \
+        help: "what a bell does: a comma list of system (the alert sound), audio (bell-audio-path), \
                attention (bounce the Dock icon while in the background), title (🔔 on the title until the pane is \
                typed in or looked at) and border (flash the pane's edge); no-NAME turns one off. Default: system,title",
         color: false,
@@ -1481,7 +1479,7 @@ const SETTINGS: &[Setting] = &[
         name: "macos-titlebar-style",
         value: "STYLE",
         help: "native, transparent (in the terminal's background colour), tabs (tabs in the title bar) or hidden \
-               (none, the window dragged by its top padding; tabs, if any, at the top), as in Ghostty",
+               (none, the window dragged by its top padding; tabs, if any, at the top)",
         color: false,
         set: |c, v| {
             c.behaviour.titlebar = match v {
@@ -1499,7 +1497,7 @@ const SETTINGS: &[Setting] = &[
         name: "scrollbar",
         value: "WHEN",
         help: "system or never: system shows macOS's overlay scrollbar at a pane's right edge while scrolling \
-               through history, to drag or click, as in Ghostty",
+               through history, to drag or click",
         color: false,
         set: |c, v| {
             c.behaviour.scrollbar = match v {
@@ -1550,7 +1548,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         name: "keybind",
         value: "TRIGGER=ACTION",
-        help: "bind keys to an action, as in Ghostty: cmd+shift+t=new_tab, ctrl+k=unbind, or clear \
+        help: "bind keys to an action: cmd+shift+t=new_tab, ctrl+k=unbind, or clear \
                to drop every binding; repeat for more",
         color: false,
         set: |c, v| c.keybinds.apply(v),
@@ -1959,7 +1957,7 @@ impl Config {
 
     /// Applies `name = value` lines, returning a warning per bad line.
     /// `config-file = PATH` lines (relative to `origin`'s directory; `?PATH`
-    /// if it may be missing) are read after the rest, as in Ghostty.
+    /// if it may be missing) are read after the rest.
     /// `colors_only` is for theme files.
     fn apply_text(&mut self, text: &str, origin: &Path, colors_only: bool) -> Vec<String> {
         let mut warnings = Vec::new();
@@ -2650,7 +2648,7 @@ mod tests {
     #[test]
     fn themes_set_colors_only() {
         let dir = scratch("theme");
-        // The shape of a Ghostty theme file.
+        // The shape of a theme file.
         let theme = dir.join("dusk");
         fs::write(
             &theme,

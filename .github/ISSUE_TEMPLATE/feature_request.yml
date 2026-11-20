@@ -13,4 +13,4 @@ body:
     id: elsewhere
     attributes:
       label: Elsewhere
-      description: If another terminal does this, which one and how. Mightty uses Ghostty's setting names where the meaning is the same.
+      description: If another terminal does this, which one and how.

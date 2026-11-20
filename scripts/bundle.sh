@@ -41,7 +41,7 @@ else
   cp target/release/mightty "$app/Contents/MacOS/mightty"
 fi
 cp assets/mightty.icns "$app/Contents/Resources/mightty.icns"
-# The themes (iTerm2-Color-Schemes, as Ghostty bundles them), and their licence.
+# The themes (iTerm2-Color-Schemes), and their licence.
 mkdir -p "$app/Contents/Resources/themes"
 cp assets/themes/* "$app/Contents/Resources/themes/"
 cp assets/THEMES-LICENSE "$app/Contents/Resources/THEMES-LICENSE"

@@ -117,7 +117,7 @@ const MAX_HTML_COPY: usize = 8 << 20;
 const GAP: f64 = 1.0;
 /// How far either side of a divider grabs it.
 const GRAB: f64 = 3.0;
-/// How far ⌘⌃ and an arrow moves a divider, in points (as in Ghostty).
+/// How far ⌘⌃ and an arrow moves a divider, in points.
 const RESIZE_STEP: f64 = 10.0;
 /// Panes are never made smaller than this by dragging, in points.
 const MIN_PANE: f64 = 60.0;
@@ -322,7 +322,7 @@ struct Selection {
     head: (u64, usize),
     /// A single click only becomes a selection once the mouse moves.
     dragged: bool,
-    /// Columns between the ends, on every line between (⌥-drag), as in Ghostty.
+    /// Columns between the ends, on every line between (⌥-drag).
     block: bool,
 }
 
@@ -354,7 +354,7 @@ fn selection_range(selection: Option<Selection>, term: &Term) -> Option<renderer
 }
 
 /// The active keyboard layout is US or ABC, where Option's characters are
-/// rarely needed (Ghostty's default for `macos-option-as-alt`).
+/// rarely needed (the default for `macos-option-as-alt`).
 fn us_keyboard_layout() -> bool {
     // SAFETY: Carbon calls; the copied source is released, the property is borrowed from it.
     unsafe {
@@ -791,7 +791,7 @@ pub fn run(config: Config) -> io::Result<()> {
             install::clean(&app);
         }
         run_on_main_after(UPDATE_FIRST, on_update_tick);
-        // As in Ghostty: `kill -USR2` reloads the configuration.
+        // `kill -USR2` reloads the configuration.
         const SIGUSR2: i32 = 31;
         on_signal_run_on_main(SIGUSR2, on_reload_signal);
         // Light and dark mode changing, for `theme = light:…,dark:…`.
@@ -1538,7 +1538,7 @@ impl App {
     }
 
     /// Where a shell started from `surface` should start: where its shell
-    /// is (OSC 7), as in Ghostty, else where it started.
+    /// is (OSC 7), else where it started.
     fn cwd_of(&self, surface: &Surface) -> Option<PathBuf> {
         // Any program can report a directory: use it only if it is on this
         // machine (not from a shell over ssh) and is one.
@@ -2001,7 +2001,7 @@ impl App {
         }
         self.release_pane(&surface);
         if was_active {
-            // The pane before it, as in Ghostty.
+            // The pane before it.
             let at = order.iter().position(|&v| v == view).unwrap_or(0);
             self.focus(order[if at == 0 { 1 } else { at - 1 }]);
         }
@@ -2831,7 +2831,7 @@ impl App {
     }
 
     /// ⌘⌃ and an arrow: moves the nearest divider `step` points that way
-    /// (as Ghostty's `resize_split`).
+    /// (`resize_split`).
     fn move_divider(&mut self, direction: Direction, step: f64) {
         let Some((window, active)) = self.key_window() else {
             return;
@@ -4540,7 +4540,7 @@ impl Surface {
     /// ⇧ with ← or →, at a shell prompt: selects the command's text from
     /// the cursor, a character at a time, a word with ⌥, or to the start
     /// or end with ⌘, moving the shell's cursor along. Not for programs
-    /// that asked for keys to be told apart (kitty's protocol), which
+    /// that asked for keys to be told apart (the kitty keyboard protocol), which
     /// handle these themselves.
     fn select_by_key(&mut self, code: u16, mods: Mods) -> bool {
         if !mods.shift || mods.ctrl || !matches!(code, 123 | 124) || self.scroll_offset != 0 {
@@ -5252,7 +5252,7 @@ unsafe fn register_view_class() -> Id {
             let key_flags =
                 with_surface(view, |w| w.pane.term.lock().unwrap().key_flags()).unwrap_or(0);
             // Command shortcuts belong to the menu; ones it hasn't go to
-            // programs that can tell them apart (kitty's Super).
+            // programs that can tell them apart (the keyboard protocol's Super).
             if flags & CMD != 0 && key_flags == 0 {
                 return;
             }

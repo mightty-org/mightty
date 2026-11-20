@@ -12,7 +12,7 @@ pub struct Mods {
     pub ctrl: bool,
     /// Option, treated as Meta.
     pub alt: bool,
-    /// Command: kitty's Super. Legacy encodings can't carry it.
+    /// Command: the keyboard protocol's Super. Legacy encodings can't carry it.
     pub cmd: bool,
     pub caps_lock: bool,
 }
@@ -78,7 +78,7 @@ pub fn kitty(key: &Key, flags: u8, app_cursor: bool) -> Option<Vec<u8>> {
         Kind::Typing => all || (disambiguate && (chord || m.shift)),
         Kind::Escape => disambiguate,
         Kind::Modifier => all,
-        // Same as xterm's unless something only kitty can say is added, or
+        // Same as xterm's unless something only the protocol can say is added, or
         // xterm has nothing for it (Insert, F13 and up), or for F3, whose
         // `CSI 1;5R` reads as a cursor position report.
         Kind::Function => {
@@ -159,8 +159,8 @@ enum Kind {
     Function,
 }
 
-/// kitty's number and final byte for keys that don't type a character.
-/// Keypad keys are kitty's own keys only when every key is an escape code;
+/// The protocol's number and final byte for keys that don't type a character.
+/// Keypad keys are the protocol's own keys only when every key is an escape code;
 /// otherwise they type what they type.
 fn functional(code: u16, all: bool) -> Option<(u32, u8, Kind)> {
     let (number, end) = match code {
@@ -223,7 +223,7 @@ fn functional(code: u16, all: bool) -> Option<(u32, u8, Kind)> {
     Some((number, end, Kind::Function))
 }
 
-/// What the key types on a US layout, for kitty's base-layout key.
+/// What the key types on a US layout, for the protocol's base-layout key.
 fn us_layout(code: u16) -> Option<u8> {
     const KEYS: &[u8; 51] = b"asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.\0\0`";
     let c = *KEYS.get(usize::from(code))?;
@@ -578,7 +578,7 @@ mod tests {
             press(0, "a", "a", Mods { cmd: true, ..none }, f),
             "\x1b[97;9u"
         );
-        // Function keys keep xterm's forms; kitty's only where xterm has none.
+        // Function keys keep xterm's forms; the protocol's only where xterm has none.
         assert_eq!(press(126, "", "", none, f), "\x1b[A");
         assert_eq!(press(126, "", "", ctrl, f), "\x1b[1;5A");
         assert_eq!(press(99, "", "", none, f), "\x1b[13~");
