@@ -45,9 +45,10 @@ const MAX_COMMAND_LEN: usize = 4096;
 const MAX_TITLE_CHARS: usize = 1024;
 /// Style tables smaller than this are never garbage-collected.
 const MIN_STYLE_GC: usize = 4096;
-/// Characters that end a word for double-click selection. `/ . : - _ ~ = @`
-/// are deliberately absent so paths and URLs select whole.
-const WORD_DELIMITERS: &str = "'\"`()[]{}<>|│,;";
+/// What ends a word for double-click selection by default, besides spaces
+/// and tabs. `/ . : - _ ~ = @` are deliberately absent so paths and URLs
+/// select whole.
+pub const WORD_BOUNDARIES: &str = "'\"`()[]{}<>|│,;";
 const TAB_WIDTH: usize = 8;
 /// Default colours, unless [`TermOptions`] says otherwise.
 pub const DEFAULT_FG: (u8, u8, u8) = (0xd8, 0xd8, 0xd8);
@@ -1058,8 +1059,9 @@ impl Term {
     }
 
     /// Column range `(start, end)`, inclusive, of the word at `(line, col)`.
-    /// Paths and URLs count as one word.
-    pub fn word_at(&self, line: u64, col: usize) -> Option<(usize, usize)> {
+    /// Words end at whitespace and at the characters in `boundaries`
+    /// ([`WORD_BOUNDARIES`] by default).
+    pub fn word_at(&self, line: u64, col: usize, boundaries: &str) -> Option<(usize, usize)> {
         let cells = &self.line(line)?.cells;
         if col >= cells.len() {
             return Some((col, col)); // blank
@@ -1073,7 +1075,7 @@ impl Term {
             };
             self.graphemes.base(cells[i])
         };
-        let is_word = |c: char| !c.is_whitespace() && !WORD_DELIMITERS.contains(c);
+        let is_word = |c: char| !c.is_whitespace() && !boundaries.contains(c);
         if !is_word(char_at(col)) {
             return Some((col, col));
         }

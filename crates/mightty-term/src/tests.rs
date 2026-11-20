@@ -257,11 +257,14 @@ fn text_range_joins_soft_wraps() {
 #[test]
 fn word_boundaries() {
     let t = term(40, 1, "cd ~/src/my-app.rs (ok) 中文x");
-    assert_eq!(t.word_at(0, 5), Some((3, 17)));
-    assert_eq!(t.word_at(0, 20), Some((20, 21)));
-    assert_eq!(t.word_at(0, 2), Some((2, 2)));
+    assert_eq!(t.word_at(0, 5, WORD_BOUNDARIES), Some((3, 17)));
+    assert_eq!(t.word_at(0, 20, WORD_BOUNDARIES), Some((20, 21)));
+    assert_eq!(t.word_at(0, 2, WORD_BOUNDARIES), Some((2, 2)));
     // Clicking the right half of a wide char selects the word.
-    assert_eq!(t.word_at(0, 25), Some((24, 28)));
+    assert_eq!(t.word_at(0, 25, WORD_BOUNDARIES), Some((24, 28)));
+    // Other boundaries: the path splits at `/`, and `(ok)` is one word.
+    assert_eq!(t.word_at(0, 5, "/"), Some((5, 7)));
+    assert_eq!(t.word_at(0, 20, "/"), Some((19, 22)));
 }
 
 #[test]
