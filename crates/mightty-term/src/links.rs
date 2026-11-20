@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-/// Longest hyperlink target kept, in bytes (as in kitty); longer ones are ignored.
+/// Longest hyperlink target kept, in bytes; longer ones are ignored.
 pub(crate) const MAX_URI: usize = 2048;
 /// Longest OSC 8 `id=` kept, in bytes.
 const MAX_ID: usize = 250;

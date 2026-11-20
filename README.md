@@ -40,8 +40,8 @@ agents and scripts can drive it through MCP and a control socket.
   Unicode 17 with grapheme clusters, styled underlines, hyperlinks, and
   shell integration for zsh, bash and fish with no dotfile changes.
 - **Settings you can browse.** A settings screen in a terminal tab with
-  completion and live previews, backed by a plain config file that uses
-  Ghostty's names. 819 themes are built in.
+  completion and live previews, backed by a plain config file.
+  819 themes are built in.
 - **Embeddable core.** The parser and terminal state are available as
   `libmightty`, a C library with a stable ABI.
 

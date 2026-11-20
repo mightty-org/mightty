@@ -1,4 +1,4 @@
-//! The command palette (⌘⇧P, as in Ghostty): a panel at the top of the pane
+//! The command palette (⌘⇧P): a panel at the top of the pane
 //! listing actions with their keys, filtered as the field is typed in; the
 //! arrows move the selection, Return runs it, Escape closes. What runs is
 //! up to `app`; this is the list and its AppKit side.

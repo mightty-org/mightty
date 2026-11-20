@@ -442,8 +442,8 @@ unsafe extern "C" {
     ) -> CFTypeRef;
 }
 
-// Private (SkyLight, re-exported by CoreGraphics), as Ghostty and others
-// use for blur behind a window; there is no public API for it.
+// Private (SkyLight, re-exported by CoreGraphics), for blur behind a
+// window; there is no public API for it.
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     pub fn CGSMainConnectionID() -> i32;

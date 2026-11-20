@@ -59,7 +59,8 @@ in `bench/` and how to run them.
   with its help text, and a new action in `ACTIONS` in `bindings.rs`. The
   help text is what `mightty config` shows and what the website's reference
   is built from, so write it for users.
-- Use Ghostty's name for a setting when it means the same thing.
+- Name a new setting like the existing ones near it, and keep a
+  setting's name once it's released.
 
 ## Commits and pull requests
 

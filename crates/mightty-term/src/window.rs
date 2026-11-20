@@ -1,13 +1,12 @@
 //! What programs ask of the window around the terminal: a progress bar
-//! (ConEmu's OSC 9 ; 4, as Ghostty and Windows Terminal show it), the
-//! pointer's shape (OSC 22, as in xterm and kitty), and the pane's font
-//! family (OSC 50, as in xterm), as `mightty config` previews fonts.
+//! (OSC 9 ; 4), the pointer's shape (OSC 22), and the pane's font family
+//! (OSC 50), as `mightty config` previews fonts.
 
 use std::time::{Duration, Instant};
 
 use crate::Term;
 
-/// A progress bar left without updates this long goes, as in Ghostty: the
+/// A progress bar left without updates this long goes: the
 /// program that set it may have died.
 const PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -21,7 +20,7 @@ pub enum Progress {
     Indeterminate,
 }
 
-/// Pointer shapes, by their CSS names; X11 names too, as kitty takes them.
+/// Pointer shapes, by their CSS names; X11 names too.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PointerShape {
     #[default]

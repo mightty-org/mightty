@@ -3,7 +3,7 @@ use mightty_term::{Color, DEFAULT_BG, DEFAULT_FG, default_palette};
 pub type Rgb = (u8, u8, u8);
 
 /// Colours the front end draws with. Field names match the settings that
-/// set them (`cursor-color` → `cursor`), which are Ghostty's.
+/// set them (`cursor-color` → `cursor`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub foreground: Rgb,

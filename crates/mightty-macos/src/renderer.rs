@@ -146,7 +146,7 @@ pub enum HoveredLink {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum GlyphKey {
     Char(char),
-    /// A Nerd Font icon given the blank cell after it too, as in Ghostty.
+    /// A Nerd Font icon given the blank cell after it too.
     Icon(char),
     Cluster(Box<str>),
     Ligature(Box<[(u16, u16)]>, u16),
@@ -358,7 +358,7 @@ fn undercurl(period: u32, width: u32, height: u32, baseline: f32, thickness: f32
 
 /// The part of a placeholder run's image its cells show, placed from the
 /// run's first cell. The image is scaled to fit its box of cells, keeping
-/// its aspect, and centred, as in kitty; `None` where the run falls in
+/// its aspect, and centred; `None` where the run falls in
 /// the margin.
 fn placeholder_quad(run: &PlaceholderRun, cw: f32, ch: f32) -> Option<Quad> {
     let [sx, sy, sw, sh] = run.source.map(|v| v as f32);
@@ -779,7 +779,7 @@ impl Renderer {
 
     /// Adds `snapshot`'s images to `quads`, whose text starts at `text`:
     /// those with a negative z-index under the text, above cell
-    /// backgrounds, and the rest over it, as in kitty.
+    /// backgrounds, and the rest over it, as the graphics protocol says.
     fn add_images(&mut self, snapshot: &Snapshot, mut quads: Vec<Quad>, text: usize) -> Frame {
         if snapshot.images.is_empty() && snapshot.placeholders.is_empty() {
             return Frame {

@@ -1,7 +1,7 @@
 //! The kitty graphics protocol: images sent in APC `G` commands, stored,
 //! placed on the grid and deleted. Placements are anchored to absolute
 //! lines, so they scroll with the text into scrollback; each screen
-//! (primary, alternate) keeps its own images, as in kitty.
+//! (primary, alternate) keeps its own images.
 //!
 //! Supported: transmission inline (`t=d`), from a file (`t=f`) or a temp
 //! file (`t=t`), as RGB, RGBA or PNG (`f=24/32/100`), zlib-compressed or
@@ -31,7 +31,7 @@ use crate::{Term, base64};
 /// The largest image side accepted, in pixels.
 const MAX_SIDE: u32 = 10_000;
 /// Image data a screen keeps, as decoded pixels; the oldest images go first
-/// past it (kitty's default quota).
+/// past it (the protocol's suggested quota).
 const MAX_STORED: usize = 320 << 20;
 /// The largest transmission accepted, before decoding.
 const MAX_TRANSMIT: usize = 400 << 20;
@@ -46,7 +46,7 @@ const MAX_PLACEMENTS: usize = 4096;
 const MAX_DEPTH: usize = 8;
 /// Frames an image may have; their pixels count toward `MAX_STORED` too.
 const MAX_FRAMES: usize = 10_000;
-/// A frame's gap when none is given, in milliseconds, as in kitty.
+/// A frame's gap when none is given, in milliseconds.
 const DEFAULT_GAP: i32 = 40;
 
 /// Pixels of a transmitted image: premultiplied RGBA, top row first.
@@ -91,7 +91,7 @@ struct Animation {
     playing: Playing,
     /// The frame shown: an index into `frames`.
     current: usize,
-    /// `v`: times to play, or 0 for ever (kitty's 1).
+    /// `v`: times to play, or 0 for ever (the protocol's 1).
     plays: u32,
     played: u32,
     /// When the next frame is due; set on the first tick after starting.
@@ -1173,7 +1173,7 @@ fn blit(
 pub const PLACEHOLDER: char = '\u{10EEEE}';
 
 /// Combining characters standing for 0, 1, 2…, in code point order
-/// (kitty's gen/rowcolumn-diacritics.txt).
+/// (the graphics protocol's rowcolumn-diacritics.txt).
 static DIACRITICS: [u32; 297] = [
     0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C,
     0x0350, 0x0351, 0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
@@ -1474,7 +1474,7 @@ impl Term {
                     b'a' => self.graphics_mut().control(&c, id),
                     _ => self.graphics_mut().compose(&c, id),
                 };
-                // As in kitty, controlling and composing only answer errors:
+                // Controlling and composing only answer errors:
                 // `kitten icat` doesn't wait for an OK, which would reach the shell.
                 match done {
                     Err(error) => self.graphics_reply(&c, error),

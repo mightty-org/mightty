@@ -938,7 +938,7 @@ unsafe fn open_font(name: &str, size: f64) -> CTFontRef {
     }
 }
 
-/// Symbols Nerd Font Mono, built in as Ghostty and kitty do, so Nerd Font
+/// Symbols Nerd Font Mono, built in, so Nerd Font
 /// icons show without installing anything (see assets/fonts for its licence).
 static SYMBOLS: &[u8] = include_bytes!("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
 
