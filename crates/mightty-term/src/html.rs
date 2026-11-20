@@ -13,16 +13,18 @@ const LINK_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
 
 impl Term {
     /// [`Term::text_range`] as HTML: the same text, coloured as drawn.
-    pub fn html_range(&self, a: (u64, usize), b: (u64, usize)) -> String {
-        self.html(&self.range_pieces(a, b))
+    /// `None` past `max` bytes: markup can make it many times the text's
+    /// size, a link's address on every cell at worst.
+    pub fn html_range(&self, a: (u64, usize), b: (u64, usize), max: usize) -> Option<String> {
+        self.html(&self.range_pieces(a, b), max)
     }
 
-    /// [`Term::text_block`] as HTML.
-    pub fn html_block(&self, a: (u64, usize), b: (u64, usize)) -> String {
-        self.html(&self.block_pieces(a, b))
+    /// [`Term::text_block`] as HTML, `None` past `max` bytes.
+    pub fn html_block(&self, a: (u64, usize), b: (u64, usize), max: usize) -> Option<String> {
+        self.html(&self.block_pieces(a, b), max)
     }
 
-    fn html(&self, pieces: &[Piece]) -> String {
+    fn html(&self, pieces: &[Piece], max: usize) -> Option<String> {
         let colors = self.colors();
         let mut out = format!(
             "<meta charset=\"utf-8\"><pre style=\"font-family:ui-monospace,Menlo,monospace;\
@@ -64,13 +66,16 @@ impl Term {
                 if link.is_some() {
                     out += "</a>";
                 }
+                if out.len() > max {
+                    return None;
+                }
             }
             if piece.newline {
                 out.push('\n');
             }
         }
         out += "</pre>";
-        out
+        Some(out)
     }
 
     /// Whether `cell` copies as a space, which line ends drop.

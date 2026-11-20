@@ -108,9 +108,10 @@ type BarShown = (Vec<String>, usize, bool);
 /// Closes remembered for reopening at most.
 const CLOSED_KEPT: usize = 20;
 
-/// Copies of more text than this go on the clipboard as plain text only:
-/// as HTML they'd be several times the size, for no app to show well.
-const MAX_HTML_COPY: usize = 1 << 20;
+/// Copies whose HTML would be longer than this go on the clipboard as
+/// plain text only: no app shows that much well, and a program printing
+/// a style or link per cell could otherwise make it enormous.
+const MAX_HTML_COPY: usize = 8 << 20;
 
 /// Points between split panes, drawn as a divider.
 const GAP: f64 = 1.0;
@@ -4904,11 +4905,11 @@ impl Surface {
                 Some(s) => term.text_block(s.anchor, s.head),
                 None => term.text_range(start, end),
             };
-            let html =
-                (BEHAVIOUR.get().copy_html && text.len() <= MAX_HTML_COPY).then(|| match block {
-                    Some(s) => term.html_block(s.anchor, s.head),
-                    None => term.html_range(start, end),
-                });
+            let html = match block {
+                _ if !BEHAVIOUR.get().copy_html => None,
+                Some(s) => term.html_block(s.anchor, s.head, MAX_HTML_COPY),
+                None => term.html_range(start, end, MAX_HTML_COPY),
+            };
             (text, html)
         };
         // SAFETY: main thread; documented signatures.

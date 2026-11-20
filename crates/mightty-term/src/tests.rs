@@ -1287,7 +1287,7 @@ fn copying_as_html() {
     // Runs of one style are a span; trailing blanks and hidden text go as
     // they do in plain text, and text is escaped.
     assert_eq!(
-        t.html_range((0, 0), (1, 19)),
+        t.html_range((0, 0), (1, 19), usize::MAX).unwrap(),
         format!(
             "{pre}<span style=\"color:#e06c75;font-weight:bold\">ok</span> &lt;a&amp;b&gt;\n\
              <span style=\"color:#{:02x}{:02x}{:02x};background-color:#{:02x}{:02x}{:02x};\
@@ -1304,10 +1304,18 @@ fn copying_as_html() {
         "\x1b]8;;https://x.org/?a=\"1\"\x07web\x1b]8;;\x07 \x1b]8;;javascript:alert(1)\x07js\x1b]8;;\x07",
     );
     assert_eq!(
-        t.html_range((0, 0), (0, 29)),
+        t.html_range((0, 0), (0, 29), usize::MAX).unwrap(),
         format!("{pre}<a href=\"https://x.org/?a=&quot;1&quot;\">web</a> js</pre>")
     );
     // A block, a line each.
     let t = term(10, 3, "abcd\r\nefgh");
-    assert_eq!(t.html_block((0, 1), (1, 2)), format!("{pre}bc\nfg</pre>"));
+    assert_eq!(
+        t.html_block((0, 1), (1, 2), usize::MAX).unwrap(),
+        format!("{pre}bc\nfg</pre>")
+    );
+    // A link's address on every cell: given up on past the limit.
+    let cell = format!("\x1b]8;;https://x.org/{}\x07a\x1b[1m", "y".repeat(2000));
+    let t = term(40, 2, &[cell.as_str(), "b\x1b[22m"].concat().repeat(40));
+    assert_eq!(t.html_range((0, 0), (1, 39), 64 << 10), None);
+    assert!(t.html_range((0, 0), (1, 39), 1 << 20).is_some());
 }
