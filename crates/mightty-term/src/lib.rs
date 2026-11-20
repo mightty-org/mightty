@@ -8,6 +8,7 @@ mod cell;
 mod colors;
 mod graphemes;
 mod graphics;
+mod html;
 mod links;
 mod queries;
 mod styles;
@@ -50,6 +51,26 @@ const MIN_STYLE_GC: usize = 4096;
 /// select whole.
 pub const WORD_BOUNDARIES: &str = "'\"`()[]{}<>|│,;";
 const TAB_WIDTH: usize = 8;
+/// Part of a selection on one row: the cells shown in it, without the
+/// spacers after wide characters, and how it ends.
+pub(crate) struct Piece {
+    pub(crate) cells: Vec<Cell>,
+    /// At the end of a line, where trailing blanks aren't copied.
+    pub(crate) trim: bool,
+    /// A line break follows.
+    pub(crate) newline: bool,
+}
+
+fn shown_cells(cells: &[Cell]) -> Vec<Cell> {
+    cells
+        .iter()
+        .filter(|c| {
+            !c.flags().contains(Flags::WIDE_SPACER) && !c.flags().contains(Flags::WRAP_SPACER)
+        })
+        .copied()
+        .collect()
+}
+
 /// Default colours, unless [`TermOptions`] says otherwise.
 pub const DEFAULT_FG: (u8, u8, u8) = (0xd8, 0xd8, 0xd8);
 pub const DEFAULT_BG: (u8, u8, u8) = (0x1e, 0x1e, 0x1e);
@@ -940,8 +961,20 @@ impl Term {
     /// Text between two `(line, column)` points, inclusive, in either order.
     /// Soft-wrapped rows are joined; hard line ends become `\n`.
     pub fn text_range(&self, a: (u64, usize), b: (u64, usize)) -> String {
+        self.text(&self.range_pieces(a, b))
+    }
+
+    /// The text in a block: columns `a.1..=b.1` (either way round) of lines
+    /// `a.0..=b.0`, a line each, trailing spaces trimmed. A wide character
+    /// counts when its first cell is inside.
+    pub fn text_block(&self, a: (u64, usize), b: (u64, usize)) -> String {
+        self.text(&self.block_pieces(a, b))
+    }
+
+    /// The cells [`Term::text_range`] copies, a piece per row.
+    pub(crate) fn range_pieces(&self, a: (u64, usize), b: (u64, usize)) -> Vec<Piece> {
         let (start, end) = if a <= b { (a, b) } else { (b, a) };
-        let mut out = String::new();
+        let mut pieces = Vec::new();
         for line in start.0..=end.0 {
             let Some(row) = self.line(line) else { continue };
             let from = if line == start.0 { start.1 } else { 0 };
@@ -950,48 +983,50 @@ impl Term {
             } else {
                 row.cells.len()
             };
-            let begin = out.len();
-            for cell in row.cells.get(from..to).unwrap_or_default() {
-                if !cell.flags().contains(Flags::WIDE_SPACER)
-                    && !cell.flags().contains(Flags::WRAP_SPACER)
-                {
-                    self.push_cell(&mut out, *cell);
-                }
-            }
             let continues = row.wrapped && to == row.cells.len();
-            if !continues || line == end.0 {
-                let len = out[begin..].trim_end_matches(' ').len();
-                out.truncate(begin + len);
-                if line != end.0 {
-                    out.push('\n');
-                }
-            }
+            let ends = !continues || line == end.0;
+            pieces.push(Piece {
+                cells: shown_cells(row.cells.get(from..to).unwrap_or_default()),
+                trim: ends,
+                newline: ends && line != end.0,
+            });
         }
-        out
+        pieces
     }
 
-    /// The text in a block: columns `a.1..=b.1` (either way round) of lines
-    /// `a.0..=b.0`, a line each, trailing spaces trimmed. A wide character
-    /// counts when its first cell is inside.
-    pub fn text_block(&self, a: (u64, usize), b: (u64, usize)) -> String {
+    /// The cells [`Term::text_block`] copies, a piece per line.
+    pub(crate) fn block_pieces(&self, a: (u64, usize), b: (u64, usize)) -> Vec<Piece> {
         let (lines, cols) = (a.0.min(b.0)..=a.0.max(b.0), a.1.min(b.1)..=a.1.max(b.1));
+        let last = *lines.end();
+        lines
+            .map(|line| {
+                let cells = self.line(line).map_or_else(Vec::new, |row| {
+                    let end = (*cols.end()).saturating_add(1).min(row.cells.len());
+                    shown_cells(row.cells.get(*cols.start()..end).unwrap_or_default())
+                });
+                Piece {
+                    cells,
+                    trim: true,
+                    newline: line != last,
+                }
+            })
+            .collect()
+    }
+
+    fn text(&self, pieces: &[Piece]) -> String {
         let mut out = String::new();
-        for line in lines {
-            if !out.is_empty() || line != a.0.min(b.0) {
+        for piece in pieces {
+            let begin = out.len();
+            for &cell in &piece.cells {
+                self.push_cell(&mut out, cell);
+            }
+            if piece.trim {
+                let len = out[begin..].trim_end_matches(' ').len();
+                out.truncate(begin + len);
+            }
+            if piece.newline {
                 out.push('\n');
             }
-            let Some(row) = self.line(line) else { continue };
-            let begin = out.len();
-            let end = (*cols.end()).saturating_add(1).min(row.cells.len());
-            for cell in row.cells.get(*cols.start()..end).unwrap_or_default() {
-                if !cell.flags().contains(Flags::WIDE_SPACER)
-                    && !cell.flags().contains(Flags::WRAP_SPACER)
-                {
-                    self.push_cell(&mut out, *cell);
-                }
-            }
-            let len = out[begin..].trim_end_matches(' ').len();
-            out.truncate(begin + len);
         }
         out
     }

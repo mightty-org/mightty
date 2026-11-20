@@ -195,6 +195,8 @@ pub struct Behaviour {
     pub clipboard_write: Permission,
     /// `copy-on-select`: selected text goes to the clipboard at once.
     pub copy_on_select: bool,
+    /// `copy-with-colors`: copied text also goes on the clipboard as HTML.
+    pub copy_html: bool,
     /// `clipboard-paste-protection`: ask before pasting text that would
     /// run commands or act as keys (see `keys::paste_is_risky`).
     pub paste_protection: bool,
@@ -226,6 +228,7 @@ impl Default for Behaviour {
             clipboard_read: Permission::Ask,
             clipboard_write: Permission::Allow,
             copy_on_select: false,
+            copy_html: true,
             paste_protection: true,
             hide_mouse: false,
             click_to_move: true,
@@ -1351,6 +1354,18 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.behaviour.copy_on_select.to_string()),
+    },
+    Setting {
+        name: "copy-with-colors",
+        value: "BOOL",
+        help: "copied text also goes on the clipboard with its colours and styles, so apps that paste \
+               rich text, such as Notes and Mail, keep how it looked. Apps that paste plain text still get plain text",
+        color: false,
+        set: |c, v| {
+            c.behaviour.copy_html = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.copy_html.to_string()),
     },
     Setting {
         name: "clipboard-paste-protection",

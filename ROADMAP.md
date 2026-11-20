@@ -5,11 +5,8 @@ someone needs them, and a pull request for any of them is welcome.
 
 ## Next
 
-Small changes that most people would notice.
-
-| Feature | Why |
-|---|---|
-| Copy with colours | Copied text also goes on the clipboard as HTML, so pasting into Notes, Mail or Slack keeps its colours. |
+Small changes that most people would notice. Nothing is waiting here
+now: the next items come from Later.
 
 ## Later
 
