@@ -9,7 +9,6 @@ Small changes that most people would notice.
 
 | Feature | Why |
 |---|---|
-| In-band resize reports (mode 2048) | Full-screen programs get the new size in their input, in order with keys, instead of from a signal. |
 | Copy with colours | Copied text also goes on the clipboard as HTML, so pasting into Notes, Mail or Slack keeps its colours. |
 
 ## Later
