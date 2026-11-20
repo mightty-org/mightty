@@ -1270,3 +1270,44 @@ fn capability_queries() {
     let long = [b"\x1bP+q".as_slice(), &[b'4'; 2000], b"\x1b\\"].concat();
     assert_eq!(reply(&mut t, &long), "");
 }
+
+#[test]
+fn copying_as_html() {
+    let (fg, bg) = (DEFAULT_FG, DEFAULT_BG);
+    let pre = format!(
+        "<meta charset=\"utf-8\"><pre style=\"font-family:ui-monospace,Menlo,monospace;\
+         color:#{:02x}{:02x}{:02x};background-color:#{:02x}{:02x}{:02x}\">",
+        fg.0, fg.1, fg.2, bg.0, bg.1, bg.2
+    );
+    let t = term(
+        20,
+        3,
+        "\x1b[1;31mok\x1b[0m <a&b>   \r\n\x1b[4:3;58;2;1;2;3;7mx\x1b[0m\x1b[8mhid\x1b[0m",
+    );
+    // Runs of one style are a span; trailing blanks and hidden text go as
+    // they do in plain text, and text is escaped.
+    assert_eq!(
+        t.html_range((0, 0), (1, 19)),
+        format!(
+            "{pre}<span style=\"color:#e06c75;font-weight:bold\">ok</span> &lt;a&amp;b&gt;\n\
+             <span style=\"color:#{:02x}{:02x}{:02x};background-color:#{:02x}{:02x}{:02x};\
+             text-decoration-line:underline;text-decoration-style:wavy;\
+             text-decoration-color:#010203\">x</span></pre>",
+            bg.0, bg.1, bg.2, fg.0, fg.1, fg.2
+        )
+    );
+    assert_eq!(t.text_range((0, 0), (1, 19)), "ok <a&b>\nx");
+    // Web links stay links; other schemes are plain text.
+    let t = term(
+        30,
+        2,
+        "\x1b]8;;https://x.org/?a=\"1\"\x07web\x1b]8;;\x07 \x1b]8;;javascript:alert(1)\x07js\x1b]8;;\x07",
+    );
+    assert_eq!(
+        t.html_range((0, 0), (0, 29)),
+        format!("{pre}<a href=\"https://x.org/?a=&quot;1&quot;\">web</a> js</pre>")
+    );
+    // A block, a line each.
+    let t = term(10, 3, "abcd\r\nefgh");
+    assert_eq!(t.html_block((0, 1), (1, 2)), format!("{pre}bc\nfg</pre>"));
+}

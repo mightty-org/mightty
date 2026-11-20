@@ -108,6 +108,10 @@ type BarShown = (Vec<String>, usize, bool);
 /// Closes remembered for reopening at most.
 const CLOSED_KEPT: usize = 20;
 
+/// Copies of more text than this go on the clipboard as plain text only:
+/// as HTML they'd be several times the size, for no app to show well.
+const MAX_HTML_COPY: usize = 1 << 20;
+
 /// Points between split panes, drawn as a divider.
 const GAP: f64 = 1.0;
 /// How far either side of a divider grabs it.
@@ -4889,16 +4893,23 @@ impl Surface {
     }
 
     fn copy(&mut self) {
-        let text = {
+        let (text, html) = {
             let term = self.pane.term.lock().unwrap();
             let Some((start, end)) = selection_range(self.selection, &term) else {
                 return;
             };
-            match self.selection {
-                // The ends as dragged: a block's corners, not its text's start and end.
-                Some(s) if s.block => term.text_block(s.anchor, s.head),
-                _ => term.text_range(start, end),
-            }
+            // The ends as dragged: a block's corners, not its text's start and end.
+            let block = self.selection.filter(|s| s.block);
+            let text = match block {
+                Some(s) => term.text_block(s.anchor, s.head),
+                None => term.text_range(start, end),
+            };
+            let html =
+                (BEHAVIOUR.get().copy_html && text.len() <= MAX_HTML_COPY).then(|| match block {
+                    Some(s) => term.html_block(s.anchor, s.head),
+                    None => term.html_range(start, end),
+                });
+            (text, html)
         };
         // SAFETY: main thread; documented signatures.
         unsafe {
@@ -4910,6 +4921,14 @@ impl Surface {
                 nsstring(&text),
                 NSPasteboardTypeString
             );
+            if let Some(html) = html {
+                let _: Bool = msg!(
+                    pasteboard,
+                    c"setString:forType:",
+                    nsstring(&html),
+                    NSPasteboardTypeHTML
+                );
+            }
         }
     }
 

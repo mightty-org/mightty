@@ -115,6 +115,7 @@ unsafe extern "C" {
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {
     pub static NSPasteboardTypeString: Id;
+    pub static NSPasteboardTypeHTML: Id;
     pub fn NSBeep();
 }
 

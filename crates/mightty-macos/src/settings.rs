@@ -171,6 +171,7 @@ fn section(name: &str) -> &'static str {
         n if n.starts_with("clipboard")
             || n.starts_with("mouse-")
             || n == "copy-on-select"
+            || n == "copy-with-colors"
             || n == "cursor-click-to-move"
             || n == "selection-word-chars"
             || n.starts_with("notify-")
