@@ -332,10 +332,11 @@ fn selection_range(selection: Option<Selection>, term: &Term) -> Option<renderer
     match s.granularity {
         Granularity::Cell => {}
         Granularity::Word => {
-            if let Some((first, _)) = term.word_at(start.0, start.1) {
+            let boundaries = BEHAVIOUR.get().word_boundaries;
+            if let Some((first, _)) = term.word_at(start.0, start.1, boundaries) {
                 start.1 = first;
             }
-            if let Some((_, last)) = term.word_at(end.0, end.1) {
+            if let Some((_, last)) = term.word_at(end.0, end.1, boundaries) {
                 end.1 = last;
             }
         }

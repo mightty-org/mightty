@@ -10,6 +10,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use mightty_render::{Rgb, Theme};
 
@@ -202,6 +203,9 @@ pub struct Behaviour {
     /// `cursor-click-to-move`: a click in the command being typed at a
     /// prompt moves the cursor there.
     pub click_to_move: bool,
+    /// `selection-word-chars`: what ends a word when double-clicking,
+    /// besides whitespace.
+    pub word_boundaries: &'static str,
     /// `scrollbar`: system (an overlay scroller while scrolling) or never.
     pub scrollbar: bool,
     /// `macos-titlebar-style`.
@@ -225,6 +229,7 @@ impl Default for Behaviour {
             paste_protection: true,
             hide_mouse: false,
             click_to_move: true,
+            word_boundaries: mightty_term::WORD_BOUNDARIES,
             scrollbar: true,
             titlebar: Titlebar::Native,
             bell: Bell {
@@ -347,6 +352,42 @@ impl Adjust {
             Self::Percent(p) => format!("{p}%"),
         }
     }
+}
+
+/// `text` as a string that lives for good, so settings that hold one stay
+/// `Copy`: each distinct value is leaked once, however often it's set.
+fn intern(text: String) -> &'static str {
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    if text == mightty_term::WORD_BOUNDARIES {
+        return mightty_term::WORD_BOUNDARIES;
+    }
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&s) = seen.iter().find(|&&s| s == text) {
+        return s;
+    }
+    let s: &'static str = Box::leak(text.into_boxed_str());
+    seen.push(s);
+    s
+}
+
+/// `\t`, `\"` and `\\` in a `selection-word-chars` value, as Ghostty reads them.
+fn unescape_chars(v: &str) -> String {
+    let mut out = String::new();
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        out.push(match (c, chars.clone().next()) {
+            ('\\', Some('t')) => {
+                chars.next();
+                '\t'
+            }
+            ('\\', Some(e @ ('\\' | '"'))) => {
+                chars.next();
+                e
+            }
+            _ => c,
+        });
+    }
+    out
 }
 
 /// `bell-features`, as in Ghostty: what a bell (BEL) does.
@@ -1345,6 +1386,26 @@ const SETTINGS: &[Setting] = &[
         get: |c| Some(c.behaviour.click_to_move.to_string()),
     },
     Setting {
+        name: "selection-word-chars",
+        value: "CHARS",
+        help: "the characters that end a word when you double-click, as in Ghostty; spaces and tabs always do. \
+               Write \\t for a tab and \\\\ for a backslash. Default: '\"`()[]{}<>|│,;",
+        color: false,
+        set: |c, v| {
+            c.behaviour.word_boundaries = intern(unescape_chars(v));
+            Ok(())
+        },
+        // Escaped again, so a tab or backslash survives being saved.
+        get: |c| {
+            Some(
+                c.behaviour
+                    .word_boundaries
+                    .replace('\\', "\\\\")
+                    .replace('\t', "\\t"),
+            )
+        },
+    },
+    Setting {
         name: "bell-features",
         value: "FEATURES",
         help: "what a bell does, as in Ghostty: a comma list of system (the alert sound), audio (bell-audio-path), \
@@ -2172,6 +2233,29 @@ mod tests {
             c.apply_args(&args(&["--window-save-state=sometimes"]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn selection_word_chars() {
+        let mut c = Config::default();
+        assert_eq!(c.behaviour.word_boundaries, mightty_term::WORD_BOUNDARIES);
+        c.apply_args(&args(&[r#"--selection-word-chars=/:\t\\\"x"#]))
+            .unwrap();
+        assert_eq!(c.behaviour.word_boundaries, "/:\t\\\"x");
+        // Shown escaped, so the value reads back the same.
+        assert_eq!(
+            SETTINGS
+                .iter()
+                .find(|s| s.name == "selection-word-chars")
+                .and_then(|s| (s.get)(&c))
+                .as_deref(),
+            Some(r#"/:\t\\"x"#)
+        );
+        // The same value again is the same string, not another copy.
+        let first = c.behaviour.word_boundaries.as_ptr();
+        c.apply_args(&args(&[r#"--selection-word-chars=/:\t\\\"x"#]))
+            .unwrap();
+        assert_eq!(c.behaviour.word_boundaries.as_ptr(), first);
     }
 
     #[test]
