@@ -9,6 +9,7 @@ mod colors;
 mod graphemes;
 mod graphics;
 mod html;
+mod inline;
 mod links;
 mod queries;
 mod styles;
@@ -27,6 +28,7 @@ use links::Links;
 pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell, Underline};
 pub use colors::{Colors, Rgb, default_palette};
 pub use graphics::{ImageData, PLACEHOLDER, PlaceholderRun, Placement};
+pub use inline::{DecodeLimits, ImageDecoder, set_image_decoder};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
 pub type TextRange = ((u64, usize), (u64, usize));
@@ -322,6 +324,8 @@ pub struct Term {
     wide_emoji: bool,
     /// Kitty graphics may read images from files and shared memory.
     image_files: bool,
+    /// An inline image arriving in parts (OSC 1337 `MultipartFile=`).
+    multipart: Option<inline::Multipart>,
     responses: Vec<u8>,
     /// A query being received in a DCS string: XTGETTCAP (`+`) or
     /// DECRQSS (`$`), and its text so far. `None` for any other DCS.
@@ -433,6 +437,7 @@ impl Term {
             set_colors: Box::new([None; colors::FOREGROUND + 3]),
             wide_emoji: true,
             image_files: cfg!(unix),
+            multipart: None,
             responses: Vec::new(),
             dcs: None,
             bell: false,
@@ -2429,6 +2434,7 @@ impl Term {
                 }
             }
             [b"9", b"4", rest @ ..] => self.set_progress(rest),
+            [b"1337", rest @ ..] => self.inline_image(&rest.join(&b';')),
             // Other OSC 9 ; n ; … sequences, which aren't notifications.
             [b"9", n, ..] if (1..=2).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => {}
             // A notification: OSC 9 ; text.

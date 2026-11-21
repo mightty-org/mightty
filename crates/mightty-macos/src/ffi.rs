@@ -255,6 +255,7 @@ pub const kCTFontTraitBold: u32 = 1 << 1;
 pub const kCTFontTraitColorGlyphs: u32 = 1 << 13;
 pub const kCFNumberSInt64Type: isize = 4;
 pub const kCFNumberFloat64Type: isize = 6;
+pub const kCGImageAlphaPremultipliedLast: u32 = 1;
 pub const kCGImageAlphaPremultipliedFirst: u32 = 2;
 pub const kCGTextFillStroke: i32 = 2;
 pub const kCGBitmapByteOrder32Little: u32 = 2 << 12;
@@ -460,6 +461,34 @@ unsafe extern "C" {
     ) -> CFTypeRef;
     pub fn CGImageDestinationAddImage(dest: CFTypeRef, image: CFTypeRef, properties: CFTypeRef);
     pub fn CGImageDestinationFinalize(dest: CFTypeRef) -> bool;
+}
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGImageSourceCreateWithData(data: CFTypeRef, options: CFTypeRef) -> CFTypeRef;
+    pub fn CGImageSourceGetType(source: CFTypeRef) -> CFStringRef;
+    pub fn CGImageSourceCopyPropertiesAtIndex(
+        source: CFTypeRef,
+        index: usize,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    pub fn CGImageSourceCreateThumbnailAtIndex(
+        source: CFTypeRef,
+        index: usize,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    pub static kCGImagePropertyPixelWidth: CFStringRef;
+    pub static kCGImagePropertyPixelHeight: CFStringRef;
+    pub static kCGImageSourceCreateThumbnailFromImageAlways: CFStringRef;
+    pub static kCGImageSourceCreateThumbnailWithTransform: CFStringRef;
+    pub static kCGImageSourceThumbnailMaxPixelSize: CFStringRef;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGImageGetWidth(image: CFTypeRef) -> usize;
+    pub fn CGImageGetHeight(image: CFTypeRef) -> usize;
+    pub fn CGContextDrawImage(ctx: CGContextRef, rect: CGRect, image: CFTypeRef);
 }
 
 // libdispatch lives in libSystem.

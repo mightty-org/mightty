@@ -14,20 +14,18 @@ Larger features, or ones fewer people need.
 
 **Images**
 
-- Inline images (`OSC 1337 File=`), used by `imgcat` and many command-line tools.
 - Sixel, which tools such as chafa and lsix use.
 
 **Keys**
 
 - Several actions on one key.
-- Key tables: modes of bindings, like tmux's prefix key.
+- Key tables: modes of bindings, such as a prefix key that changes what the next key does.
 - A catch-all binding for keys that are otherwise unbound.
 
 **Windows, tabs and splits**
 
 - Drag a split to rearrange it, or into another tab or window.
 - Tab colours, set by right-clicking a tab.
-- Rename a tab by double-clicking it.
 - When a pane's program exits, show its status in a bar at the bottom of the pane, red if it failed.
 - On quit, step through the windows with programs still running instead of asking once.
 - Middle-click to close a tab, or to paste.
