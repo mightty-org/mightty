@@ -14,6 +14,11 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 /// Large enough for OSC 52 clipboard payloads.
 const MAX_STRING_LEN: usize = 1 << 20;
+/// For an image sent whole in one OSC 1337 `File=`: about 48 MB of image
+/// once its base64 is decoded.
+const MAX_IMAGE_STRING_LEN: usize = 64 << 20;
+/// The start of an OSC string allowed [`MAX_IMAGE_STRING_LEN`].
+const IMAGE_OSC: &[u8] = b"1337;File=";
 
 /// Receives parsed actions. Every method defaults to a no-op.
 #[allow(unused_variables)]
@@ -351,6 +356,11 @@ impl Parser {
     fn enter(&mut self, state: State) {
         self.params.clear();
         self.string.clear();
+        // An image can grow the buffer to tens of megabytes: give that back
+        // rather than keep it for every pane.
+        if self.string.capacity() > MAX_STRING_LEN {
+            self.string.shrink_to(MAX_STRING_LEN);
+        }
         self.too_long = false;
         self.state = state;
     }
@@ -365,7 +375,12 @@ impl Parser {
     }
 
     fn push_string(&mut self, b: u8) {
-        if self.string.len() < MAX_STRING_LEN {
+        let limit = if self.state == State::OscString && self.string.starts_with(IMAGE_OSC) {
+            MAX_IMAGE_STRING_LEN
+        } else {
+            MAX_STRING_LEN
+        };
+        if self.string.len() < limit {
             self.string.push(b);
         } else {
             self.too_long = true;
@@ -841,6 +856,9 @@ mod tests {
         let long = "A".repeat(MAX_STRING_LEN + 1);
         let osc = format!("\x1b]52;c;{long}\x07\x1b]0;t\x07");
         assert_eq!(parse(osc.as_bytes()), ["osc 0|t true"]);
+        // An image may be longer, up to its own limit.
+        let image = format!("\x1b]1337;File=inline=1:{long}\x07");
+        assert_eq!(parse(image.as_bytes()).len(), 1);
         let apc = format!("\x1b_G{long}\x1b\\\x1b_Gok\x1b\\");
         assert_eq!(parse(apc.as_bytes()), ["esc \\", "apc Gok", "esc \\"]);
     }

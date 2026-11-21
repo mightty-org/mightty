@@ -29,10 +29,10 @@ use crate::cell::{Color, Flags};
 use crate::{Term, base64};
 
 /// The largest image side accepted, in pixels.
-const MAX_SIDE: u32 = 10_000;
+pub(crate) const MAX_SIDE: u32 = 10_000;
 /// Image data a screen keeps, as decoded pixels; the oldest images go first
 /// past it (the protocol's suggested quota).
-const MAX_STORED: usize = 320 << 20;
+pub(crate) const MAX_STORED: usize = 320 << 20;
 /// The largest transmission accepted, before decoding.
 const MAX_TRANSMIT: usize = 400 << 20;
 /// The most cells a placement may ask to cover each way.
@@ -59,7 +59,7 @@ pub struct ImageData {
     pub pixels: Vec<u8>,
 }
 
-static SERIAL: AtomicU64 = AtomicU64::new(1);
+pub(crate) static SERIAL: AtomicU64 = AtomicU64::new(1);
 
 struct Image {
     id: u32,
@@ -1056,7 +1056,7 @@ fn png_size(data: &[u8]) -> Option<(u32, u32)> {
 
 /// Whether a PNG of this header fits the quota, both decoded and as the
 /// inflated rows it's decoded from, which 16-bit colour makes twice as big.
-fn png_fits(data: &[u8]) -> bool {
+pub(crate) fn png_fits(data: &[u8]) -> bool {
     let Some((w, h)) = png_size(data) else {
         return false;
     };
@@ -1486,6 +1486,22 @@ impl Term {
         }
     }
 
+    /// Stores `image` and shows it at the cursor at its own size, as a
+    /// placement like any other; the cursor then moves past it unless
+    /// `cursor_stays`. For images sent other ways than this protocol.
+    pub(crate) fn show_image(&mut self, image: ImageData, cursor_stays: bool) {
+        let graphics = self.graphics_mut();
+        let id = graphics.fresh_id();
+        graphics.store(Image::new(id, 0, image));
+        // No id or number, so nothing is answered.
+        let c = Command {
+            action: b'T',
+            cursor_stays,
+            ..Command::default()
+        };
+        self.place(&c, id);
+    }
+
     /// Shows image `id` at the cursor, which then moves past it unless `C=1`;
     /// or relative to another placement (`P=`), and the cursor stays.
     fn place(&mut self, c: &Command, id: u32) {
@@ -1664,7 +1680,7 @@ impl Term {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A 24×10 terminal with 10×20 pixel cells.
@@ -1702,7 +1718,7 @@ mod tests {
     }
 
     /// An 8-bit RGBA PNG of `width × height` opaque green pixels.
-    fn png(width: u32, height: u32) -> Vec<u8> {
+    pub(crate) fn png(width: u32, height: u32) -> Vec<u8> {
         let chunk = |kind: &[u8; 4], body: &[u8]| {
             [&(body.len() as u32).to_be_bytes()[..], kind, body, &[0; 4]].concat()
         };
