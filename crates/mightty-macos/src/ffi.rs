@@ -131,6 +131,16 @@ unsafe extern "C" {
     static _NSConcreteGlobalBlock: [*const c_void; 32];
 }
 
+/// `sandbox_init`'s flag for a profile given by name.
+pub const SANDBOX_NAMED: u64 = 1;
+
+// Sandbox and file descriptors, in libSystem.
+unsafe extern "C" {
+    pub fn sandbox_init(profile: *const c_char, flags: u64, error: *mut *mut c_char) -> i32;
+    pub fn sandbox_free_error(error: *mut c_char);
+    pub fn close(fd: i32) -> i32;
+}
+
 /// An Objective-C block that captures nothing, for APIs taking a callback
 /// block: `Block::new(f)` in a `static`, passed as `&BLOCK`.
 #[repr(C)]

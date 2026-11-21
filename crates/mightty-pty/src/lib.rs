@@ -4,7 +4,7 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{Foreground, Pty};
+pub use unix::{Foreground, Pty, spawning};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WindowSize {

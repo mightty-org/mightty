@@ -43,6 +43,7 @@ dependencies = [
  "mightty-font",
  "mightty-json",
  "mightty-mux",
+ "mightty-pty",
  "mightty-render",
  "mightty-term",
 ]
