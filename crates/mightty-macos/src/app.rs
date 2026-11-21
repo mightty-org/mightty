@@ -746,7 +746,7 @@ pub fn run(config: Config) -> io::Result<()> {
         let restore = config.command.is_none();
 
         // Inline images in formats other than PNG.
-        mightty_term::set_image_decoder(crate::images::decode);
+        mightty_term::set_image_decoder(crate::images::decode_sandboxed);
         BEHAVIOUR.set(config.behaviour);
         mightty_mux::set_notify_after(config.notify_finish.then_some(config.notify_finish_after));
         if let Some(problem) = load_bell_sound(config.bell_audio.as_deref()) {

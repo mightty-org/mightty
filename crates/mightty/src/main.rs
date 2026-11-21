@@ -36,6 +36,11 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("ctl") => ctl::main(&args[1..]).map_err(io::Error::other),
+        // Internal: the sandboxed process the app decodes images in.
+        #[cfg(target_os = "macos")]
+        Some(mightty_macos::IMAGE_HELPER_ARG) => {
+            return mightty_macos::image_helper_main(&args[1..]);
+        }
         #[cfg(target_os = "macos")]
         Some("config") if args.get(1).is_some_and(|a| a == "--export") => {
             println!("{}", mightty_macos::settings_export());

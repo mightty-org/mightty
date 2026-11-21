@@ -67,6 +67,12 @@ const LAST_CLASSIC_SIGNAL: c_int = 31;
 /// child has its copies, so no other pane's child inherits them.
 static SPAWNING: Mutex<()> = Mutex::new(());
 
+/// Hold while starting any other child process with descriptors of its
+/// own, until they're close-on-exec, so no pane's child inherits them.
+pub fn spawning() -> std::sync::MutexGuard<'static, ()> {
+    SPAWNING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     // libproc, in libSystem.
@@ -129,7 +135,7 @@ impl Pty {
     pub fn spawn(mut cmd: Command, size: WindowSize) -> io::Result<Self> {
         let (mut master, mut slave) = (-1, -1);
         let ws = Winsize::from(size);
-        let _spawning = SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let _spawning = spawning();
         // SAFETY: out-pointers are valid; name and termios may be null.
         if unsafe { openpty(&mut master, &mut slave, ptr::null_mut(), ptr::null(), &ws) } != 0 {
             return Err(io::Error::last_os_error());
