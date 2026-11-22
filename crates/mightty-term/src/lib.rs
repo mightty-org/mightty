@@ -140,6 +140,10 @@ pub struct Modes {
     /// Mode 8452: after a Sixel image, the cursor goes past its right
     /// edge rather than staying in the column it started in.
     pub sixel_cursor_right: bool,
+    /// Mode 2033: tell the program whether it may be seen, as `CSI ? 999
+    /// ; 1 n` (it may be) or `2` (it can't), when it's set and on each
+    /// change. See [`Term::set_visible`].
+    pub visibility_reports: bool,
     pub mouse: MouseMode,
     pub mouse_sgr: bool,
     /// DECSCUSR value (0 = default).
@@ -164,6 +168,7 @@ impl Default for Modes {
             in_band_resize: false,
             sixel_display: false,
             sixel_cursor_right: false,
+            visibility_reports: false,
             mouse: MouseMode::Off,
             mouse_sgr: false,
             cursor_shape: 0,
@@ -339,6 +344,8 @@ pub struct Term {
     /// A query being received in a DCS string: XTGETTCAP (`+`) or
     /// DECRQSS (`$`), and its text so far. `None` for any other DCS.
     dcs: Option<(u8, Vec<u8>)>,
+    /// Whether the terminal may be seen, as the embedder last said.
+    visible: bool,
     /// The Sixel image being sent.
     sixel: Option<Box<sixel::Sixel>>,
     bell: bool,
@@ -451,6 +458,7 @@ impl Term {
             multipart: None,
             responses: Vec::new(),
             dcs: None,
+            visible: true,
             sixel: None,
             bell: false,
             bells: 0,
@@ -496,6 +504,23 @@ impl Term {
 
     pub fn image_placements(&self) -> &[Placement] {
         self.graphics[usize::from(self.alt_active)].placements()
+    }
+
+    /// Says whether the terminal may be seen: false only when it surely
+    /// can't (its tab or window hidden, minimized, covered or on another
+    /// Space). The report to send the program, if it asked for them (mode
+    /// 2033) and this changed.
+    pub fn set_visible(&mut self, visible: bool) -> Option<&'static [u8]> {
+        let changed = mem::replace(&mut self.visible, visible) != visible;
+        (changed && self.modes.visibility_reports).then(|| self.visibility_report())
+    }
+
+    /// `CSI ? 999 ; 1 n` if the terminal may be seen, `2` if it can't.
+    fn visibility_report(&self) -> &'static [u8] {
+        match self.visible {
+            true => b"\x1b[?999;1n",
+            false => b"\x1b[?999;2n",
+        }
     }
 
     /// Sets the size of a cell in pixels. Returns whether it changed.
@@ -2228,12 +2253,13 @@ impl Term {
         let links = mem::take(&mut self.links);
         let (lines_scrolled, gc_at) = (self.lines_scrolled, self.gc_at);
         // What the embedder set, which output mustn't undo.
-        let (mark_nonce, theme, cell_pixels, wide_emoji, image_files) = (
+        let (mark_nonce, theme, cell_pixels, wide_emoji, image_files, visible) = (
             self.mark_nonce.take(),
             mem::take(&mut self.theme),
             self.cell_pixels,
             self.wide_emoji,
             self.image_files,
+            self.visible,
         );
         *self = Self::with_scrollback(self.cols, self.rows, self.scrollback_limit);
         (
@@ -2242,7 +2268,15 @@ impl Term {
             self.cell_pixels,
             self.wide_emoji,
             self.image_files,
-        ) = (mark_nonce, theme, cell_pixels, wide_emoji, image_files);
+            self.visible,
+        ) = (
+            mark_nonce,
+            theme,
+            cell_pixels,
+            wide_emoji,
+            image_files,
+            visible,
+        );
         self.modes.grapheme_cluster = wide_emoji;
         // The configured font again, if a program had changed it (OSC 50).
         self.font_request = Some(None);
@@ -2253,6 +2287,21 @@ impl Term {
         self.links = links;
         self.lines_scrolled = lines_scrolled;
         self.gc_at = gc_at;
+    }
+
+    /// DECSTR: modes, margins, character sets, the pen and the saved
+    /// cursor back to how they start, the screen and the cursor's place
+    /// kept.
+    fn soft_reset(&mut self) {
+        self.pen_changed();
+        self.cursor.pen = Style::default();
+        let m = &mut self.modes;
+        (m.show_cursor, m.insert, m.origin, m.autowrap) = (true, false, false, true);
+        (m.app_keypad, m.app_cursor) = (false, false);
+        (self.top, self.bottom) = (0, self.rows - 1);
+        self.charsets = [Charset::Ascii; 2];
+        self.gl = 0;
+        self.saved[self.alt_active as usize] = None;
     }
 
     fn set_ansi_modes(&mut self, params: &Params, on: bool) {
@@ -2293,6 +2342,7 @@ impl Term {
             2026 => m.sync_output,
             2027 => m.grapheme_cluster,
             2031 => m.color_scheme_reports,
+            2033 => m.visibility_reports,
             2048 => m.in_band_resize,
             8452 => m.sixel_cursor_right,
             _ => return None,
@@ -2343,6 +2393,13 @@ impl Term {
                 2026 => self.modes.sync_output = on,
                 2027 => self.modes.grapheme_cluster = on,
                 2031 => self.modes.color_scheme_reports = on,
+                2033 => {
+                    self.modes.visibility_reports = on;
+                    // Each time it's set, even if it already was.
+                    if on {
+                        self.respond(self.visibility_report());
+                    }
+                }
                 2048 => {
                     self.modes.in_band_resize = on;
                     self.report_size();
@@ -2712,8 +2769,24 @@ impl Perform for Term {
             ([], b'r') => self.set_scroll_region(arg(0, 1), arg(1, self.rows as u16)),
             ([], b's') => self.save_cursor(),
             ([], b'u') => self.restore_cursor(),
+            ([b'?'], b'n') => match arg(0, 0) {
+                996 => self.report_color_scheme(),
+                998 => self.respond(self.visibility_report()),
+                // DECXCPR: the cursor's position, and the page, always 1.
+                6 => {
+                    let base = if self.modes.origin { self.top } else { 0 };
+                    let reply = format!(
+                        "\x1b[?{};{};1R",
+                        self.cursor.row.saturating_sub(base) + 1,
+                        self.cursor.col + 1
+                    );
+                    self.respond(reply.as_bytes());
+                }
+                _ => {}
+            },
+            // DECSTR: a soft reset.
+            ([b'!'], b'p') => self.soft_reset(),
             // Kitty keyboard protocol: query, push, pop, set.
-            ([b'?'], b'n') if arg(0, 0) == 996 => self.report_color_scheme(),
             ([b'?'], b'u') => {
                 let reply = format!("\x1b[?{}u", self.key_flags());
                 self.respond(reply.as_bytes());
@@ -2746,7 +2819,8 @@ impl Perform for Term {
                 }
             }
             ([b' '], b'q') => self.modes.cursor_shape = params.arg(0, 0),
-            // XTWINOPS size reports: the text area and a cell in pixels, the grid in cells.
+            // XTWINOPS size reports: the text area and a cell in pixels, the grid
+            // and the screen in cells.
             ([], b't') => {
                 let (cw, ch) = self.cell_pixels;
                 let reply = match arg(0, 0) {
@@ -2757,6 +2831,9 @@ impl Perform for Term {
                     ),
                     16 => format!("\x1b[6;{ch};{cw}t"),
                     18 => format!("\x1b[8;{};{}t", self.rows, self.cols),
+                    // The screen in characters: what's shown is all
+                    // there is to know.
+                    19 => format!("\x1b[9;{};{}t", self.rows, self.cols),
                     _ => return,
                 };
                 self.respond(reply.as_bytes());

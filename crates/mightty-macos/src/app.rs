@@ -161,6 +161,8 @@ struct Surface {
     /// Reused between frames; filled under the terminal lock.
     snapshot: Snapshot,
     pane: Arc<Pane>,
+    /// Whether the pane may be seen, as last told its terminal.
+    visible: Cell<Option<bool>>,
     /// Keep the window open after the pane's process exits (panes opened by
     /// agents, so their output stays readable).
     hold: bool,
@@ -1488,6 +1490,7 @@ impl App {
                 renderer,
                 snapshot: Snapshot::default(),
                 pane,
+                visible: Cell::new(None),
                 hold,
                 scroll_offset: 0,
                 scroll_remainder: 0.0,
@@ -2645,6 +2648,24 @@ impl App {
             call!(window, c"invalidateCursorRectsForView:", w.root);
         }
         self.dim(window);
+        self.update_visibility(window);
+    }
+
+    /// Tells the panes in `window`'s tabs whether they may be seen: not if
+    /// the window is minimized, hidden, covered or on another Space (its
+    /// occlusion state), their tab isn't the one shown, or another pane
+    /// fills the window.
+    fn update_visibility(&mut self, window: Id) {
+        // SAFETY: an NSWindow; documented signature.
+        let state: usize = unsafe { msg!(window, c"occlusionState") };
+        let window_visible = state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0;
+        for w in self.windows.iter().filter(|w| w.window == window) {
+            let leaves = w.tree.leaves();
+            for surface in self.surfaces.iter().filter(|s| leaves.contains(&s.view)) {
+                let shown = !w.zoomed || surface.view == w.active;
+                surface.set_visible(window_visible && w.shown && shown);
+            }
+        }
     }
 
     /// Loads the config files again (⌘⇧,) and applies them to what's open:
@@ -5166,6 +5187,21 @@ impl Surface {
             && (0.0..bounds.size.height).contains(&location.y)
     }
 
+    /// Tells the pane's program whether it may be seen, if it asked.
+    fn set_visible(&self, visible: bool) {
+        // Layout runs on every step of a resize: the terminal is only
+        // locked when this changes.
+        if self.visible.replace(Some(visible)) == Some(visible) {
+            return;
+        }
+        let mut term = self.pane.term.lock().unwrap();
+        // Written with the lock held, so it can't overtake a report the
+        // program's own request made just before.
+        if let Some(report) = term.set_visible(visible) {
+            let _ = self.pane.write(report);
+        }
+    }
+
     fn set_focused(&mut self, focused: bool) {
         self.renderer.focused = focused;
         if focused {
@@ -6026,13 +6062,17 @@ unsafe fn register_delegate_class() -> Id {
     }
     /// A tab coming to the front, a window uncovered: what it last showed may
     /// be gone (hidden tabs drop it), and it may have been resized meanwhile.
+    /// Covered or uncovered, its panes' programs may want to know.
     extern "C" fn did_change_occlusion(_: Id, _: Sel, notification: Id) {
         let window = window_of(notification);
         // SAFETY: an NSWindow; documented signature.
         let state: usize = unsafe { msg!(window, c"occlusionState") };
-        if state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0 {
-            with_app(|app| app.redraw_window(window));
-        }
+        with_app(|app| {
+            if state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0 {
+                app.redraw_window(window);
+            }
+            app.update_visibility(window);
+        });
     }
     /// A banner was clicked: show its pane.
     extern "C" fn notification_clicked(_: Id, _: Sel, _center: Id, response: Id, done: Id) {

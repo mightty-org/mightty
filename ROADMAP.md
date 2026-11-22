@@ -34,8 +34,6 @@ Larger features, or ones fewer people need.
 **Terminal**
 
 - Rich desktop notifications (OSC 99): a title, urgency and buttons, where OSC 9 and OSC 777 carry only text.
-- Focus and visibility reports (mode 2033, `CSI ? 998 n`), so programs can stop redrawing while hidden.
-- Soft reset (DECSTR, `CSI ! p`), and the remaining xterm queries (DECXCPR, `CSI 19 t`).
 - Unicode 18 character widths.
 - Compress idle scrollback in memory.
 

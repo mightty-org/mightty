@@ -429,14 +429,11 @@ impl Mux {
         for pane in self.panes() {
             // A change of theme can answer programs (mode 2031), which
             // otherwise would wait for the pane's next output.
-            let replies = {
-                let mut term = pane.term.lock().unwrap();
-                term.set_options(&options);
-                term.take_responses()
-            };
-            if !replies.is_empty() {
-                let _ = pane.write(&replies);
-            }
+            // Sent with the lock held, so it can't overtake a reply made
+            // just before.
+            let mut term = pane.term.lock().unwrap();
+            term.set_options(&options);
+            let _ = pane.write(&term.take_responses());
         }
     }
 
@@ -673,19 +670,16 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                     // EIO once the child side closes (Linux).
                     Err(_) => break,
                 };
-                let (replies, bells, notifications) = {
+                let (bells, notifications) = {
                     let mut term = pane.term.lock().unwrap();
                     term.feed(&buf[..n]);
                     finished = watch.check(&pane, &mut term);
-                    (
-                        term.take_responses(),
-                        term.bells(),
-                        term.take_notifications(),
-                    )
+                    // Sent with the lock held, so replies reach the program
+                    // in the order they were made, with those other threads
+                    // make (visibility, theme); writing only queues them.
+                    let _ = pane.write(&term.take_responses());
+                    (term.bells(), term.take_notifications())
                 };
-                if !replies.is_empty() {
-                    let _ = pane.write(&replies);
-                }
                 if let Some(reason) = finished
                     && pane.request_attention(reason)
                 {
