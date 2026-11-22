@@ -1319,3 +1319,50 @@ fn copying_as_html() {
     assert_eq!(t.html_range((0, 0), (1, 39), 64 << 10), None);
     assert!(t.html_range((0, 0), (1, 39), 1 << 20).is_some());
 }
+
+#[test]
+fn visibility_reports() {
+    let mut t = Term::new(10, 4);
+    // Asked once, without the mode.
+    t.feed(b"\x1b[?998n");
+    assert_eq!(t.take_responses(), b"\x1b[?999;1n");
+    assert_eq!(t.set_visible(false), None);
+    // Set, it reports at once, and again each time it's set.
+    t.feed(b"\x1b[?2033h\x1b[?2033h\x1b[?2033$p");
+    assert_eq!(
+        t.take_responses(),
+        b"\x1b[?999;2n\x1b[?999;2n\x1b[?2033;1$y"
+    );
+    // Then on each change only.
+    assert_eq!(t.set_visible(false), None);
+    assert_eq!(t.set_visible(true), Some(&b"\x1b[?999;1n"[..]));
+    t.feed(b"\x1b[?2033l");
+    assert_eq!(t.set_visible(false), None);
+    // A full reset keeps what the embedder said.
+    t.feed(b"\x1bc\x1b[?998n");
+    assert_eq!(t.take_responses(), b"\x1b[?999;2n");
+}
+
+#[test]
+fn soft_reset() {
+    let mut t = Term::new(10, 6);
+    t.feed(b"hello\x1b[2;4r\x1b[?6h\x1b[?7l\x1b[?25l\x1b[4h\x1b[?1h\x1b=\x1b(0\x1b[1;31m");
+    t.feed(b"\x1b[2;3H\x1b7\x1b[!p");
+    let m = t.modes();
+    assert!(m.autowrap && m.show_cursor && !m.origin && !m.insert);
+    assert!(!m.app_cursor && !m.app_keypad);
+    // The screen and the cursor stay; the region is the whole screen, and
+    // the pen, the character set and the saved cursor start over.
+    assert_eq!(t.cursor(), (2, 2));
+    assert!(t.screen_text().starts_with("hello"));
+    t.feed(b"q\x1b8\x1b[6n\x1b[99B\x1b[6n");
+    assert_eq!(t.take_responses(), b"\x1b[1;1R\x1b[6;1R");
+    assert!(t.screen_text().contains("q"));
+}
+
+#[test]
+fn more_reports() {
+    let mut t = Term::new(10, 6);
+    t.feed(b"\x1b[3;5H\x1b[?6n\x1b[19t");
+    assert_eq!(t.take_responses(), b"\x1b[?3;5;1R\x1b[9;6;10t");
+}
