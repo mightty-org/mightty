@@ -103,7 +103,7 @@ fn alt_screen_round_trip() {
 #[test]
 fn query_responses() {
     let mut t = term(10, 5, "\x1b[3;4H\x1b[6n\x1b[c");
-    assert_eq!(t.take_responses(), b"\x1b[3;4R\x1b[?62;22c");
+    assert_eq!(t.take_responses(), b"\x1b[3;4R\x1b[?62;4;22c");
     t.feed(b"\x1b]11;?\x07");
     assert_eq!(t.take_responses(), b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07");
 }
