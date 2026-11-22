@@ -12,6 +12,7 @@ mod html;
 mod inline;
 mod links;
 mod queries;
+mod sixel;
 mod styles;
 mod width;
 mod window;
@@ -133,6 +134,12 @@ pub struct Modes {
     /// Mode 2048: tell the program the size, as `CSI 48 ; rows ; cols ;
     /// height ; width t` in its input, when it's set and on each resize.
     pub in_band_resize: bool,
+    /// Mode 80 (DECSDM): Sixel images go at the top left of the screen
+    /// and don't scroll it, the cursor left where it was.
+    pub sixel_display: bool,
+    /// Mode 8452: after a Sixel image, the cursor goes past its right
+    /// edge rather than staying in the column it started in.
+    pub sixel_cursor_right: bool,
     pub mouse: MouseMode,
     pub mouse_sgr: bool,
     /// DECSCUSR value (0 = default).
@@ -155,6 +162,8 @@ impl Default for Modes {
             grapheme_cluster: true,
             color_scheme_reports: false,
             in_band_resize: false,
+            sixel_display: false,
+            sixel_cursor_right: false,
             mouse: MouseMode::Off,
             mouse_sgr: false,
             cursor_shape: 0,
@@ -330,6 +339,8 @@ pub struct Term {
     /// A query being received in a DCS string: XTGETTCAP (`+`) or
     /// DECRQSS (`$`), and its text so far. `None` for any other DCS.
     dcs: Option<(u8, Vec<u8>)>,
+    /// The Sixel image being sent.
+    sixel: Option<Box<sixel::Sixel>>,
     bell: bool,
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
     bells: u64,
@@ -440,6 +451,7 @@ impl Term {
             multipart: None,
             responses: Vec::new(),
             dcs: None,
+            sixel: None,
             bell: false,
             bells: 0,
             notifications: Vec::new(),
@@ -2271,6 +2283,7 @@ impl Term {
             25 => m.show_cursor,
             47 | 1047 | 1049 => self.alt_active,
             66 => m.app_keypad,
+            80 => m.sixel_display,
             1000 => m.mouse == MouseMode::Click,
             1002 => m.mouse == MouseMode::Drag,
             1003 => m.mouse == MouseMode::Motion,
@@ -2281,6 +2294,7 @@ impl Term {
             2027 => m.grapheme_cluster,
             2031 => m.color_scheme_reports,
             2048 => m.in_band_resize,
+            8452 => m.sixel_cursor_right,
             _ => return None,
         })
     }
@@ -2295,6 +2309,8 @@ impl Term {
                 }
                 7 => self.modes.autowrap = on,
                 25 => self.modes.show_cursor = on,
+                80 => self.modes.sixel_display = on,
+                8452 => self.modes.sixel_cursor_right = on,
                 47 | 1047 => self.set_alt_screen(on),
                 1048 => {
                     if on {
@@ -2641,7 +2657,9 @@ impl Perform for Term {
                     }
                 }
             }
-            ([], b'c') if arg(0, 0) == 0 => self.respond(b"\x1b[?62;22c"),
+            // A VT220 with Sixel graphics (4) and colour (22).
+            ([], b'c') if arg(0, 0) == 0 => self.respond(b"\x1b[?62;4;22c"),
+            ([b'?'], b'S') => self.graphics_attributes(arg(0, 0), arg(1, 0)),
             ([b'>'], b'c') => self.respond(b"\x1b[>1;10;0c"),
             // XTVERSION: the terminal's name and version.
             ([b'>'], b'q') if params.arg(0, 0) == 0 => self.respond(
@@ -2797,6 +2815,8 @@ impl Perform for Term {
     }
 
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: u8) {
+        self.sixel = (intermediates.is_empty() && action == b'q' && !ignore)
+            .then(|| Box::new(sixel::Sixel::new(params.arg(1, 0), self.sixel_max_width())));
         self.dcs = match (intermediates, action) {
             ([kind @ (b'+' | b'$')], b'q') if !ignore && params.is_empty() => {
                 Some((*kind, Vec::new()))
@@ -2806,6 +2826,9 @@ impl Perform for Term {
     }
 
     fn put(&mut self, byte: u8) {
+        if let Some(sixel) = &mut self.sixel {
+            sixel.put(byte);
+        }
         if let Some((_, text)) = &mut self.dcs {
             // Longer than any real query: dropped, not answered.
             if text.len() >= MAX_QUERY {
@@ -2817,6 +2840,9 @@ impl Perform for Term {
     }
 
     fn unhook(&mut self) {
+        if let Some(sixel) = self.sixel.take() {
+            self.show_sixel(*sixel);
+        }
         match self.dcs.take() {
             Some((b'+', names)) => {
                 let reply = queries::xtgettcap(&names);

@@ -12,10 +12,6 @@ now: the next items come from Later.
 
 Larger features, or ones fewer people need.
 
-**Images**
-
-- Sixel, which tools such as chafa and lsix use.
-
 **Keys**
 
 - Several actions on one key.
