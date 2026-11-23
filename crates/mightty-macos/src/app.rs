@@ -6412,6 +6412,9 @@ fn perform(view: Id, action: &Action) {
         Action::CloseSurface => send(c"closeSplit:", NIL),
         Action::CloseWindow => send(c"performClose:", NIL),
         Action::MinimizeWindow => send(c"performMiniaturize:", NIL),
+        Action::Hide => send(c"hide:", NIL),
+        Action::HideOthers => send(c"hideOtherApplications:", NIL),
+        Action::ShowAll => send(c"unhideAllApplications:", NIL),
         Action::Quit => send(c"terminate:", NIL),
         Action::Copy => send(c"copy:", view),
         Action::Cut => send(c"cut:", view),
@@ -6619,6 +6622,20 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         );
         separator(app_menu);
         add_action(app_menu, "Secure Keyboard Entry", Action::ToggleSecureInput);
+        separator(app_menu);
+        add_item(app_menu, "Hide Mightty", c"hide:", Action::Hide);
+        add_item(
+            app_menu,
+            "Hide Others",
+            c"hideOtherApplications:",
+            Action::HideOthers,
+        );
+        add_item(
+            app_menu,
+            "Show All",
+            c"unhideAllApplications:",
+            Action::ShowAll,
+        );
         separator(app_menu);
         add_item(app_menu, "Quit Mightty", c"terminate:", Action::Quit);
         let shell_menu = submenu(bar, "Shell");
