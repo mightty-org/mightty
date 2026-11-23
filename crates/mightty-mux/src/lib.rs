@@ -202,6 +202,15 @@ pub fn set_cell_pixels(width: u32, height: u32) {
     );
 }
 
+static LANG: OnceLock<String> = OnceLock::new();
+
+/// Sets the `LANG` shells get when Mightty's own environment names no
+/// locale, as when it's opened from the Finder or the Dock. Without one,
+/// programs fall back to ASCII and show other characters as bytes.
+pub fn set_default_lang(lang: String) {
+    let _ = LANG.set(lang);
+}
+
 fn cell_pixels() -> (u32, u32) {
     let packed = CELL_PIXELS.load(Ordering::Relaxed);
     ((packed >> 32) as u32, packed as u32)
@@ -473,6 +482,13 @@ impl Mux {
         let home = env::var_os("HOME").map(PathBuf::from);
         if let Some(cwd) = opts.cwd.clone().or(home) {
             cmd.current_dir(cwd);
+        }
+        if let Some(lang) = LANG.get()
+            && ["LANG", "LC_ALL", "LC_CTYPE"]
+                .iter()
+                .all(|k| env::var_os(k).is_none_or(|v| v.is_empty()))
+        {
+            cmd.env("LANG", lang);
         }
         cmd.envs(opts.env.iter().map(|(k, v)| (k, v)));
         cmd.env("MIGHTTY_PANE_ID", id.to_string());

@@ -754,15 +754,19 @@ impl App {
         }
     }
 
-    /// The config file in `$VISUAL` or `$EDITOR`, through the login shell
-    /// for its environment; back here after.
+    /// The config file in `$VISUAL` or `$EDITOR`; back here after. This
+    /// runs in a login shell's environment already, as Open Config File's
+    /// editor does, so it's used as it is: starting an interactive shell
+    /// to read it again takes seconds with a large `.zshrc`.
     fn edit_file(&mut self) {
         print!("\x1b[0m\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let status = Command::new(shell)
-            .args(["-lic", config::EDIT_COMMAND])
-            .env("MIGHTTY_EDIT", &self.path)
+        let visual = std::env::var("VISUAL").ok();
+        let editor = std::env::var("EDITOR").ok();
+        let words = config::editor_words(visual.as_deref(), editor.as_deref());
+        let status = Command::new(words[0])
+            .args(&words[1..])
+            .arg(&self.path)
             .status();
         print!("\x1b[?1049h\x1b[?25l");
         let _ = io::stdout().flush();

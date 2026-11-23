@@ -36,6 +36,8 @@ pub struct Tab {
     /// The pane keys went to, in reading order.
     pub focused: usize,
     pub zoomed: bool,
+    /// The colour it was marked with (Tab Colour), by name, if any.
+    pub color: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,6 +128,7 @@ impl Session {
                     ("layout", t.layout.to_json()),
                     ("focused", t.focused.into()),
                     ("zoomed", t.zoomed.into()),
+                    ("color", t.color.clone().into()),
                 ])
             });
             Value::object([
@@ -172,6 +175,7 @@ impl Session {
                         layout,
                         focused: t["focused"].as_u64().unwrap_or(0) as usize,
                         zoomed: t["zoomed"].as_bool() == Some(true),
+                        color: t["color"].as_str().map(str::to_owned),
                     })
                 })
                 .collect();
@@ -254,11 +258,13 @@ mod tests {
                             layout,
                             focused: 2,
                             zoomed: false,
+                            color: Some("Prod".into()),
                         },
                         Tab {
                             layout: *pane("/d"),
                             focused: 0,
                             zoomed: true,
+                            color: None,
                         },
                     ],
                     selected: 1,
@@ -269,6 +275,7 @@ mod tests {
                         layout: *pane("/e"),
                         focused: 0,
                         zoomed: false,
+                        color: None,
                     }],
                     selected: 0,
                 },

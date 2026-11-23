@@ -103,7 +103,9 @@ enum Reopen {
 }
 
 /// What a tab bar shows: titles, the selected tab, and whether it's shown at all.
-type BarShown = (Vec<String>, usize, bool);
+/// What a tab bar shows: the tabs' titles and colours, which is selected,
+/// and whether it's shown at all.
+type BarShown = (Vec<String>, Vec<Option<String>>, usize, bool);
 
 /// Closes remembered for reopening at most.
 const CLOSED_KEPT: usize = 20;
@@ -146,6 +148,8 @@ struct Window {
     active: Id,
     /// The active pane alone fills the window (⌘⇧↩).
     zoomed: bool,
+    /// The colour its tab is marked with (Tab Colour), by name, if any.
+    color: Option<String>,
     /// The divider being dragged.
     dragging: Option<Divider>,
 }
@@ -704,6 +708,24 @@ fn close_surfaces(views: Vec<Id>) {
     }
 }
 
+/// The system's language and region as a UTF-8 locale, like `en_GB.UTF-8`.
+/// A pairing the C library doesn't have (English in Vietnam, say) becomes
+/// `en_US.UTF-8`, which still gives UTF-8.
+fn system_lang() -> String {
+    // SAFETY: NSLocale class methods; the identifier is an NSString.
+    let id = unsafe {
+        let locale: Id = msg!(class(c"NSLocale"), c"currentLocale");
+        string_from_ns(msg!(locale, c"localeIdentifier"))
+    };
+    // "en_US@rg=gbzzzz" and the like carry options after the @.
+    let id = id.split('@').next().unwrap_or_default();
+    let lang = format!("{id}.UTF-8");
+    let known = !id.is_empty()
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && Path::new("/usr/share/locale").join(&lang).is_dir();
+    if known { lang } else { "en_US.UTF-8".into() }
+}
+
 /// Opens the first window and runs the Cocoa event loop. Returns only on setup errors.
 pub fn run(config: Config) -> io::Result<()> {
     // SAFETY: AppKit calls on the main thread with their documented signatures.
@@ -722,6 +744,7 @@ pub fn run(config: Config) -> io::Result<()> {
 
         let host = Arc::new(GuiHost::default());
         let _ = HOST.set(host.clone());
+        mightty_mux::set_default_lang(system_lang());
         let mux = Mux::with_options(host, config.term_options());
         if let Err(e) = mightty_mux::listen(mux.clone()) {
             eprintln!("mightty: control socket unavailable: {e}");
@@ -749,6 +772,7 @@ pub fn run(config: Config) -> io::Result<()> {
 
         // Inline images in formats other than PNG.
         mightty_term::set_image_decoder(crate::images::decode_sandboxed);
+        tabbar::set_custom_colors(&config.tab_colors);
         BEHAVIOUR.set(config.behaviour);
         mightty_mux::set_notify_after(config.notify_finish.then_some(config.notify_finish_after));
         if let Some(problem) = load_bell_sound(config.bell_audio.as_deref()) {
@@ -904,6 +928,7 @@ impl App {
                 tree: Node::Leaf(view),
                 active: view,
                 zoomed: false,
+                color: None,
                 dragging: None,
             });
             call!(window, c"makeFirstResponder:", view);
@@ -1032,7 +1057,7 @@ impl App {
         if self
             .bars
             .iter()
-            .any(|b| b.0 == window && b.2.as_ref().is_some_and(|s| s.2))
+            .any(|b| b.0 == window && b.2.as_ref().is_some_and(|s| s.3))
         {
             bounds.height = (bounds.height - tabbar::HEIGHT).max(0.0);
         }
@@ -1094,11 +1119,15 @@ impl App {
         // In the title bar's place it's always there; else, as AppKit's, from two tabs.
         let show = style == Titlebar::Tabs || tabs.len() > 1;
         let titles: Vec<String> = tabs.iter().map(|&i| self.tab_title(i)).collect();
+        let marks: Vec<Option<String>> = tabs
+            .iter()
+            .map(|&i| self.windows[i].color.clone())
+            .collect();
         let selected = tabs
             .iter()
             .position(|&i| self.windows[i].shown)
             .unwrap_or(0);
-        let now = Some((titles.clone(), selected, show));
+        let now = Some((titles.clone(), marks.clone(), selected, show));
         if !self.bars.iter().any(|b| b.0 == window) {
             let root = self.windows[tabs[0]].root;
             // SAFETY: main thread; `root` is the window's content view.
@@ -1110,20 +1139,20 @@ impl App {
         if entry.2 == now {
             return;
         }
-        let was_shown = entry.2.as_ref().is_some_and(|s| s.2);
+        let was_shown = entry.2.as_ref().is_some_and(|s| s.3);
         // Past the window's buttons, when they're over it.
         let left = if style == Titlebar::Tabs { 78.0 } else { 0.0 };
         // A tab came or went: the others slide to their places.
         let animate = entry
             .2
             .as_ref()
-            .is_some_and(|s| s.0.len() != titles.len() && s.2 && show);
+            .is_some_and(|s| s.0.len() != titles.len() && s.3 && show);
         entry.1.show(
             &titles,
+            &marks,
             selected,
             left,
-            self.config.theme.background,
-            self.config.theme.foreground,
+            (self.config.theme.background, self.config.theme.foreground),
             animate,
         );
         entry.1.set_hidden(!show);
@@ -1307,6 +1336,7 @@ impl App {
             tree: Node::Leaf(view),
             active: view,
             zoomed: false,
+            color: None,
             dragging: None,
         });
         if focus {
@@ -2135,6 +2165,7 @@ impl App {
             layout,
             focused,
             zoomed: w.zoomed,
+            color: w.color.clone(),
         })
     }
 
@@ -2227,6 +2258,7 @@ impl App {
         }
         let focused = order[tab.focused.min(order.len() - 1)];
         w.zoomed = tab.zoomed && order.len() > 1;
+        w.color = tab.color.clone();
         self.focus(focused);
         self.layout(window, false);
         Some(window)
@@ -2697,6 +2729,7 @@ impl App {
             // The cell size may have changed, so the grid too; hidden panes as well.
             surface.resize();
         }
+        tabbar::set_custom_colors(&config.tab_colors);
         BEHAVIOUR.set(config.behaviour);
         mightty_mux::set_notify_after(config.notify_finish.then_some(config.notify_finish_after));
         let sound_problem = load_bell_sound(config.bell_audio.as_deref());
@@ -2879,6 +2912,59 @@ impl App {
         }
     }
 
+    /// New Colour… answered: `name` and `rgb` saved to the config file as
+    /// `tab-color`, read again, and the tab showing pane `id` marked with it.
+    fn add_tab_color(&mut self, id: PaneId, name: &str, rgb: (u8, u8, u8)) {
+        let problem = if name.is_empty() {
+            Some("A colour needs a name.".to_owned())
+        } else if name.contains(['=', '\n', '#']) || name.eq_ignore_ascii_case("none") {
+            Some(format!(
+                "“{name}” can't be a colour's name: it can't be none or hold = or #."
+            ))
+        } else {
+            match self.config.file() {
+                Some(path) => config::write_tab_color(path, name, rgb)
+                    .err()
+                    .map(|e| e.to_string()),
+                None => Some("There's no config file to save it in.".to_owned()),
+            }
+        };
+        if let Some(problem) = problem {
+            return show_problems("The colour wasn't added", &[problem]);
+        }
+        self.reload_config();
+        // The tab may have closed while the sheet was up.
+        let Some(view) = self
+            .surfaces
+            .iter()
+            .find(|s| s.pane.id == id)
+            .map(|s| s.view)
+        else {
+            return;
+        };
+        let Some(w) = self
+            .windows
+            .iter_mut()
+            .find(|w| w.tree.leaves().contains(&view))
+        else {
+            return;
+        };
+        w.color = Some(name.to_owned());
+        let window = w.window;
+        self.update_tab_bar(window);
+    }
+
+    /// Marks the key window's tab with `color`, or takes its colour off.
+    fn set_tab_color(&mut self, color: Option<String>) {
+        let Some((window, _)) = self.key_window() else {
+            return;
+        };
+        if let Some(w) = self.shown_mut(window) {
+            w.color = color;
+            self.update_tab_bar(window);
+        }
+    }
+
     fn toggle_zoom(&mut self) {
         let Some((window, _)) = self.key_window() else {
             return;
@@ -3005,6 +3091,9 @@ enum Asking {
     Paste(PaneId, String),
     /// The field (retained) a new title is typed in.
     Title(PaneId, Id),
+    /// New Colour… for the tab showing a pane: the field its name is
+    /// typed in and the well it's chosen in (both retained).
+    TabColor(PaneId, Id, Id),
     /// A newer version, to install (if it can be, here) or download, or
     /// read about.
     Update(String, bool),
@@ -3065,9 +3154,16 @@ unsafe fn ask(window: Id, alert: Id, asking: Asking) -> bool {
 
 /// Lets go of what `asking` holds, unanswered.
 fn forget(asking: Asking) {
-    if let Asking::Title(_, field) = asking {
-        // SAFETY: main thread; retained for the sheet.
-        unsafe { call!(field, c"release") };
+    // SAFETY: main thread; retained for the sheet.
+    unsafe {
+        match asking {
+            Asking::Title(_, field) => call!(field, c"release"),
+            Asking::TabColor(_, field, well) => {
+                call!(field, c"release");
+                call!(well, c"release");
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3164,6 +3260,33 @@ fn answer(window: Id, asking: Asking, response: isize) {
                     app.update_tab_bar(window);
                     Some(())
                 });
+            }
+        }
+        Asking::TabColor(id, field, well) => {
+            // SAFETY: main thread; both were retained when the sheet opened.
+            let (name, rgb) = unsafe {
+                let name = string_from_ns(msg!(field, c"stringValue"));
+                let space: Id = msg!(class(c"NSColorSpace"), c"sRGBColorSpace");
+                let color: Id = msg!(msg!(well, c"color"), c"colorUsingColorSpace:", space);
+                let channel = |sel: &CStr| -> u8 {
+                    let v: f64 = if color.is_null() {
+                        0.5
+                    } else {
+                        msg!(color, sel)
+                    };
+                    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+                };
+                let rgb = (
+                    channel(c"redComponent"),
+                    channel(c"greenComponent"),
+                    channel(c"blueComponent"),
+                );
+                call!(field, c"release");
+                call!(well, c"release");
+                (name, rgb)
+            };
+            if response == ALERT_FIRST_BUTTON {
+                with_app(|app| app.add_tab_color(id, name.trim(), rgb));
             }
         }
         _ => {}
@@ -3564,6 +3687,72 @@ fn ask_paste(window: Id, id: PaneId, text: &str) {
     }
 }
 
+/// New Colour…: asks for a colour and its name, for the tab showing pane `id`.
+fn ask_tab_color(window: Id, id: PaneId) {
+    let rect = |x: f64, width: f64| CGRect {
+        origin: CGPoint { x, y: 2.0 },
+        size: CGSize {
+            width,
+            height: 24.0,
+        },
+    };
+    // SAFETY: main thread; documented signatures; the field and the well
+    // are retained for the sheet, the box held by the alert.
+    unsafe {
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(alert, c"setMessageText:", nsstring("New Tab Colour"));
+        call!(
+            alert,
+            c"setInformativeText:",
+            nsstring(
+                "Choose a colour and name it. It's saved to your config file as \
+                 tab-color, and offered for every tab."
+            )
+        );
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Add"));
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
+        let well: Id = msg!(
+            msg!(class(c"NSColorWell"), c"alloc"),
+            c"initWithFrame:",
+            rect(0.0, 48.0)
+        );
+        // A popover of swatches (macOS 13), not the colour panel alone.
+        let minimal: Bool = msg!(well, c"respondsToSelector:", sel(c"setColorWellStyle:"));
+        if minimal != NO {
+            call!(well, c"setColorWellStyle:", 1isize);
+        }
+        let start: Id = msg!(class(c"NSColor"), c"systemTealColor");
+        call!(well, c"setColor:", start);
+        let field: Id = msg!(
+            msg!(class(c"NSTextField"), c"alloc"),
+            c"initWithFrame:",
+            rect(56.0, 244.0)
+        );
+        call!(field, c"setPlaceholderString:", nsstring("Name, like Prod"));
+        let row: Id = msg!(
+            msg!(
+                msg!(class(c"NSView"), c"alloc"),
+                c"initWithFrame:",
+                CGRect {
+                    origin: CGPoint::default(),
+                    size: CGSize {
+                        width: 300.0,
+                        height: 28.0,
+                    },
+                }
+            ),
+            c"autorelease"
+        );
+        call!(row, c"addSubview:", well);
+        call!(row, c"addSubview:", field);
+        call!(alert, c"setAccessoryView:", row);
+        if ask(window, alert, Asking::TabColor(id, field, well)) {
+            let sheet: Id = msg!(alert, c"window");
+            call!(sheet, c"makeFirstResponder:", field);
+        }
+    }
+}
+
 /// Asks on a sheet over `window` for a title for pane `id`, starting from
 /// `current`. Empty goes back to the program's title.
 fn ask_title(window: Id, id: PaneId, current: &str) {
@@ -3832,6 +4021,25 @@ fn on_tab_click(bar: Id, click: tabbar::Click) {
             app.bars.iter().find(|b| b.0 == window)?.1.edit(i, &text);
             Some(())
         })),
+        tabbar::Click::Color(i, color) => drop(with_app(|app| {
+            let t = tab(app, i)?;
+            app.windows[t].color = color;
+            app.update_tab_bar(window);
+            Some(())
+        })),
+        tabbar::Click::NewColor(i) => {
+            let pane = with_app(|app| {
+                let active = app.windows[tab(app, i)?].active;
+                app.surfaces
+                    .iter()
+                    .find(|s| s.view == active)
+                    .map(|s| s.pane.id)
+            })
+            .flatten();
+            if let Some(id) = pane {
+                ask_tab_color(window, id);
+            }
+        }
         tabbar::Click::Retitle(i, text) => drop(with_app(|app| {
             let active = app.windows[tab(app, i)?].active;
             if let Some(text) = text {
@@ -6436,6 +6644,7 @@ fn perform(view: Id, action: &Action) {
             let _ = with_app(|app| app.move_divider(direction, points));
         }
         Action::GotoTab(n) => select_tab(Some(n - 1)),
+        Action::SetTabColor(ref color) => drop(with_app(|app| app.set_tab_color(color.clone()))),
         Action::LastTab => select_tab(None),
         Action::PreviousTab if with_app(|app| app.select_own_tab(None, -1)) != Some(true) => {
             send(c"selectPreviousTab:", NIL)
