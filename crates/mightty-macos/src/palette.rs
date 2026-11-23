@@ -59,6 +59,9 @@ fn commands() -> Vec<(&'static str, Action)> {
         ("Settings", OpenSettings),
         ("Open Config File", OpenConfig),
         ("Reload Configuration", ReloadConfig),
+        ("Hide Mightty", Hide),
+        ("Hide Others", HideOthers),
+        ("Show All", ShowAll),
         ("Quit Mightty", Quit),
     ]
 }
