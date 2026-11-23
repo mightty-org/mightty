@@ -107,6 +107,8 @@ pub enum Action {
     ResizeSplit(Direction, f64),
     /// `goto_tab:N`, from 1.
     GotoTab(usize),
+    /// `set_tab_color:NAME`, a built-in colour or one of `tab-color`'s, or `:none`.
+    SetTabColor(Option<String>),
     PreviousTab,
     NextTab,
     LastTab,
@@ -212,6 +214,13 @@ impl Action {
             }
             ("toggle_split_zoom", _) => bare(Self::ToggleSplitZoom),
             ("equalize_splits", _) => bare(Self::EqualizeSplits),
+            ("set_tab_color", Some(name)) if name.trim().eq_ignore_ascii_case("none") => {
+                Ok(Self::SetTabColor(None))
+            }
+            ("set_tab_color", Some(name)) if !name.trim().is_empty() => {
+                Ok(Self::SetTabColor(Some(name.trim().to_owned())))
+            }
+            ("set_tab_color", _) => Err("`set_tab_color`: expects a colour's name, or none".into()),
             ("goto_tab", Some(n)) => n
                 .parse()
                 .ok()
@@ -470,6 +479,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "Shares the window evenly between its panes",
     ),
     ("goto_tab:1", "Tab N, from 1"),
+    (
+        "set_tab_color:red",
+        "Marks the tab with a colour: red, orange, yellow, green, blue, purple, gray or one of \
+         tab-color's; none takes it off",
+    ),
     ("previous_tab", "The tab to the left"),
     ("next_tab", "The tab to the right"),
     ("last_tab", "The last tab"),
@@ -759,6 +773,15 @@ mod tests {
             Ok(Action::ChangeFontSize(1.0))
         );
         assert_eq!(Action::parse("goto_tab:3"), Ok(Action::GotoTab(3)));
+        assert_eq!(
+            Action::parse("set_tab_color:Prod"),
+            Ok(Action::SetTabColor(Some("Prod".into())))
+        );
+        assert_eq!(
+            Action::parse("set_tab_color:none"),
+            Ok(Action::SetTabColor(None))
+        );
+        assert!(Action::parse("set_tab_color").is_err());
         assert_eq!(
             Action::parse(r"text:\x1b[A\n"),
             Ok(Action::Text(b"\x1b[A\n".to_vec()))

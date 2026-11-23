@@ -12,9 +12,72 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::ptr;
 use std::sync::OnceLock;
 
 use crate::ffi::*;
+
+/// Red, green and blue.
+pub type Rgb = (u8, u8, u8);
+
+/// The colours tabs can be marked with besides the user's own
+/// (`tab-color`): macOS's, by name.
+pub const BUILT_IN: [(&str, Rgb); 7] = [
+    ("Red", (255, 59, 48)),
+    ("Orange", (255, 149, 0)),
+    ("Yellow", (255, 204, 0)),
+    ("Green", (52, 199, 89)),
+    ("Blue", (0, 122, 255)),
+    ("Purple", (175, 82, 222)),
+    ("Gray", (142, 142, 147)),
+];
+
+thread_local! {
+    /// The user's own colours (`tab-color`), offered after the built-in ones.
+    static CUSTOM: RefCell<Vec<(String, Rgb)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Sets the user's own colours, for every bar's Tab Colour menu.
+pub fn set_custom_colors(colors: &[(String, Rgb)]) {
+    CUSTOM.with_borrow_mut(|c| *c = colors.to_vec());
+}
+
+/// Every colour a tab can be marked with: the built-in ones, then the user's.
+pub(crate) fn choices() -> Vec<(String, Rgb)> {
+    let built_in = BUILT_IN.iter().map(|&(name, rgb)| (name.to_owned(), rgb));
+    CUSTOM.with_borrow(|custom| built_in.chain(custom.iter().cloned()).collect())
+}
+
+/// The colour called `name`, in any case: the user's own first, so theirs
+/// can replace a built-in one; `grey` is the built-in `Gray`.
+pub fn color_named(name: &str) -> Option<Rgb> {
+    let custom = CUSTOM.with_borrow(|c| {
+        c.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|c| c.1)
+    });
+    let name = if name.eq_ignore_ascii_case("grey") {
+        "Gray"
+    } else {
+        name
+    };
+    custom.or_else(|| {
+        BUILT_IN
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|c| c.1)
+    })
+}
+
+/// How much of a tab's colour shows through its background: more on the
+/// selected tab, so it still stands out from the rest.
+const TINT: f64 = 0.28;
+const TINT_SELECTED: f64 = 0.4;
+
+/// Tags of Tab Colour's items: the tab's index times this, plus the choice.
+const COLOR_TAGS: usize = 1024;
+/// New Colour…'s choice in its tag; colours past it aren't offered.
+const NEW_COLOR: usize = COLOR_TAGS - 1;
 
 /// The strip's height, a title bar's, in points.
 pub const HEIGHT: f64 = 28.0;
@@ -31,6 +94,10 @@ pub enum Click {
     Rename(usize),
     /// Its title edited: the new one (empty: the program's), or `None` if cancelled.
     Retitle(usize, Option<String>),
+    /// Tab Colour chose a colour for it, by name, or none.
+    Color(usize, Option<String>),
+    /// Tab Colour's New Colour…: one to make, and mark it with.
+    NewColor(usize),
     CloseOthers(usize),
     /// Move Tab to New Window.
     NewWindow(usize),
@@ -133,6 +200,8 @@ struct State {
     editing: Option<(usize, Id)>,
     /// The selected tab's colour, the bar's, and the text's.
     colors: [(u8, u8, u8); 3],
+    /// Each tab's colour, by name, if it has one.
+    marks: Vec<Option<String>>,
 }
 
 impl State {
@@ -419,13 +488,19 @@ impl State {
                 let on = i == self.selected;
                 let hovered = self.hovered == Some(i);
                 // Unselected tabs drawn in the bar's shade, so a pinned tab covers them.
-                let background = if on {
-                    cg(selected, 1.0)
+                let shade = if on {
+                    selected
                 } else if hovered {
-                    cg(blend(bar, text, 0.06), 1.0)
+                    blend(bar, text, 0.06)
                 } else {
-                    cg(bar, 1.0)
+                    bar
                 };
+                let mark = self.marks.get(i).and_then(|m| color_named(m.as_deref()?));
+                let shade = match mark {
+                    Some(rgb) => blend(shade, rgb, if on { TINT_SELECTED } else { TINT }),
+                    None => shade,
+                };
+                let background = cg(shade, 1.0);
                 call!(layer(tab.view), c"setBackgroundColor:", background);
                 call!(
                     tab.title,
@@ -743,8 +818,10 @@ fn bar_class() -> Id {
                 c"initWithTitle:",
                 nsstring("")
             );
+            let current = with_state(bar, |s| s.marks.get(index).cloned().flatten()).flatten();
             for (title, action) in [
                 ("Rename Tab…", c"tabMenuRename:"),
+                ("Tab Colour", c""),
                 ("Move Tab to New Window", c"tabMenuNewWindow:"),
                 ("", c""),
                 ("Close Tab", c"tabMenuClose:"),
@@ -753,6 +830,21 @@ fn bar_class() -> Id {
                 if title.is_empty() {
                     let separator: Id = msg!(class(c"NSMenuItem"), c"separatorItem");
                     call!(menu, c"addItem:", separator);
+                    continue;
+                }
+                if action.is_empty() {
+                    let item: Id = msg!(
+                        menu,
+                        c"addItemWithTitle:action:keyEquivalent:",
+                        nsstring(title),
+                        ptr::null::<c_void>(),
+                        nsstring("")
+                    );
+                    call!(
+                        item,
+                        c"setSubmenu:",
+                        color_menu(bar, index, current.as_deref())
+                    );
                     continue;
                 }
                 let item: Id = msg!(
@@ -773,6 +865,93 @@ fn bar_class() -> Id {
                 bar
             );
             call!(menu, c"release");
+        }
+    }
+    /// Tab Colour's choices for tab `index`, `current` ticked: none, the
+    /// built-in colours, the user's own, and New Colour…. Each item's tag
+    /// is the tab's index and the choice's: 0 for none, then from 1 in
+    /// [`choices`] order, `NEW_COLOR` for New Colour….
+    ///
+    /// # Safety
+    /// Main thread.
+    unsafe fn color_menu(bar: Id, index: usize, current: Option<&str>) -> Id {
+        let choices = choices();
+        // SAFETY: main thread; documented signatures; the menu and titles
+        // are autoreleased, held by what they're added to.
+        unsafe {
+            let menu: Id = msg!(
+                msg!(
+                    msg!(class(c"NSMenu"), c"alloc"),
+                    c"initWithTitle:",
+                    nsstring("")
+                ),
+                c"autorelease"
+            );
+            let add = |label: &str, k: usize, ticked: bool| -> Id {
+                let item: Id = msg!(
+                    menu,
+                    c"addItemWithTitle:action:keyEquivalent:",
+                    nsstring(label),
+                    sel(c"tabMenuColor:"),
+                    nsstring("")
+                );
+                call!(item, c"setTarget:", bar);
+                call!(item, c"setTag:", (index * COLOR_TAGS + k) as isize);
+                call!(item, c"setState:", isize::from(ticked));
+                item
+            };
+            let separator = || {
+                let item: Id = msg!(class(c"NSMenuItem"), c"separatorItem");
+                call!(menu, c"addItem:", item);
+            };
+            add("None", 0, current.is_none());
+            for (k, (name, rgb)) in choices.iter().enumerate().take(NEW_COLOR - 1) {
+                if k == BUILT_IN.len() {
+                    separator();
+                }
+                let ticked = current.is_some_and(|c| c.eq_ignore_ascii_case(name));
+                let item = add(name, k + 1, ticked);
+                // A dot of the colour before its name.
+                let title: Id = msg!(
+                    msg!(
+                        msg!(class(c"NSMutableAttributedString"), c"alloc"),
+                        c"initWithString:",
+                        nsstring(&format!("●  {name}"))
+                    ),
+                    c"autorelease"
+                );
+                let dot = NSRange {
+                    location: 0,
+                    length: 1,
+                };
+                call!(
+                    title,
+                    c"addAttribute:value:range:",
+                    nsstring("NSColor"),
+                    ns_color(*rgb, 1.0),
+                    dot
+                );
+                call!(item, c"setAttributedTitle:", title);
+            }
+            separator();
+            add("New Colour…", NEW_COLOR, false);
+            menu
+        }
+    }
+    extern "C" fn menu_color(bar: Id, _: Sel, item: Id) {
+        // SAFETY: a menu item of ours; documented signature.
+        let tag: isize = unsafe { msg!(item, c"tag") };
+        let (index, k) = (tag as usize / COLOR_TAGS, tag as usize % COLOR_TAGS);
+        let click = match k {
+            NEW_COLOR => Click::NewColor(index),
+            0 => Click::Color(index, None),
+            k => match choices().into_iter().nth(k - 1) {
+                Some((name, _)) => Click::Color(index, Some(name)),
+                None => return,
+            },
+        };
+        if let Some(on_click) = ON_CLICK.get() {
+            on_click(bar, click);
         }
     }
     fn menu_click(bar: Id, item: Id, click: fn(usize) -> Click) {
@@ -852,6 +1031,7 @@ fn bar_class() -> Id {
                     (c"tabMenuNewWindow:", event(menu_new_window), c"v@:@"),
                     (c"tabMenuClose:", event(menu_close), c"v@:@"),
                     (c"tabMenuCloseOthers:", event(menu_close_others), c"v@:@"),
+                    (c"tabMenuColor:", event(menu_color), c"v@:@"),
                     (c"controlTextDidEndEditing:", event(edit_ended), c"v@:@"),
                     (
                         c"control:textView:doCommandBySelector:",
@@ -1040,23 +1220,25 @@ impl TabBar {
                     peeking: false,
                     editing: None,
                     colors: [(0, 0, 0); 3],
+                    marks: Vec::new(),
                 })
             });
             Self { bar }
         }
     }
 
-    /// Shows `titles`, `selected` picked out, from `left` points in (past
+    /// Shows `titles`, each tinted with its colour in `marks`, `selected`
+    /// picked out, from `left` points in (past
     /// the window's buttons, when they're over it); in shades of
     /// `background`, text in `foreground`. With `animate`, tabs slide to
     /// their places, as when one comes or goes.
     pub fn show(
         &self,
         titles: &[String],
+        marks: &[Option<String>],
         selected: usize,
         left: f64,
-        background: (u8, u8, u8),
-        foreground: (u8, u8, u8),
+        (background, foreground): ((u8, u8, u8), (u8, u8, u8)),
         animate: bool,
     ) {
         with_state(self.bar, |s| {
@@ -1134,6 +1316,7 @@ impl TabBar {
                     });
                 }
                 s.selected = selected;
+                s.marks = marks.to_vec();
                 s.hovered = s.hovered.filter(|&h| h < titles.len());
 
                 let animator = |view: Id| -> Id { msg!(view, c"animator") };
@@ -1266,5 +1449,22 @@ impl Drop for TabBar {
             call!(self.bar, c"removeFromSuperview");
             call!(self.bar, c"release");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colours_are_found_by_name_with_the_users_first() {
+        set_custom_colors(&[]);
+        assert_eq!(color_named("grey"), Some((142, 142, 147)));
+        assert_eq!(color_named("RED"), Some((255, 59, 48)));
+        assert_eq!(color_named("Prod"), None);
+        set_custom_colors(&[("Grey".into(), (1, 2, 3)), ("red".into(), (4, 5, 6))]);
+        assert_eq!(color_named("grey"), Some((1, 2, 3)));
+        assert_eq!(color_named("Red"), Some((4, 5, 6)));
+        assert_eq!(color_named("gray"), Some((142, 142, 147)));
     }
 }

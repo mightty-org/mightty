@@ -6,6 +6,7 @@
 use crate::bindings::{ALT, Action, Bindings, CMD, CTRL, Key, Named, SHIFT, Trigger};
 use crate::ffi::*;
 use crate::split::Direction;
+use crate::tabbar;
 
 const WIDTH: f64 = 520.0;
 const MARGIN: f64 = 10.0;
@@ -15,8 +16,23 @@ const ROW_HEIGHT: f64 = 24.0;
 /// Rows shown at most; the rest are reached by typing more.
 const ROWS: usize = 10;
 
-/// Every action the palette offers, by title.
-fn commands() -> Vec<(&'static str, Action)> {
+/// Every action the palette offers, by title: those below, then one for
+/// each colour a tab can be marked with.
+fn commands() -> Vec<(String, Action)> {
+    let colors = tabbar::choices().into_iter().map(|(name, _)| {
+        let title = format!("Tab Colour: {name}");
+        (title, Action::SetTabColor(Some(name)))
+    });
+    let none = ("Tab Colour: None".to_owned(), Action::SetTabColor(None));
+    fixed()
+        .into_iter()
+        .map(|(title, action)| (title.to_owned(), action))
+        .chain(std::iter::once(none))
+        .chain(colors)
+        .collect()
+}
+
+fn fixed() -> Vec<(&'static str, Action)> {
     use Action::*;
     vec![
         ("New Window", NewWindow),
@@ -68,7 +84,7 @@ fn commands() -> Vec<(&'static str, Action)> {
 
 /// One line of the palette: its title, the keys bound to it, what it does.
 pub struct Entry {
-    title: &'static str,
+    title: String,
     keys: String,
     pub action: Action,
 }
@@ -281,7 +297,7 @@ impl Palette {
     pub fn update(&mut self) {
         // SAFETY: main thread; documented signature.
         let query = unsafe { string_from_ns(msg!(self.field, c"stringValue")) };
-        let titles: Vec<&str> = self.entries.iter().map(|e| e.title).collect();
+        let titles: Vec<&str> = self.entries.iter().map(|e| e.title.as_str()).collect();
         self.matches = filter(&query, &titles);
         self.selected = 0;
         self.show();
@@ -389,7 +405,7 @@ impl Palette {
                         ROW_HEIGHT - 2.0 * inset
                     )
                 );
-                call!(title, c"setStringValue:", nsstring(entry.title));
+                call!(title, c"setStringValue:", nsstring(&entry.title));
                 call!(keys, c"setStringValue:", nsstring(&entry.keys));
                 call!(title, c"setTextColor:", color(c"labelColor"));
                 call!(keys, c"setTextColor:", color(c"secondaryLabelColor"));

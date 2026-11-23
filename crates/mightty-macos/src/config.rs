@@ -65,6 +65,8 @@ pub struct Config {
     pub quick_size: (Extent, Option<Extent>),
     /// `keybind`: the defaults, changed by each setting in order.
     pub keybinds: Bindings,
+    /// `tab-color`: the user's own colours for tabs, by name, in order.
+    pub tab_colors: Vec<(String, Rgb)>,
     /// How panes look beyond colours and fonts.
     pub look: Look,
     /// `background-blur`: blur radius behind a translucent window, in points; 0 for none.
@@ -324,6 +326,19 @@ pub enum Adjust {
 /// with the path in the environment, so no shell has to unquote it.
 pub const EDIT_COMMAND: &str = r#"exec /bin/sh -c 'exec ${VISUAL:-${EDITOR:-vi}} "$MIGHTTY_EDIT"'"#;
 
+/// The editor to run, as a program and its arguments: `$VISUAL`, else
+/// `$EDITOR`, else vi. Split on spaces, like `code -w`, with no shell in
+/// between, so nothing in either variable or the file's path is
+/// interpreted; a program path with a space in it needs a symlink.
+pub fn editor_words<'a>(visual: Option<&'a str>, editor: Option<&'a str>) -> Vec<&'a str> {
+    [visual, editor]
+        .into_iter()
+        .flatten()
+        .map(|v| v.split_whitespace().collect::<Vec<_>>())
+        .find(|words| !words.is_empty())
+        .unwrap_or_else(|| vec!["vi"])
+}
+
 pub const MIN_FONT_SIZE: f64 = 4.0;
 pub const MAX_FONT_SIZE: f64 = 200.0;
 /// The largest cell side an adjustment can make, in pixels: glyph tiles
@@ -577,6 +592,7 @@ impl Default for Config {
             quick_autohide: true,
             quick_size: (Extent::Percent(40.0), None),
             keybinds: Bindings::default(),
+            tab_colors: Vec::new(),
             look: Look::default(),
             background_blur: 0,
             unfocused_split_opacity: 0.7,
@@ -623,6 +639,7 @@ pub struct SettingView {
 /// Settings given any number of times.
 const MANY: &[&str] = &[
     "keybind",
+    "tab-color",
     "palette",
     "font-feature",
     "font-variation",
@@ -683,6 +700,38 @@ pub fn theme_path(name: &str) -> Option<PathBuf> {
     bundled_themes()
         .map(|dir| dir.join(name))
         .filter(|p| p.is_file())
+}
+
+/// Adds `tab-color = NAME=COLOR` to the config file at `path`, or changes
+/// the line for a colour of that name if there is one.
+pub fn write_tab_color(path: &Path, name: &str, rgb: Rgb) -> std::io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let names = |line: &str| {
+        let line = line.trim_start();
+        !line.starts_with('#')
+            && line.split_once('=').is_some_and(|(key, value)| {
+                key.trim() == "tab-color"
+                    && value
+                        .split_once('=')
+                        .is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+            })
+    };
+    let line = format!("tab-color = {name}={}", hex(rgb));
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    match lines.iter().rposition(|l| names(l)) {
+        Some(at) => lines[at] = line,
+        None => lines.push(line),
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    fs::write(path, out)
 }
 
 /// Sets `name` to `value` in the config file at `path`, its comments and
@@ -1555,6 +1604,36 @@ const SETTINGS: &[Setting] = &[
         get: |_| None,
     },
     Setting {
+        name: "tab-color",
+        value: "NAME=COLOR",
+        help: "a colour of your own to mark tabs with, listed under Tab Colour when \
+               right-clicking a tab: Prod=#d0342c; repeat for more, or leave empty to drop them",
+        color: false,
+        set: |c, v| {
+            if v.trim().is_empty() {
+                c.tab_colors.clear();
+                return Ok(());
+            }
+            let (name, value) = v
+                .split_once('=')
+                .map(|(n, v)| (n.trim(), v.trim()))
+                .filter(|(n, _)| !n.is_empty())
+                .ok_or("expects a name and a colour: Prod=#d0342c")?;
+            let rgb = color(value)?;
+            // A name given again changes that colour, where it was.
+            match c
+                .tab_colors
+                .iter_mut()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            {
+                Some(entry) => entry.1 = rgb,
+                None => c.tab_colors.push((name.to_owned(), rgb)),
+            }
+            Ok(())
+        },
+        get: |_| None,
+    },
+    Setting {
         name: "theme",
         value: "NAME",
         help: "colours from themes/NAME in the config directory, or a path; light:NAME,dark:NAME \
@@ -2398,6 +2477,37 @@ mod tests {
     }
 
     #[test]
+    fn tab_colors() {
+        let mut c = Config::default();
+        c.set("tab-color", "Prod=#d0342c").unwrap();
+        c.set("tab-color", " Staging = e8a33d ").unwrap();
+        c.set("tab-color", "prod=#000001").unwrap();
+        assert_eq!(
+            c.tab_colors,
+            [
+                ("Prod".into(), (0, 0, 1)),
+                ("Staging".into(), (0xe8, 0xa3, 0x3d))
+            ]
+        );
+        assert!(c.set("tab-color", "Prod").is_err());
+        assert!(c.set("tab-color", "=#ffffff").is_err());
+        assert!(c.set("tab-color", "Prod=blue").is_err());
+        c.set("tab-color", "").unwrap();
+        assert!(c.tab_colors.is_empty());
+
+        let dir = scratch("tab-colors");
+        let file = dir.join("config");
+        fs::write(&file, "# mine\ntab-color = Prod=#111111\nfont-size = 14").unwrap();
+        write_tab_color(&file, "prod", (0xd0, 0x34, 0x2c)).unwrap();
+        write_tab_color(&file, "Staging", (0xe8, 0xa3, 0x3d)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "# mine\ntab-color = prod=#d0342c\nfont-size = 14\ntab-color = Staging=#e8a33d\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn behaviour_settings() {
         let mut c = Config::default();
         assert_eq!(
@@ -2698,5 +2808,15 @@ mod tests {
                 && help.contains("[Menlo]")
                 && help.contains("[#1e1e1e]")
         );
+    }
+
+    #[test]
+    fn editor_words_prefer_visual_and_skip_blanks() {
+        assert_eq!(editor_words(Some("code -w"), Some("vim")), ["code", "-w"]);
+        assert_eq!(editor_words(Some("  "), Some("nvim")), ["nvim"]);
+        assert_eq!(editor_words(None, Some("")), ["vi"]);
+        assert_eq!(editor_words(None, None), ["vi"]);
+        // Shell syntax is passed along as words, never run.
+        assert_eq!(editor_words(Some("vi;rm"), None), ["vi;rm"]);
     }
 }
