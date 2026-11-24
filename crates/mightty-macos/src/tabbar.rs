@@ -805,6 +805,22 @@ fn bar_class() -> Id {
             bar
         }
     }
+    /// The middle button closes the tab it's released over, as the tab's
+    /// close button does.
+    extern "C" fn other_mouse_up(bar: Id, _: Sel, event: Id) {
+        // SAFETY: a mouse NSEvent.
+        let button: isize = unsafe { msg!(event, c"buttonNumber") };
+        if button != 2 {
+            return;
+        }
+        let x = x_in(bar, event);
+        let Some(Some((index, _))) = with_state(bar, |s| s.tab_at(x)) else {
+            return;
+        };
+        if let Some(on_click) = ON_CLICK.get() {
+            on_click(bar, Click::Close(index));
+        }
+    }
     /// A right-click on a tab: its menu, as AppKit's tabs have.
     extern "C" fn right_mouse_down(bar: Id, _: Sel, event: Id) {
         let x = x_in(bar, event);
@@ -1027,6 +1043,7 @@ fn bar_class() -> Id {
                     (c"tabsScrolled:", event(scrolled), c"v@:@"),
                     (c"scrollWheel:", event(scroll_wheel), c"v@:@"),
                     (c"rightMouseDown:", event(right_mouse_down), c"v@:@"),
+                    (c"otherMouseUp:", event(other_mouse_up), c"v@:@"),
                     (c"tabMenuRename:", event(menu_rename), c"v@:@"),
                     (c"tabMenuNewWindow:", event(menu_new_window), c"v@:@"),
                     (c"tabMenuClose:", event(menu_close), c"v@:@"),

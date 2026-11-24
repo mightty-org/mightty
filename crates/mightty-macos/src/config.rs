@@ -205,6 +205,9 @@ pub struct Behaviour {
     pub paste_protection: bool,
     /// `mouse-hide-while-typing`.
     pub hide_mouse: bool,
+    /// `mouse-middle-click-paste`: the middle button pastes, where a
+    /// program isn't using the mouse.
+    pub middle_paste: bool,
     /// `cursor-click-to-move`: a click in the command being typed at a
     /// prompt moves the cursor there.
     pub click_to_move: bool,
@@ -234,6 +237,7 @@ impl Default for Behaviour {
             copy_html: true,
             paste_protection: true,
             hide_mouse: false,
+            middle_paste: true,
             click_to_move: true,
             word_boundaries: mightty_term::WORD_BOUNDARIES,
             scrollbar: true,
@@ -1487,6 +1491,18 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(c.behaviour.hide_mouse.to_string()),
+    },
+    Setting {
+        name: "mouse-middle-click-paste",
+        value: "BOOL",
+        help: "clicking the middle mouse button pastes the clipboard, unless the program in the pane is \
+               using the mouse",
+        color: false,
+        set: |c, v| {
+            c.behaviour.middle_paste = v.parse().map_err(|_| "expects true or false")?;
+            Ok(())
+        },
+        get: |c| Some(c.behaviour.middle_paste.to_string()),
     },
     Setting {
         name: "cursor-click-to-move",

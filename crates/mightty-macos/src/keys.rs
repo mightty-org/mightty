@@ -730,6 +730,23 @@ mod tests {
             mouse_report(2, MouseAction::Release, 0, 0, none, false),
             b"\x1b[M#!!"
         );
+        // The middle button: pressed, dragged and released.
+        assert_eq!(
+            mouse_report(1, MouseAction::Press, 2, 3, none, true),
+            b"\x1b[<1;3;4M"
+        );
+        assert_eq!(
+            mouse_report(1, MouseAction::Motion, 2, 3, none, true),
+            b"\x1b[<33;3;4M"
+        );
+        assert_eq!(
+            mouse_report(1, MouseAction::Release, 2, 3, none, true),
+            b"\x1b[<1;3;4m"
+        );
+        assert_eq!(
+            mouse_report(1, MouseAction::Press, 0, 0, none, false),
+            b"\x1b[M!!!"
+        );
     }
 
     #[test]
