@@ -6,6 +6,7 @@
 mod app;
 mod bindings;
 mod config;
+mod exitbar;
 mod ffi;
 mod findbar;
 mod font;

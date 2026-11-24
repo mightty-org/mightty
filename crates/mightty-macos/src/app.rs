@@ -26,6 +26,7 @@ use crate::config::{
     self, AutoUpdate, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE,
     MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState, Titlebar,
 };
+use crate::exitbar::{self, ExitBar};
 use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::hotkey;
@@ -221,6 +222,9 @@ struct Surface {
     /// Keys whose presses the program was told of, so it hears their releases.
     keys_down: Vec<u16>,
     search: Option<Search>,
+    /// How the pane's program ended, along the bottom, once it has and
+    /// the pane stayed open.
+    exit_bar: Option<ExitBar>,
     /// The command palette, while open.
     palette: Option<Palette>,
     scrollbar: Scrollbar,
@@ -672,10 +676,12 @@ extern "C" fn on_redraw(_: *mut c_void) {
 extern "C" fn on_pane_exited(context: *mut c_void) {
     let id = context as PaneId;
     let views = with_app(|app| {
+        let policy = app.config.close_on_exit;
         let mut views = Vec::new();
         for surface in app.surfaces.iter_mut().filter(|w| w.pane.id == id) {
-            if surface.hold {
-                surface.render(); // the title now says it exited
+            let code = surface.pane.exit_status().flatten();
+            if surface.hold || !policy.closes(code) {
+                surface.show_exit_bar();
             } else {
                 views.push(surface.view);
             }
@@ -1544,6 +1550,7 @@ impl App {
                 typed: None,
                 keys_down: Vec::new(),
                 search: None,
+                exit_bar: None,
                 palette: None,
                 scrollbar,
                 title_override: None,
@@ -1586,6 +1593,58 @@ impl App {
         reported
             .or_else(|| surface.start_dir.clone())
             .filter(|dir| dir.is_dir())
+    }
+
+    /// Starts the ended program of pane `view` again, in the same place:
+    /// a shell in the directory it was last in, a command where it first
+    /// ran. The old pane is closed.
+    fn restart_surface(&mut self, view: Id) {
+        let Some(i) = self.surfaces.iter().position(|s| s.view == view) else {
+            return;
+        };
+        let old = self.surfaces[i].pane.clone();
+        if old.is_alive() {
+            return;
+        }
+        let cwd = self.cwd_of(&self.surfaces[i]);
+        // The terminal takes the whole pane again: the new program starts
+        // at that size, not told of a change just after.
+        let s = &mut self.surfaces[i];
+        s.hide_exit_bar();
+        let (cols, rows) = s.grid_size();
+        let pane = match self.mux.respawn(&old, cwd, cols, rows) {
+            Ok(pane) => pane,
+            Err(e) => {
+                self.surfaces[i].show_exit_bar();
+                return show_problems("The program couldn't start again", &[e.to_string()]);
+            }
+        };
+        let s = &mut self.surfaces[i];
+        let window = s.window;
+        s.pane = pane;
+        s.snapshot = Snapshot::default();
+        s.scroll_offset = 0;
+        s.scroll_remainder = 0.0;
+        s.selection = None;
+        s.key_selection = None;
+        s.search = None;
+        s.hint = None;
+        s.typed = None;
+        s.deleting = None;
+        s.dragging = false;
+        s.autoscroll = 0;
+        s.echo_frame = None;
+        s.animation_due = None;
+        s.title.clear();
+        s.visible.set(None);
+        let focused = s.renderer.focused;
+        s.resize();
+        if focused {
+            s.set_focused(true);
+        }
+        self.mux.close(old.id);
+        self.update_visibility(window);
+        self.update_tab_bar(window);
     }
 
     /// A shell in a new window, or with `tab` in a new tab of the key window.
@@ -5075,6 +5134,70 @@ impl Surface {
         }
     }
 
+    /// Shows how the pane's program ended, along the bottom, with the
+    /// terminal moved up to make room; the title says so too.
+    fn show_exit_bar(&mut self) {
+        let Some(code) = self.pane.exit_status() else {
+            return;
+        };
+        if self.exit_bar.is_none() {
+            let (text, failed) = exitbar::message(&self.pane.command, code);
+            // SAFETY: main thread; the container and view are live.
+            unsafe {
+                self.exit_bar = Some(ExitBar::open(
+                    self.container,
+                    self.view,
+                    &text,
+                    failed,
+                    self.dark(),
+                ));
+                // The terminal and its scrollbar make room above it.
+                for view in [self.view, self.scrollbar.bar] {
+                    let mut frame = send_rect(view, c"frame");
+                    frame.origin.y += exitbar::HEIGHT;
+                    frame.size.height = (frame.size.height - exitbar::HEIGHT).max(0.0);
+                    call!(view, c"setFrame:", frame);
+                }
+            }
+            self.resize();
+        }
+        self.render(); // the title says it exited
+    }
+
+    /// Takes the exit bar away, giving its room back.
+    fn hide_exit_bar(&mut self) {
+        if self.exit_bar.take().is_none() {
+            return;
+        }
+        // SAFETY: main thread; the view and scrollbar are live.
+        unsafe {
+            for view in [self.view, self.scrollbar.bar] {
+                let mut frame = send_rect(view, c"frame");
+                frame.origin.y -= exitbar::HEIGHT;
+                frame.size.height += exitbar::HEIGHT;
+                call!(view, c"setFrame:", frame);
+            }
+        }
+    }
+
+    /// The grid the view has room for, in columns and rows.
+    fn grid_size(&self) -> (u16, u16) {
+        // SAFETY: main thread; documented signatures.
+        let (bounds, scale): (CGRect, f64) = unsafe {
+            (
+                send_rect(self.view, c"bounds"),
+                msg!(self.window, c"backingScaleFactor"),
+            )
+        };
+        let (cols, rows) = self
+            .renderer
+            .grid_size(bounds.size.width * scale, bounds.size.height * scale);
+        (
+            cols.clamp(1, u16::MAX as usize) as u16,
+            rows.clamp(1, u16::MAX as usize) as u16,
+        )
+    }
+
     fn close_search(&mut self) {
         if self.search.take().is_none() {
             return;
@@ -5489,6 +5612,17 @@ unsafe fn register_view_class() -> Id {
             let flags: usize = msg!(event, c"modifierFlags");
             let code: u16 = msg!(event, c"keyCode");
             let mods = modifiers(flags);
+            // Nothing reads keys once the program has ended: Return starts
+            // it again, other keys are dropped.
+            if with_surface(view, |w| w.exit_bar.is_some()) == Some(true) {
+                const RETURN: u16 = 36;
+                const KEYPAD_ENTER: u16 = 76;
+                if matches!(code, RETURN | KEYPAD_ENTER) && flags & (CMD | CTRL | ALT | SHIFT) == 0
+                {
+                    with_app(|app| app.restart_surface(view));
+                }
+                return;
+            }
             if with_surface(view, |w| {
                 w.preedit.is_empty() && w.select_by_key(code, mods)
             }) == Some(true)
@@ -5642,6 +5776,22 @@ unsafe fn register_view_class() -> Id {
     }
     extern "C" fn close_search(view: Id, _: Sel, _sender: Id) {
         with_surface(view, Surface::close_search);
+    }
+    /// The exit bar's Restart: once the click is over, as restarting
+    /// takes the bar, and the button with it, away.
+    extern "C" fn restart_pane(view: Id, _: Sel, _sender: Id) {
+        extern "C" fn restart(view: *mut c_void) {
+            with_app(|app| app.restart_surface(view as Id));
+        }
+        run_on_main_with(view as usize, restart);
+    }
+    /// The exit bar's Close: nothing runs there, so nothing to ask. Also
+    /// once the click is over.
+    extern "C" fn close_exited_pane(view: Id, _: Sel, _sender: Id) {
+        extern "C" fn close(view: *mut c_void) {
+            close_surfaces(vec![view as Id]);
+        }
+        run_on_main_with(view as usize, close);
     }
 
     /// The search bar's or the palette's text changed (the view is the
@@ -6095,6 +6245,8 @@ unsafe fn register_view_class() -> Id {
                 (c"searchOlder:", action(find_next), c"v@:@"),
                 (c"searchNewer:", action(find_previous), c"v@:@"),
                 (c"closeSearch:", action(close_search), c"v@:@"),
+                (c"restartPane:", action(restart_pane), c"v@:@"),
+                (c"closeExitedPane:", action(close_exited_pane), c"v@:@"),
                 (c"controlTextDidChange:", action(search_changed), c"v@:@"),
                 (
                     c"control:textView:doCommandBySelector:",
