@@ -143,6 +143,8 @@ pub struct Pane {
     pub term: Arc<Mutex<Term>>,
     /// What was launched, for listings.
     pub command: String,
+    /// How it was started, to start it again (see [`Mux::respawn`]).
+    options: SpawnOptions,
     /// Input for the writer thread (see [`Pane::write`]).
     input: Sender<Vec<u8>>,
     /// Bytes in `input` not yet written.
@@ -528,6 +530,7 @@ impl Mux {
             id,
             term: Arc::new(Mutex::new(term)),
             command: label,
+            options: opts.clone(),
             input,
             queued,
             pty: Mutex::new(pty),
@@ -553,6 +556,27 @@ impl Mux {
             pane.set_visible(self.host.show_pane(id, opts.placement));
         }
         Ok(pane)
+    }
+
+    /// Starts what `pane` ran again, as a new pane `cols` by `rows`. A
+    /// shell starts in `cwd` if given, the directory it was last in; a
+    /// command where it first ran, as it did then. The host shows it in
+    /// place of the old one, which is left for the caller to close.
+    pub fn respawn(
+        &self,
+        pane: &Pane,
+        cwd: Option<PathBuf>,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<Arc<Pane>> {
+        let mut opts = pane.options.clone();
+        if opts.command.is_none() {
+            opts.cwd = cwd.or(opts.cwd);
+        }
+        opts.cols = cols.max(1);
+        opts.rows = rows.max(1);
+        opts.visible = false;
+        self.spawn(opts)
     }
 
     pub fn pane(&self, id: PaneId) -> Option<Arc<Pane>> {
@@ -884,6 +908,41 @@ mod tests {
             start.elapsed()
         );
         mux.close(pane.id);
+    }
+
+    #[test]
+    fn an_ended_program_starts_again_as_a_new_pane() {
+        let mux = Mux::new(Arc::new(Headless));
+        let pane = mux
+            .spawn(SpawnOptions {
+                command: Some("printf \"$PWD\"; exit 3".into()),
+                cwd: Some(fs::canonicalize(std::env::temp_dir()).unwrap()),
+                cols: 40,
+                rows: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        let ended = |pane: &Pane| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while pane.is_alive() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            pane.exit_status()
+        };
+        assert_eq!(ended(&pane), Some(Some(3)));
+        let dir = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let again = mux.respawn(&pane, None, 40, 10).unwrap();
+        assert_ne!(again.id, pane.id);
+        assert_eq!(again.command, pane.command);
+        let term = again.term.lock().unwrap();
+        assert_eq!((term.cols(), term.rows()), (40, 10));
+        drop(term);
+        assert_eq!(ended(&again), Some(Some(3)));
+        // A command runs again where it first ran.
+        let screen = again.term.lock().unwrap().screen_text();
+        assert!(screen.contains(dir.to_str().unwrap()), "{screen}");
+        mux.close(pane.id);
+        mux.close(again.id);
     }
 
     #[test]

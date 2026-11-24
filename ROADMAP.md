@@ -21,7 +21,6 @@ Larger features, or ones fewer people need.
 **Windows, tabs and splits**
 
 - Drag a split to rearrange it, or into another tab or window.
-- When a pane's program exits, show its status in a bar at the bottom of the pane, red if it failed.
 - On quit, step through the windows with programs still running instead of asking once.
 - Middle-click to close a tab, or to paste.
 

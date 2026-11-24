@@ -24,7 +24,7 @@ pub struct Config {
     pub cols: u16,
     pub rows: u16,
     /// Shell command line for the first window instead of a login shell;
-    /// the window closes when it exits.
+    /// the window closes when it exits, as `close-on-exit` says.
     pub command: Option<String>,
     /// Working directory for the first window; defaults to `$HOME`.
     pub cwd: Option<PathBuf>,
@@ -40,6 +40,7 @@ pub struct Config {
     pub save_state: SaveState,
     /// `auto-update`: look for a new version at launch and daily.
     pub auto_update: AutoUpdate,
+    pub close_on_exit: CloseOnExit,
     pub font_backend: FontBackend,
     /// `grapheme-width`: whether VS16 emoji take two cells (unicode) or one (legacy).
     pub wide_emoji: bool,
@@ -579,6 +580,7 @@ impl Default for Config {
             confirm_close: ConfirmClose::Running,
             save_state: SaveState::Default,
             auto_update: AutoUpdate::Check,
+            close_on_exit: CloseOnExit::Success,
             font_backend: FontBackend::CoreText,
             wide_emoji: true,
             colorspace: Colorspace::Srgb,
@@ -625,6 +627,28 @@ pub enum AutoUpdate {
     Download,
 }
 
+/// `close-on-exit`: which panes close when their program ends. Those
+/// that stay show how it ended, and can be started again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseOnExit {
+    Always,
+    /// Those whose program succeeded (exit code 0).
+    Success,
+    Never,
+}
+
+impl CloseOnExit {
+    /// Whether a pane whose program ended with `code` (`None`: killed by a
+    /// signal) closes.
+    pub fn closes(self, code: Option<i32>) -> bool {
+        match self {
+            CloseOnExit::Always => true,
+            CloseOnExit::Success => code == Some(0),
+            CloseOnExit::Never => false,
+        }
+    }
+}
+
 /// A setting as `mightty config` shows it.
 pub struct SettingView {
     pub name: &'static str,
@@ -662,6 +686,7 @@ pub fn choices(name: &str) -> &'static [&'static str] {
         "window-colorspace" => &["srgb", "display-p3"],
         "window-save-state" => &["default", "never", "always"],
         "auto-update" => &["check", "download", "off"],
+        "close-on-exit" => &["success", "always", "never"],
         "notify-on-command-finish" => &["unfocused", "never"],
         "cursor-style" => &["block", "bar", "underline", "block_hollow"],
         "clipboard-read" | "clipboard-write" => &["allow", "ask", "deny"],
@@ -981,6 +1006,33 @@ const SETTINGS: &[Setting] = &[
             Ok(())
         },
         get: |c| Some(format!("{}ms", c.undo_timeout.as_millis())),
+    },
+    Setting {
+        name: "close-on-exit",
+        value: "WHEN",
+        help: "success, always or never: whether a pane closes when its program ends. With success, a \
+               pane whose program failed stays open, with a bar giving its exit code, so you can read \
+               what went wrong, then press Return to start it again or close it; never keeps every pane",
+        color: false,
+        set: |c, v| {
+            c.close_on_exit = match v {
+                "success" => CloseOnExit::Success,
+                "always" => CloseOnExit::Always,
+                "never" => CloseOnExit::Never,
+                _ => return Err("expects success, always or never".into()),
+            };
+            Ok(())
+        },
+        get: |c| {
+            Some(
+                match c.close_on_exit {
+                    CloseOnExit::Success => "success",
+                    CloseOnExit::Always => "always",
+                    CloseOnExit::Never => "never",
+                }
+                .into(),
+            )
+        },
     },
     Setting {
         name: "notify-on-command-finish",
@@ -2818,5 +2870,20 @@ mod tests {
         assert_eq!(editor_words(None, None), ["vi"]);
         // Shell syntax is passed along as words, never run.
         assert_eq!(editor_words(Some("vi;rm"), None), ["vi;rm"]);
+    }
+
+    #[test]
+    fn close_on_exit_keeps_failures_by_default() {
+        let c = Config::default();
+        assert_eq!(c.close_on_exit, CloseOnExit::Success);
+        assert!(c.close_on_exit.closes(Some(0)));
+        assert!(!c.close_on_exit.closes(Some(1)));
+        assert!(!c.close_on_exit.closes(None));
+        assert!(CloseOnExit::Always.closes(None));
+        assert!(!CloseOnExit::Never.closes(Some(0)));
+        let mut c = Config::default();
+        c.set("close-on-exit", "never").unwrap();
+        assert_eq!(c.close_on_exit, CloseOnExit::Never);
+        assert!(c.set("close-on-exit", "sometimes").is_err());
     }
 }
