@@ -22,7 +22,6 @@ Larger features, or ones fewer people need.
 
 - Drag a split to rearrange it, or into another tab or window.
 - On quit, step through the windows with programs still running instead of asking once.
-- Middle-click to close a tab, or to paste.
 
 **macOS**
 

@@ -181,6 +181,9 @@ struct Surface {
     clipboard_refused: Option<Instant>,
     /// The mouse button that started `selection` is still down.
     dragging: bool,
+    /// The middle button's press went to the program: its drags and
+    /// release do too, and it doesn't paste.
+    middle_reported: bool,
     /// A mouse press is giving this pane the keys (set before AppKit sends
     /// the press, taken by it).
     focus_click: bool,
@@ -1534,6 +1537,7 @@ impl App {
                 selection: None,
                 clipboard_refused: None,
                 dragging: false,
+                middle_reported: false,
                 focus_click: false,
                 clicked_to_focus: false,
                 autoscroll: 0,
@@ -1632,6 +1636,7 @@ impl App {
         s.typed = None;
         s.deleting = None;
         s.dragging = false;
+        s.middle_reported = false;
         s.autoscroll = 0;
         s.echo_frame = None;
         s.animation_due = None;
@@ -4934,7 +4939,17 @@ impl Surface {
     }
 
     /// `location` is in the window's coordinates.
-    fn mouse(&mut self, action: MouseAction, location: CGPoint, clicks: isize, mods: Mods) {
+    /// `button` as reports number it: 0 left, 1 middle, 2 right. Only the
+    /// left one selects; the others go to programs using the mouse.
+    /// Whether the program was sent it.
+    fn mouse(
+        &mut self,
+        button: u8,
+        action: MouseAction,
+        location: CGPoint,
+        clicks: isize,
+        mods: Mods,
+    ) -> bool {
         let (col, row) = self.cell_at(self.local(location));
         let (mode, sgr, cols, rows, lines_scrolled) = {
             let term = self.pane.term.lock().unwrap();
@@ -4950,19 +4965,35 @@ impl Surface {
         let (col, row) = (col.min(cols - 1), row.min(rows - 1));
 
         // Programs that asked for the mouse get it; Shift forces a local selection.
-        if mode != MouseMode::Off && !mods.shift {
+        let mut report = mode != MouseMode::Off && !mods.shift;
+        if button == 1 {
+            // The rest of a click goes where its press went, even if the
+            // mode or Shift changed meanwhile: never a lone release, or a
+            // paste after a reported press.
+            if action == MouseAction::Press {
+                self.middle_reported = report;
+            } else if self.middle_reported && !report {
+                return true;
+            } else {
+                report = self.middle_reported;
+            }
+        }
+        if report {
             if action == MouseAction::Motion && mode == MouseMode::Click {
-                return;
+                return true;
             }
             let _ = self
                 .pane
-                .write(&keys::mouse_report(0, action, col, row, mods, sgr));
-            return;
+                .write(&keys::mouse_report(button, action, col, row, mods, sgr));
+            return true;
+        }
+        if button != 0 {
+            return false;
         }
 
         if action == MouseAction::Motion {
             self.drag_selection(location);
-            return;
+            return false;
         }
         let point = (lines_scrolled - self.scroll_offset as u64 + row as u64, col);
         match action {
@@ -5000,10 +5031,11 @@ impl Surface {
                 {
                     self.click_to_move(point);
                 }
-                return;
+                return false;
             }
         }
         self.render();
+        false
     }
 
     /// A click in the command being typed at a prompt: moves the shell's
@@ -6036,12 +6068,43 @@ unsafe fn register_view_class() -> Id {
     }
 
     fn mouse_event(view: Id, event: Id, action: MouseAction) {
+        mouse_button_event(view, event, 0, action);
+    }
+    /// Whether the program was sent it.
+    fn mouse_button_event(view: Id, event: Id, button: u8, action: MouseAction) -> bool {
         // SAFETY: `event` is an NSEvent; documented signatures.
         unsafe {
             let mods = modifiers(msg!(event, c"modifierFlags"));
             let location: CGPoint = msg!(event, c"locationInWindow");
             let clicks: isize = msg!(event, c"clickCount");
-            with_surface(view, |w| w.mouse(action, location, clicks, mods));
+            with_surface(view, |w| w.mouse(button, action, location, clicks, mods)) == Some(true)
+        }
+    }
+    /// AppKit's number for the middle button, which reports call 1.
+    const MIDDLE_BUTTON: isize = 2;
+    fn is_middle(event: Id) -> bool {
+        // SAFETY: `event` is a mouse NSEvent.
+        let button: isize = unsafe { msg!(event, c"buttonNumber") };
+        button == MIDDLE_BUTTON
+    }
+    extern "C" fn other_mouse_down(view: Id, _: Sel, event: Id) {
+        if is_middle(event) {
+            mouse_button_event(view, event, 1, MouseAction::Press);
+        }
+    }
+    extern "C" fn other_mouse_dragged(view: Id, _: Sel, event: Id) {
+        if is_middle(event) {
+            mouse_button_event(view, event, 1, MouseAction::Motion);
+        }
+    }
+    /// The middle button pastes once released, where the program isn't
+    /// using the mouse.
+    extern "C" fn other_mouse_up(view: Id, _: Sel, event: Id) {
+        if is_middle(event)
+            && !mouse_button_event(view, event, 1, MouseAction::Release)
+            && BEHAVIOUR.get().middle_paste
+        {
+            paste(view, sel(c"paste:"), NIL);
         }
     }
     extern "C" fn mouse_down(view: Id, _: Sel, event: Id) {
@@ -6189,6 +6252,9 @@ unsafe fn register_view_class() -> Id {
                 (c"mouseDown:", action(mouse_down), c"v@:@"),
                 (c"mouseDragged:", action(mouse_dragged), c"v@:@"),
                 (c"mouseUp:", action(mouse_up), c"v@:@"),
+                (c"otherMouseDown:", action(other_mouse_down), c"v@:@"),
+                (c"otherMouseDragged:", action(other_mouse_dragged), c"v@:@"),
+                (c"otherMouseUp:", action(other_mouse_up), c"v@:@"),
                 (c"mouseMoved:", action(mouse_moved), c"v@:@"),
                 (c"mouseExited:", action(mouse_exited), c"v@:@"),
                 (c"flagsChanged:", action(flags_changed), c"v@:@"),
