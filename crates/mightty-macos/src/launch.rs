@@ -51,6 +51,15 @@ pub fn for_file(path: &Path, is_dir: bool, is_file: bool) -> Result<Opened, Stri
     let text = path
         .to_str()
         .ok_or_else(|| format!("{}: the path isn't UTF-8", path.display()))?;
+    // The login shell may be fish, where a backslash escapes even inside
+    // single quotes: a name with one could end the quoting. Control
+    // characters have no business in a script's path either.
+    if text.contains('\\') || text.chars().any(char::is_control) {
+        return Err(format!(
+            "{}: its path has a backslash or control character",
+            path.display()
+        ));
+    }
     Ok(Opened {
         // The pane ends with the script and shows how it did; one that
         // isn't executable says so there.
@@ -255,6 +264,9 @@ mod tests {
         );
         let plain = for_file(Path::new("/Users/me/build.command"), false, true).unwrap();
         assert!(for_file(Path::new("/dev/null"), false, false).is_err());
+        // Would end the quoting in fish.
+        assert!(for_file(Path::new("/tmp/x\\';touch pwned;#"), false, true).is_err());
+        assert!(for_file(Path::new("/tmp/a\nb"), false, true).is_err());
         assert_eq!(plain.command.as_deref(), Some("/Users/me/build.command"));
         assert_eq!(script.cwd, Some(PathBuf::from("/Users/me")));
         assert!(script.hold);
