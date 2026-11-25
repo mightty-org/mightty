@@ -60,6 +60,39 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <!-- Run in a new window: .command files and programs (offered as the
+         default by Make Mightty the Default Terminal), and shell scripts,
+         offered in Open With only. -->
+    <dict>
+      <key>CFBundleTypeName</key><string>Shell Script</string>
+      <key>CFBundleTypeRole</key><string>Shell</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.apple.terminal.shell-script</string>
+        <string>public.shell-script</string>
+        <string>public.unix-executable</string>
+      </array>
+    </dict>
+    <!-- A shell in it: a folder dropped on the Dock icon. -->
+    <dict>
+      <key>CFBundleTypeName</key><string>Folder</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>None</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.folder</string></array>
+    </dict>
+  </array>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>SSH Link</string>
+      <key>CFBundleTypeRole</key><string>Shell</string>
+      <key>CFBundleURLSchemes</key><array><string>ssh</string></array>
+    </dict>
+  </array>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>

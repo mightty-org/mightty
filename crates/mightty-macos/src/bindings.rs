@@ -120,6 +120,8 @@ pub enum Action {
     ReloadConfig,
     /// Secure Keyboard Entry, on or off.
     ToggleSecureInput,
+    /// Makes Mightty the app that runs scripts and opens `ssh://` links.
+    MakeDefaultTerminal,
     /// The About panel: version and licence.
     About,
     /// Asks whether a newer version has been released, and says.
@@ -235,6 +237,7 @@ impl Action {
             ("open_settings", _) => bare(Self::OpenSettings),
             ("reload_config", _) => bare(Self::ReloadConfig),
             ("toggle_secure_input", _) => bare(Self::ToggleSecureInput),
+            ("make_default_terminal", _) => bare(Self::MakeDefaultTerminal),
             ("about", _) => bare(Self::About),
             ("check_for_updates", _) => bare(Self::CheckForUpdates),
             ("toggle_quick_terminal", _) => bare(Self::ToggleQuickTerminal),
@@ -519,6 +522,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     (
         "toggle_secure_input",
         "Secure Keyboard Entry: other apps can't read what you type",
+    ),
+    (
+        "make_default_terminal",
+        "Makes Mightty the app that runs .command files and programs opened from Finder, and opens ssh:// links",
     ),
     ("about", "Shows Mightty's version and licence"),
     (

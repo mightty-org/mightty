@@ -25,7 +25,6 @@ Larger features, or ones fewer people need.
 
 **macOS**
 
-- Set Mightty as the default terminal.
 - Shortcuts and AppleScript: open windows, tabs and splits, send text and read output.
 
 **Terminal**

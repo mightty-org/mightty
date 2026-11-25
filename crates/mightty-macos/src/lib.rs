@@ -15,6 +15,7 @@ mod images;
 mod install;
 mod keys;
 mod latency;
+mod launch;
 mod linkhint;
 mod notify;
 mod open;
