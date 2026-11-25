@@ -33,6 +33,7 @@ use crate::hotkey;
 use crate::install;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
+use crate::launch::{self, Opened};
 use crate::linkhint::{self, LinkHint};
 use crate::notify;
 use crate::open;
@@ -418,6 +419,9 @@ const MODIFIER_KEYS: [(u16, usize); 9] = [
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// Until launching finishes: the first window's shell, opened then
+    /// unless a file or link opened a window first (they come before).
+    static FIRST: RefCell<Option<SpawnOptions>> = const { RefCell::new(None) };
 }
 
 /// Runs `f` on the app. Returns `None`, skipping `f`, when called
@@ -809,8 +813,7 @@ pub fn run(config: Config) -> io::Result<()> {
         };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         if !(restore && with_app(App::restore) == Some(true)) {
-            let pane = with_app(|app| app.mux.spawn(first)).expect("the app was just set")?;
-            with_app(|app| app.open_window(pane, false));
+            FIRST.set(Some(first));
         }
         run_on_main_after(SAVE_INTERVAL, on_save_tick);
         // What the config file is now; changes to it are applied as they're saved.
@@ -2863,6 +2866,31 @@ impl App {
         );
     }
 
+    /// What a file or link opened with Mightty runs, in a new window.
+    fn open_opened(&mut self, opened: Opened) {
+        let runs_command = opened.command.is_some();
+        let opts = SpawnOptions {
+            command: opened.command,
+            cwd: opened.cwd.clone(),
+            cols: self.config.cols,
+            rows: self.config.rows,
+            ..Default::default()
+        };
+        match self.mux.spawn(opts) {
+            Ok(pane) => {
+                self.open_window(pane, opened.hold);
+                if let Some(surface) = self.surfaces.last_mut() {
+                    surface.start_dir = opened.cwd;
+                    // A shell's title is its own to set.
+                    if runs_command {
+                        surface.title_override = Some(opened.title);
+                    }
+                }
+            }
+            Err(e) => show_problems("It couldn't be started", &[e.to_string()]),
+        }
+    }
+
     /// The settings, in a window of their own: `mightty config`.
     fn open_settings(&mut self) {
         let Ok(exe) = env::current_exe() else { return };
@@ -3373,6 +3401,21 @@ thread_local! {
     static PROBLEMS: RefCell<Vec<(String, Vec<String>)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// After "Make Mightty the Default Terminal": says how it went.
+fn made_default(failed: Vec<String>) {
+    if failed.is_empty() {
+        PROBLEMS.with_borrow_mut(|p| {
+            p.push((
+                "Mightty is now the default terminal".into(),
+                vec!["It runs .command files and programs opened from Finder, and opens ssh:// links.".into()],
+            ))
+        });
+        show_waiting_problems();
+    } else {
+        show_problems("Mightty couldn't be made the default terminal", &failed);
+    }
+}
+
 /// Tells the user what went wrong, on a sheet over a window; also on stderr.
 fn show_problems(title: &str, problems: &[String]) {
     for problem in problems {
@@ -3676,6 +3719,40 @@ const ALERT_SECOND_BUTTON: isize = 1001;
 /// After the user denies a program the clipboard, its pane's next requests
 /// are refused without asking for this long, so it can't keep asking.
 const CLIPBOARD_REFUSED_FOR: Duration = Duration::from_secs(60);
+
+/// Asks before running `path`, a file downloaded from the Internet, that
+/// was opened with Mightty. Whether to.
+///
+/// # Safety
+/// Main thread, outside `with_app`: it waits for the answer.
+unsafe fn run_downloaded(path: &Path) -> bool {
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    // SAFETY: as the caller promises; documented signatures.
+    unsafe {
+        let alert: Id = msg!(new_object(c"NSAlert"), c"autorelease");
+        call!(
+            alert,
+            c"setMessageText:",
+            nsstring(&format!("Run “{name}”?"))
+        );
+        call!(
+            alert,
+            c"setInformativeText:",
+            nsstring(&format!(
+                "It was downloaded from the Internet, and runs with your access to this Mac. Run it only if you trust where it came from.\n\n{}",
+                path.display()
+            ))
+        );
+        let _: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Cancel"));
+        let run: Id = msg!(alert, c"addButtonWithTitle:", nsstring("Run"));
+        call!(run, c"setHasDestructiveAction:", YES);
+        let response: isize = msg!(alert, c"runModal");
+        response == ALERT_FIRST_BUTTON + 1
+    }
+}
 
 /// An alert asking `title`, explained by `detail`, with Close and Cancel.
 unsafe fn close_alert(title: &str, detail: &str) -> Id {
@@ -6436,6 +6513,56 @@ unsafe fn register_delegate_class() -> Id {
     extern "C" fn terminate_after_last_window(_: Id, _: Sel, _: Id) -> Bool {
         YES
     }
+    /// The first window, unless a file or link opened one.
+    extern "C" fn did_finish_launching(_: Id, _: Sel, _: Id) {
+        let Some(first) = FIRST.take() else { return };
+        let opened = with_app(|app| !app.windows.is_empty()).unwrap_or(false);
+        if opened {
+            return;
+        }
+        match with_app(|app| app.mux.spawn(first)).expect("the app was set") {
+            Ok(pane) => drop(with_app(|app| app.open_window(pane, false))),
+            Err(e) => {
+                eprintln!("mightty: could not start a shell: {e}");
+                // SAFETY: main thread; documented signatures.
+                unsafe {
+                    let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+                    call!(ns_app, c"terminate:", NIL);
+                }
+            }
+        }
+    }
+    /// Files and folders opened with Mightty (Finder, the Dock, `open -a`),
+    /// and `ssh://` links: each in a window of its own.
+    extern "C" fn open_urls(_: Id, _: Sel, _: Id, urls: Id) {
+        let mut problems = Vec::new();
+        // SAFETY: an NSArray of NSURLs; documented signatures.
+        unsafe {
+            let count: usize = msg!(urls, c"count");
+            for i in 0..count {
+                let url: Id = msg!(urls, c"objectAtIndex:", i);
+                let opened = if msg!(url, c"isFileURL") {
+                    let path = PathBuf::from(string_from_ns(msg!(url, c"path")));
+                    let is_dir = path.is_dir();
+                    if !is_dir && launch::downloaded(&path) && !run_downloaded(&path) {
+                        continue;
+                    }
+                    launch::for_file(&path, is_dir, path.is_file())
+                } else {
+                    let text = string_from_ns(msg!(url, c"absoluteString"));
+                    launch::for_ssh(&text)
+                        .ok_or_else(|| format!("{text}: not a link Mightty opens"))
+                };
+                match opened {
+                    Ok(opened) => drop(with_app(|app| app.open_opened(opened))),
+                    Err(problem) => problems.push(problem),
+                }
+            }
+        }
+        if !problems.is_empty() {
+            show_problems("It couldn't be opened", &problems);
+        }
+    }
     /// A window starts moving: if by the mouse, it's watched for a tab bar to join.
     extern "C" fn will_move(_: Id, _: Sel, notification: Id) {
         let window = window_of(notification);
@@ -6694,6 +6821,16 @@ unsafe fn register_delegate_class() -> Id {
                     c"v@:@",
                 ),
                 (
+                    c"applicationDidFinishLaunching:",
+                    action(did_finish_launching),
+                    c"v@:@",
+                ),
+                (
+                    c"application:openURLs:",
+                    open_urls as extern "C" fn(Id, Sel, Id, Id) as *const c_void,
+                    c"v@:@@",
+                ),
+                (
                     c"applicationDidBecomeActive:",
                     action(did_change_active),
                     c"v@:@",
@@ -6880,6 +7017,7 @@ fn perform(view: Id, action: &Action) {
         Action::CheckForUpdates => update::check(true, on_update_checked),
         Action::ReloadConfig => drop(with_app(App::reload_config)),
         Action::ToggleSecureInput => drop(with_app(App::toggle_secure_input)),
+        Action::MakeDefaultTerminal => launch::make_default(made_default),
         Action::ToggleQuickTerminal => drop(with_app(App::toggle_quick_terminal)),
         Action::Undo => drop(with_app(|app| app.reopen_closed(true))),
         Action::MoveTabToNewWindow | Action::CloseOtherTabs => {
@@ -7049,6 +7187,11 @@ unsafe fn install_menu(ns_app: Id, bindings: &Bindings) {
         );
         separator(app_menu);
         add_action(app_menu, "Secure Keyboard Entry", Action::ToggleSecureInput);
+        add_action(
+            app_menu,
+            "Make Mightty the Default Terminal",
+            Action::MakeDefaultTerminal,
+        );
         separator(app_menu);
         add_item(app_menu, "Hide Mightty", c"hide:", Action::Hide);
         add_item(

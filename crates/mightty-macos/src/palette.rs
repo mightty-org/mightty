@@ -70,6 +70,7 @@ fn fixed() -> Vec<(&'static str, Action)> {
         ("Jump to Next Prompt", JumpToPrompt(1)),
         ("Quick Terminal", ToggleQuickTerminal),
         ("Secure Keyboard Entry", ToggleSecureInput),
+        ("Make Mightty the Default Terminal", MakeDefaultTerminal),
         ("About Mightty", About),
         ("Check for Updates", CheckForUpdates),
         ("Settings", OpenSettings),
