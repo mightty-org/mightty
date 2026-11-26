@@ -13,6 +13,7 @@ mod font;
 mod hotkey;
 mod images;
 mod install;
+mod keyhud;
 mod keys;
 mod latency;
 mod launch;
