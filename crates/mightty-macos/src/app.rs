@@ -21,7 +21,7 @@ use mightty_term::{
     ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Rgb, Term, clipboard_reply,
 };
 
-use crate::bindings::{self, Action, Bindings, Trigger};
+use crate::bindings::{self, Action, Bindings, KeyState, Outcome, Trigger};
 use crate::config::{
     self, AutoUpdate, Behaviour, Colorspace, Config, ConfirmClose, Extent, MAX_FONT_SIZE,
     MIN_FONT_SIZE, OptionAsAlt, Permission, QuickPosition, SaveState, Titlebar,
@@ -31,6 +31,7 @@ use crate::ffi::*;
 use crate::findbar::FindBar;
 use crate::hotkey;
 use crate::install;
+use crate::keyhud::KeyHud;
 use crate::keys::{self, Key, KeyAction, Mods, MouseAction};
 use crate::latency;
 use crate::launch::{self, Opened};
@@ -65,6 +66,10 @@ struct App {
     banners: Vec<(PaneId, Instant)>,
     /// The session last written (see `window-save-state`).
     saved: String,
+    /// The key table switched to, and keys waiting for the rest of a binding.
+    keys: KeyState,
+    /// Saying so, on the pane (its view) keys go to.
+    key_hud: Option<(Id, KeyHud)>,
     /// Secure Keyboard Entry: asked for from the menu, and whether it's on.
     secure_input: bool,
     secure_input_on: bool,
@@ -810,6 +815,8 @@ pub fn run(config: Config) -> io::Result<()> {
             quick_return: NIL,
             banners: Vec::new(),
             saved: String::new(),
+            keys: KeyState::default(),
+            key_hud: None,
         };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         if !(restore && with_app(App::restore) == Some(true)) {
@@ -1574,6 +1581,48 @@ impl App {
         }
     }
 
+    /// Shows, on the pane keys go to, the key table switched to and the
+    /// keys waiting for the rest of a binding; nothing when there are none.
+    fn update_key_hud(&mut self) {
+        let (table, pending) = self.keys.status();
+        let mut text: Vec<String> = table.map(str::to_owned).into_iter().collect();
+        if !pending.is_empty() {
+            let keys: Vec<String> = pending.iter().map(|&t| palette::symbols(t)).collect();
+            text.push(format!("{} …", keys.join(" ")));
+        }
+        let text = text.join("  ");
+        let target = self
+            .key_window()
+            .and_then(|(_, view)| self.surfaces.iter().find(|s| s.view == view))
+            .map(|s| (s.view, s.container));
+        self.key_hud = None;
+        if let Some((view, container)) = target.filter(|_| !text.is_empty()) {
+            // SAFETY: main thread; the pane's container, not flipped.
+            self.key_hud = Some((view, unsafe { KeyHud::open(container, &text) }));
+        }
+    }
+
+    /// Moves the badge for key tables to where keys now go, if it shows.
+    fn refresh_key_hud(&mut self) {
+        if self.key_hud.is_some() || self.keys.status() != (None, &[][..]) {
+            self.update_key_hud();
+        }
+    }
+
+    /// `key_table:NAME`.
+    fn enter_key_table(&mut self, name: &str) {
+        if !self.keys.enter(&self.config.keybinds, name) {
+            // SAFETY: plain call.
+            unsafe { NSBeep() };
+        }
+        self.update_key_hud();
+    }
+
+    fn end_key_table(&mut self) {
+        self.keys.end();
+        self.update_key_hud();
+    }
+
     /// The key window and its active pane.
     fn key_window(&self) -> Option<(Id, Id)> {
         // SAFETY: main thread; documented signature.
@@ -2108,6 +2157,8 @@ impl App {
             self.focus(order[if at == 0 { 1 } else { at - 1 }]);
         }
         self.layout(window, false);
+        // The badge may have gone with the pane.
+        self.refresh_key_hud();
         None
     }
 
@@ -2645,6 +2696,14 @@ impl App {
             tabbar::hover(None, NIL, &[]);
         }
         forget_sheets(window);
+        // The badge, if it was on one of its panes.
+        if self
+            .key_hud
+            .as_ref()
+            .is_some_and(|(view, _)| !self.surfaces.iter().any(|s| s.view == *view))
+        {
+            self.key_hud = None;
+        }
         // SAFETY: main thread; the window was made with
         // setReleasedWhenClosed: NO, so this reference is ours. AppKit is
         // still closing it: it goes when the event is done.
@@ -2712,6 +2771,7 @@ impl App {
         } else {
             self.dim(window);
         }
+        self.refresh_key_hud();
     }
 
     /// Places `window`'s panes, resizing those whose size changed (all of
@@ -5700,11 +5760,12 @@ unsafe fn register_view_class() -> Id {
                 return NO;
             }
             match binding_for(event) {
-                Some(action) => {
-                    perform(view, &action);
+                Outcome::Run(actions) => {
+                    perform_all(view, &actions);
                     YES
                 }
-                None => NO,
+                Outcome::Taken | Outcome::Refused => YES,
+                Outcome::Pass => NO,
             }
         }
     }
@@ -5713,10 +5774,12 @@ unsafe fn register_view_class() -> Id {
         // SAFETY: `event` is an NSEvent; documented signatures.
         unsafe {
             // Bound keys without Command can arrive here instead; not while composing.
-            if with_surface(view, |w| w.preedit.is_empty()) == Some(true)
-                && let Some(action) = binding_for(event)
-            {
-                return perform(view, &action);
+            if with_surface(view, |w| w.preedit.is_empty()) == Some(true) {
+                match binding_for(event) {
+                    Outcome::Run(actions) => return perform_all(view, &actions),
+                    Outcome::Taken | Outcome::Refused => return,
+                    Outcome::Pass => {}
+                }
             }
             let flags: usize = msg!(event, c"modifierFlags");
             let code: u16 = msg!(event, c"keyCode");
@@ -6642,6 +6705,8 @@ unsafe fn register_delegate_class() -> Id {
     }
     extern "C" fn did_become_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, true);
+        // The badge for key tables goes where keys now go.
+        with_app(App::refresh_key_hud);
         show_waiting_problems();
     }
     extern "C" fn did_resign_key(_: Id, _: Sel, notification: Id) {
@@ -6652,6 +6717,9 @@ unsafe fn register_delegate_class() -> Id {
             if app.quick == Some(window) && app.config.quick_autohide {
                 app.hide_quick(false);
             }
+            // A binding begun there isn't carried on elsewhere.
+            app.keys.cancel();
+            app.refresh_key_hud();
         });
     }
     extern "C" fn will_close(_: Id, _: Sel, notification: Id) {
@@ -6939,15 +7007,50 @@ fn binding_modifiers(flags: usize) -> u8 {
     .fold(0, |mods, (bit, _)| mods | bit)
 }
 
-/// The action bound to a key press, if any.
-unsafe fn binding_for(event: Id) -> Option<Action> {
+/// What a key press does as bound: through key tables and bindings of
+/// several keys, which it may start, carry on or end.
+unsafe fn binding_for(event: Id) -> Outcome {
     unsafe {
         let flags: usize = msg!(event, c"modifierFlags");
         let code: u16 = msg!(event, c"keyCode");
         // What the key types on the current layout with no modifiers held.
         let unmodified = string_from_ns(msg!(event, c"charactersByApplyingModifiers:", 0usize));
-        let trigger = Trigger::from_event(code, &unmodified, binding_modifiers(flags))?;
-        with_app(|app| app.config.keybinds.find(trigger).cloned()).flatten()
+        let Some(trigger) = Trigger::from_event(code, &unmodified, binding_modifiers(flags)) else {
+            return Outcome::Pass;
+        };
+        let outcome = with_app(|app| {
+            let before = app.keys.status() != (None, &[][..]);
+            let outcome = app.keys.press(&app.config.keybinds, trigger);
+            let after = app.keys.status() != (None, &[][..]);
+            if before || after {
+                app.update_key_hud();
+            }
+            outcome
+        });
+        let outcome = outcome.unwrap_or(Outcome::Pass);
+        if outcome == Outcome::Refused {
+            NSBeep();
+        }
+        outcome
+    }
+}
+
+/// Carries out the actions a key is bound to, in order: the first for the
+/// pane `view`, the rest for the pane keys go to by then (one may have
+/// opened a tab).
+fn perform_all(view: Id, actions: &[Action]) {
+    for (i, action) in actions.iter().enumerate() {
+        let view = if i == 0 {
+            view
+        } else {
+            // None when an action closed the last window: the rest have
+            // nowhere to go.
+            match with_app(|app| app.key_window().map(|k| k.1)).flatten() {
+                Some(view) => view,
+                None => return,
+            }
+        };
+        perform(view, action);
     }
 }
 
@@ -6968,6 +7071,8 @@ fn perform(view: Id, action: &Action) {
         };
     };
     match *action {
+        Action::KeyTable(ref name) => drop(with_app(|app| app.enter_key_table(name))),
+        Action::EndKeyTable => drop(with_app(App::end_key_table)),
         Action::NewWindow => send(c"newWindow:", NIL),
         Action::NewTab => send(c"newTab:", NIL),
         Action::NewSplit(Direction::Down) => send(c"splitDown:", NIL),

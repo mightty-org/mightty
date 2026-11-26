@@ -1666,7 +1666,10 @@ const SETTINGS: &[Setting] = &[
         name: "keybind",
         value: "TRIGGER=ACTION",
         help: "bind keys to an action: cmd+shift+t=new_tab, ctrl+k=unbind, or clear \
-               to drop every binding; repeat for more",
+               to drop every binding; repeat for more. Actions joined by ; are done in turn \
+               (cmd+k=clear_screen; text:\\x0c), keys joined by > pressed in turn \
+               (ctrl+a>c=new_tab), and NAME/ before the keys binds them in a key table \
+               that key_table:NAME switches to (resize/left=resize_split:left,10)",
         color: false,
         set: |c, v| c.keybinds.apply(v),
         get: |_| None,
