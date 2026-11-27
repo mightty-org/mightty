@@ -1669,7 +1669,8 @@ const SETTINGS: &[Setting] = &[
                to drop every binding; repeat for more. Actions joined by ; are done in turn \
                (cmd+k=clear_screen; text:\\x0c), keys joined by > pressed in turn \
                (ctrl+a>c=new_tab), and NAME/ before the keys binds them in a key table \
-               that key_table:NAME switches to (resize/left=resize_split:left,10)",
+               that key_table:NAME switches to (resize/left=resize_split:left,10). catch_all as \
+               the trigger binds every other key but Command keys (resize/catch_all=end_key_table)",
         color: false,
         set: |c, v| c.keybinds.apply(v),
         get: |_| None,

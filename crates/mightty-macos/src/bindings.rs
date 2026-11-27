@@ -9,7 +9,9 @@
 //! A binding can be keys pressed one after another (`ctrl+a>c`), and can
 //! do several actions in order (`clear_screen; text:\x0c`). One written
 //! `NAME/TRIGGER` belongs to the key table NAME, which `key_table:NAME`
-//! switches to: its keys act until Escape.
+//! switches to: its keys act until Escape. `catch_all` as the trigger
+//! binds every key a table (or the main one) leaves unbound, but for
+//! Command keys, which stay the menus'.
 
 use crate::split::Direction;
 
@@ -632,6 +634,8 @@ pub struct Bindings {
     keys: Vec<Binding>,
     /// `global:TRIGGER=ACTION`: keys that act whichever app is active.
     global: Vec<(Trigger, Action)>,
+    /// `catch_all=ACTION`, by key table (`None`: the main one).
+    catch_all: Vec<(Option<String>, Vec<Action>)>,
 }
 
 impl Default for Bindings {
@@ -714,6 +718,7 @@ impl Default for Bindings {
                 })
                 .collect(),
             global: Vec::new(),
+            catch_all: Vec::new(),
         }
     }
 }
@@ -738,6 +743,7 @@ impl Bindings {
         if value == "clear" {
             self.keys.clear();
             self.global.clear();
+            self.catch_all.clear();
             return Ok(());
         }
         // The first `=` that isn't a trigger's key: after `+`, or after
@@ -780,6 +786,20 @@ impl Bindings {
             }
             _ => (None, trigger),
         };
+        if keys.trim() == "catch_all" {
+            self.catch_all.retain(|(t, _)| *t != table);
+            if action != "unbind" {
+                let actions = split_actions(action)
+                    .into_iter()
+                    .map(Action::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.catch_all.push((table, actions));
+            }
+            return Ok(());
+        }
+        if keys.split('>').any(|k| k.trim() == "catch_all") {
+            return Err("`catch_all` is a trigger of its own, not one of a sequence".into());
+        }
         let keys = keys
             .split('>')
             .map(|k| Trigger::parse(k.trim()))
@@ -832,6 +852,19 @@ impl Bindings {
     /// Whether the key table `name` has any bindings.
     pub fn has_table(&self, name: &str) -> bool {
         self.keys.iter().any(|b| b.table.as_deref() == Some(name))
+            || self
+                .catch_all
+                .iter()
+                .any(|(t, _)| t.as_deref() == Some(name))
+    }
+
+    /// What `table` (`None`: the main one) binds the keys it leaves
+    /// unbound to, if anything.
+    pub fn catch_all(&self, table: Option<&str>) -> Option<&[Action]> {
+        self.catch_all
+            .iter()
+            .find(|(t, _)| t.as_deref() == table)
+            .map(|(_, actions)| &actions[..])
     }
 
     /// What `trigger` alone does in the main table.
@@ -907,13 +940,13 @@ impl KeyState {
                     Outcome::Taken
                 } else if waiting {
                     Outcome::Refused
-                } else if self.table.is_some() {
+                } else if trigger.mods & CMD != 0 {
                     // The menus' Command keys still work.
-                    if trigger.mods & CMD != 0 {
-                        Outcome::Pass
-                    } else {
-                        Outcome::Refused
-                    }
+                    Outcome::Pass
+                } else if let Some(actions) = bindings.catch_all(self.table.as_deref()) {
+                    Outcome::Run(actions.to_vec())
+                } else if self.table.is_some() {
+                    Outcome::Refused
                 } else {
                     Outcome::Pass
                 }
@@ -1217,6 +1250,52 @@ mod tests {
         // A bad action leaves the bindings as they were.
         assert!(b.apply("cmd+k=fly").is_err());
         assert_eq!(b.find(trigger("cmd+k")), Some(&[Action::ClearScreen][..]));
+    }
+
+    #[test]
+    fn catch_all() {
+        let mut b = Bindings::default();
+        b.apply("ctrl+a>r=key_table:resize").unwrap();
+        b.apply("resize/left=resize_split:left,10").unwrap();
+        b.apply("resize/catch_all=end_key_table").unwrap();
+        assert!(b.apply("ctrl+a>catch_all=new_tab").is_err());
+        assert!(b.apply("global:catch_all=new_tab").is_err());
+
+        let mut keys = KeyState::default();
+        let press = |keys: &mut KeyState, t: &str| keys.press(&b, trigger(t));
+        // Without one in the main table, keys go on as usual.
+        assert_eq!(press(&mut keys, "x"), Outcome::Pass);
+        keys.enter(&b, "resize");
+        assert_eq!(
+            press(&mut keys, "left"),
+            Outcome::Run(vec![Action::ResizeSplit(Direction::Left, 10.0)])
+        );
+        assert_eq!(
+            press(&mut keys, "x"),
+            Outcome::Run(vec![Action::EndKeyTable])
+        );
+        // Command keys stay the menus', and Escape still leaves.
+        assert_eq!(press(&mut keys, "cmd+w"), Outcome::Pass);
+        assert_eq!(press(&mut keys, "escape"), Outcome::Taken);
+        assert_eq!(keys.status(), (None, &[][..]));
+        // After the start of a binding, a key that doesn't finish it
+        // is still refused.
+        assert_eq!(press(&mut keys, "ctrl+a"), Outcome::Taken);
+        assert_eq!(press(&mut keys, "z"), Outcome::Refused);
+
+        // A table bound only by its catch-all is a table.
+        b.apply("swallow/catch_all=ignore").unwrap();
+        assert!(b.has_table("swallow"));
+        b.apply("catch_all=ignore").unwrap();
+        assert_eq!(b.catch_all(None), Some(&[Action::Ignore][..]));
+        assert_eq!(
+            KeyState::default().press(&b, trigger("x")),
+            Outcome::Run(vec![Action::Ignore])
+        );
+        b.apply("catch_all=unbind").unwrap();
+        assert_eq!(b.catch_all(None), None);
+        b.apply("clear").unwrap();
+        assert!(!b.has_table("swallow"));
     }
 
     #[test]
