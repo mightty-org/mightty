@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use mightty_json::Value;
 use mightty_pty::{Pty, WindowSize};
-use mightty_term::{CommandEvent, Term, TermOptions};
+use mightty_term::{CommandEvent, NotificationRequest, Term, TermOptions};
 
 pub use events::{EVENTS, Events};
 pub use keys::key_bytes;
@@ -47,6 +47,9 @@ pub trait Host: Send + Sync {
     fn pane_closed(&self, _id: PaneId) {}
     /// Its status or attention changed (see [`Pane::status`], [`Pane::attention`]).
     fn pane_status(&self, _id: PaneId) {}
+    /// Its program asked to show or close desktop notifications (see
+    /// [`Pane::take_notification_requests`]).
+    fn pane_notifications(&self, _id: PaneId) {}
     /// Shows the pane, where `placement` says. Returns false if the host has no UI.
     fn show_pane(&self, _id: PaneId, _placement: Placement) -> bool {
         false
@@ -166,6 +169,8 @@ pub struct Pane {
     /// The user is looking at it: it can't need them.
     focused: AtomicBool,
     events: Arc<Events>,
+    /// OSC 99 requests not yet taken by the host.
+    notification_requests: Mutex<Vec<NotificationRequest>>,
 }
 
 /// A cell's size in pixels in the pane last resized, width in the high
@@ -286,8 +291,19 @@ impl Pane {
         self.exit_status().is_none()
     }
 
+    /// Whether it's the pane being typed into.
+    pub fn is_focused(&self) -> bool {
+        self.focused.load(Ordering::Relaxed)
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible.load(Ordering::Relaxed)
+    }
+
+    /// Desktop notifications its program asked to show or close, and
+    /// questions about them, oldest first.
+    pub fn take_notification_requests(&self) -> Vec<NotificationRequest> {
+        std::mem::take(&mut *self.notification_requests.lock().unwrap())
     }
 
     pub fn set_visible(&self, visible: bool) {
@@ -543,6 +559,7 @@ impl Mux {
             awaited: AtomicBool::new(false),
             focused: AtomicBool::new(false),
             events: self.events.clone(),
+            notification_requests: Mutex::new(Vec::new()),
         });
         self.panes.lock().unwrap().insert(id, pane.clone());
         self.events.emit("pane.opened", || {
@@ -691,6 +708,9 @@ fn account_shell() -> Option<String> {
     }
 }
 
+/// Notification requests kept for the host per pane.
+const MAX_NOTIFICATION_REQUESTS: usize = 32;
+
 /// Reads and parses on one thread. macOS hands out at most 1 KiB per PTY
 /// read, and the writer refills the kernel buffer while we parse, so a
 /// separate parser thread only adds hand-off cost (measured with
@@ -710,7 +730,7 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                     // EIO once the child side closes (Linux).
                     Err(_) => break,
                 };
-                let (bells, notifications) = {
+                let (bells, notifications, requests) = {
                     let mut term = pane.term.lock().unwrap();
                     term.feed(&buf[..n]);
                     finished = watch.check(&pane, &mut term);
@@ -718,8 +738,21 @@ fn spawn_reader(pane: Arc<Pane>, mut reader: File, host: Arc<dyn Host>) {
                     // in the order they were made, with those other threads
                     // make (visibility, theme); writing only queues them.
                     let _ = pane.write(&term.take_responses());
-                    (term.bells(), term.take_notifications())
+                    (
+                        term.bells(),
+                        term.take_notifications(),
+                        term.take_notification_requests(),
+                    )
                 };
+                if !requests.is_empty() {
+                    let mut queue = pane.notification_requests.lock().unwrap();
+                    queue.extend(requests);
+                    // Unless the host stopped taking them: the newest.
+                    let over = queue.len().saturating_sub(MAX_NOTIFICATION_REQUESTS);
+                    queue.drain(..over);
+                    drop(queue);
+                    host.pane_notifications(pane.id);
+                }
                 if let Some(reason) = finished
                     && pane.request_attention(reason)
                 {

@@ -11,6 +11,7 @@ mod graphics;
 mod html;
 mod inline;
 mod links;
+mod notify;
 mod queries;
 mod sixel;
 mod styles;
@@ -30,6 +31,9 @@ pub use cell::{Cell, Color, Flags, Row, Style, StyleId, StyledCell, Underline};
 pub use colors::{Colors, Rgb, default_palette};
 pub use graphics::{ImageData, PLACEHOLDER, PlaceholderRun, Placement};
 pub use inline::{DecodeLimits, ImageDecoder, set_image_decoder};
+pub use notify::{
+    NotificationRequest, Occasion, Rich, Urgency, activated_reply, alive_reply, closed_reply,
+};
 pub use styles::Styles;
 /// Inclusive `(line, column)` start and end of some text, start first.
 pub type TextRange = ((u64, usize), (u64, usize));
@@ -205,11 +209,13 @@ pub fn clipboard_reply(text: &str, bell_terminated: bool) -> Vec<u8> {
 /// Clipboard requests kept until taken; older ones are dropped.
 const MAX_CLIPBOARD_REQUESTS: usize = 8;
 
-/// A desktop notification a program asked for (OSC 9, OSC 777).
+/// A desktop notification a program asked for (OSC 9, OSC 777, OSC 99).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notification {
     pub title: String,
     pub body: String,
+    /// The rest of an OSC 99 one: buttons, urgency, what to report.
+    pub rich: Option<Rich>,
 }
 
 /// Kitty keyboard protocol enhancement flags.
@@ -238,6 +244,15 @@ pub enum CommandEvent {
 const MAX_NOTIFICATIONS: usize = 16;
 /// Longest title and body kept, in characters.
 const MAX_NOTIFICATION_TEXT: usize = 512;
+
+/// `text` without control characters or bidi overrides, which could
+/// disguise it, and at most `max` characters.
+fn safe_text(text: &str, max: usize) -> String {
+    text.chars()
+        .filter(|&c| !c.is_control() && !is_bidi_control(c))
+        .take(max)
+        .collect()
+}
 
 /// One command run by the shell: prompt, command line, output, exit code.
 /// Line numbers are absolute (see [`Term::line`]).
@@ -352,6 +367,9 @@ pub struct Term {
     /// Bells rung so far, for watchers that mustn't take `bell` from the UI.
     bells: u64,
     notifications: Vec<Notification>,
+    /// OSC 99 notifications to show, close or list, until taken.
+    notification_requests: Vec<NotificationRequest>,
+    notification_chunks: notify::Chunks,
     command_events: Vec<CommandEvent>,
     clipboard: Vec<ClipboardRequest>,
     styles: Styles,
@@ -463,6 +481,8 @@ impl Term {
             bell: false,
             bells: 0,
             notifications: Vec::new(),
+            notification_requests: Vec::new(),
+            notification_chunks: notify::Chunks::default(),
             command_events: Vec::new(),
             clipboard: Vec::new(),
             styles: Styles::new(),
@@ -609,20 +629,42 @@ impl Term {
     }
 
     fn notify(&mut self, title: &[u8], body: &[u8]) {
-        let text = |b: &[u8]| {
-            String::from_utf8_lossy(b)
-                .chars()
-                .filter(|&c| !c.is_control() && !is_bidi_control(c))
-                .take(MAX_NOTIFICATION_TEXT)
-                .collect()
-        };
+        let text = |b: &[u8]| safe_text(&String::from_utf8_lossy(b), MAX_NOTIFICATION_TEXT);
+        self.push_notification(Notification {
+            title: text(title),
+            body: text(body),
+            rich: None,
+        });
+    }
+
+    fn push_notification(&mut self, notification: Notification) {
         if self.notifications.len() == MAX_NOTIFICATIONS {
             self.notifications.remove(0);
         }
-        self.notifications.push(Notification {
-            title: text(title),
-            body: text(body),
-        });
+        self.notifications.push(notification);
+    }
+
+    /// OSC 99 ; meta ; payload.
+    fn rich_notification(&mut self, meta: &[u8], payload: &[u8]) {
+        let request = match self.notification_chunks.parse(meta, payload) {
+            notify::Parsed::Nothing => return,
+            notify::Parsed::Reply(reply) => return self.respond(&reply),
+            notify::Parsed::Request(request) => request,
+        };
+        if let NotificationRequest::Show(notification) = &request {
+            // It marks the pane as needing the user too.
+            self.push_notification(notification.clone());
+        }
+        if self.notification_requests.len() == MAX_NOTIFICATIONS {
+            self.notification_requests.remove(0);
+        }
+        self.notification_requests.push(request);
+    }
+
+    /// OSC 99 notifications to show or close, and questions about them,
+    /// since the last call, oldest first.
+    pub fn take_notification_requests(&mut self) -> Vec<NotificationRequest> {
+        mem::take(&mut self.notification_requests)
     }
 
     pub fn cols(&self) -> usize {
@@ -2507,6 +2549,7 @@ impl Term {
                 }
             }
             [b"9", b"4", rest @ ..] => self.set_progress(rest),
+            [b"99", meta, payload @ ..] => self.rich_notification(meta, &payload.join(&b';')),
             [b"1337", rest @ ..] => self.inline_image(&rest.join(&b';')),
             // Other OSC 9 ; n ; … sequences, which aren't notifications.
             [b"9", n, ..] if (1..=2).contains(&n.len()) && n.iter().all(u8::is_ascii_digit) => {}

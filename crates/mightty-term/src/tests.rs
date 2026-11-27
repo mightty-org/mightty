@@ -1366,3 +1366,87 @@ fn more_reports() {
     t.feed(b"\x1b[3;5H\x1b[?6n\x1b[19t");
     assert_eq!(t.take_responses(), b"\x1b[?3;5;1R\x1b[9;6;10t");
 }
+
+#[test]
+fn rich_notifications() {
+    use crate::{NotificationRequest, Occasion, Urgency};
+    let shown = |t: &mut Term| -> Vec<Notification> {
+        t.take_notification_requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                NotificationRequest::Show(n) => Some(n),
+                _ => None,
+            })
+            .collect()
+    };
+    // The plainest: a title.
+    let mut t = term(20, 3, "\x1b]99;;Hello\x1b\\");
+    let n = shown(&mut t);
+    assert_eq!((n[0].title.as_str(), n[0].body.as_str()), ("Hello", ""));
+    let rich = n[0].rich.clone().unwrap();
+    assert_eq!(
+        (
+            rich.id,
+            rich.focus,
+            rich.report,
+            rich.urgency,
+            rich.occasion
+        ),
+        (None, true, false, Urgency::Normal, Occasion::Always)
+    );
+    // It marks the pane as needing the user, as OSC 9 does.
+    assert_eq!(t.take_notifications().len(), 1);
+
+    // In chunks: a title, then a base64 body in two padded pieces, then
+    // buttons; settings from any chunk.
+    t.feed(b"\x1b]99;i=build-1:d=0:u=2;Build; done\x1b\\");
+    assert!(shown(&mut t).is_empty());
+    t.feed(b"\x1b]99;i=build-1:d=0:p=body:e=1:a=report,-focus:c=1;M3dh\x1b\\");
+    t.feed(b"\x1b]99;i=build-1:d=0:p=body:e=1;cm5pbmdz\x1b\\");
+    t.feed(b"\x1b]99;i=build-1:d=0:p=body:e=1;IQ==\x1b\\");
+    t.feed("\x1b]99;i=build-1:p=buttons:o=unfocused:w=5000:s=c2lsZW50:z=9;Open\u{2028}\u{2028}Dismiss\x1b\\".as_bytes());
+    let n = shown(&mut t);
+    assert_eq!(
+        (n[0].title.as_str(), n[0].body.as_str()),
+        ("Build; done", "3warnings!")
+    );
+    let rich = n[0].rich.clone().unwrap();
+    assert_eq!(rich.id.as_deref(), Some("build-1"));
+    assert_eq!(rich.buttons, ["Open", "Dismiss"]);
+    assert!(rich.report && !rich.focus && rich.report_close && rich.silent);
+    assert_eq!(rich.urgency, Urgency::Critical);
+    assert_eq!(rich.occasion, Occasion::Unfocused);
+    assert_eq!(rich.expire, Some(std::time::Duration::from_secs(5)));
+
+    // Plain and base64 chunks mixed.
+    t.feed(b"\x1b]99;i=m:d=0;Plain \x1b\\\x1b]99;i=m:e=1;YmFzZTY0\x1b\\");
+    assert_eq!(shown(&mut t)[0].title, "Plain base64");
+
+    // Identifiers echoed back are only ever safe characters.
+    t.feed(b"\x1b]99;i=a\x1b[b:p=close;\x1b\\");
+    t.feed(b"\x1b]99;i=x;p=alive;\x1b\\");
+    t.feed(b"\x1b]99;i=q:p=alive;\x1b\\");
+    t.feed(b"\x1b]99;p=close;\x1b\\");
+    let requests = t.take_notification_requests();
+    assert!(requests.contains(&NotificationRequest::Alive("q".into())));
+    assert!(requests.iter().all(|r| {
+        match r {
+            NotificationRequest::Close(id) | NotificationRequest::Alive(id) => id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_+.".contains(&c)),
+            NotificationRequest::Show(_) => true,
+        }
+    }));
+
+    // What's supported.
+    t.feed(b"\x1b]99;i=caps:p=?;\x1b\\");
+    let reply = String::from_utf8(t.take_responses()).unwrap();
+    assert!(
+        reply.starts_with("\x1b]99;i=caps:p=?;a=focus,report:c=1:"),
+        "{reply:?}"
+    );
+
+    // Nothing to show, and kinds not known, show nothing.
+    t.feed(b"\x1b]99;p=icon;AAAA\x1b\\\x1b]99;p=body;\x1b\\");
+    assert!(shown(&mut t).is_empty());
+}

@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, SpawnOptions, Status};
+use mightty_mux::{Host, Location, Mux, Pane, PaneId, Placement, Reason, SpawnOptions, Status};
 use mightty_term::{
-    ClipboardRequest, KEY_EVENT_TYPES, MouseMode, PointerShape, Rgb, Term, clipboard_reply,
+    ClipboardRequest, KEY_EVENT_TYPES, MouseMode, NotificationRequest, Occasion, PointerShape, Rgb,
+    Term, activated_reply, alive_reply, clipboard_reply, closed_reply,
 };
 
 use crate::bindings::{self, Action, Bindings, KeyState, Outcome, Trigger};
@@ -64,6 +65,14 @@ struct App {
     attention_count: usize,
     /// Panes with a banner up, and since when they needed the user.
     banners: Vec<(PaneId, Instant)>,
+    /// Banners programs asked for (OSC 99) still up, and when each goes.
+    rich_banners: Vec<RichBanner>,
+    /// Per pane, when its latest stretch of banners began and how many.
+    rich_rate: Vec<(PaneId, Instant, u32)>,
+    /// When the next check for expired banners is due, if one is.
+    expiry_due: Option<Instant>,
+    /// For naming banners whose program gave them no identifier.
+    rich_count: u64,
     /// The session last written (see `window-save-state`).
     saved: String,
     /// The key table switched to, and keys waiting for the rest of a binding.
@@ -488,6 +497,10 @@ impl Host for GuiHost {
     fn pane_status(&self, id: PaneId) {
         run_on_main_with(id as usize, on_pane_status);
     }
+
+    fn pane_notifications(&self, id: PaneId) {
+        run_on_main_with(id as usize, on_pane_notifications);
+    }
 }
 
 /// How often the session is saved, when it changed: directories change
@@ -622,6 +635,31 @@ extern "C" fn on_reload_signal(_: *mut c_void) {
 
 extern "C" fn on_pane_status(_: *mut c_void) {
     with_app(App::refresh_attention);
+}
+
+extern "C" fn on_pane_notifications(id: *mut c_void) {
+    with_app(|app| app.notification_requests(id as PaneId));
+}
+
+extern "C" fn on_banner_expiry(_: *mut c_void) {
+    with_app(App::expire_banners);
+}
+
+/// Banners programs asked for that are kept track of, at most: per pane,
+/// where more take back its oldest, and in all, where more aren't shown.
+const MAX_RICH_BANNERS: usize = 64;
+const MAX_RICH_BANNERS_PER_PANE: usize = 16;
+/// Banners a pane can show in `RICH_RATE_SPAN`; more aren't shown, so
+/// output can't flood the screen with them.
+const RICH_RATE: u32 = 10;
+const RICH_RATE_SPAN: Duration = Duration::from_secs(10);
+
+/// A banner a program asked for (OSC 99) that's still up.
+struct RichBanner {
+    banner: notify::Rich,
+    /// When it's taken back, if it is.
+    deadline: Option<Instant>,
+    category: String,
 }
 
 /// The longest a deletion's steps go undrawn (see `Surface::deleting`).
@@ -814,6 +852,10 @@ pub fn run(config: Config) -> io::Result<()> {
             quick: None,
             quick_return: NIL,
             banners: Vec::new(),
+            rich_banners: Vec::new(),
+            rich_rate: Vec::new(),
+            expiry_due: None,
+            rich_count: 0,
             saved: String::new(),
             keys: KeyState::default(),
             key_hud: None,
@@ -1994,6 +2036,10 @@ impl App {
             if self.banners.contains(&(pane.id, attention.since)) {
                 continue;
             }
+            // Shown as the program asked (see `notification_requests`).
+            if matches!(&attention.reason, Reason::Notification(n) if n.rich.is_some()) {
+                continue;
+            }
             let title = {
                 let term = pane.term.lock().unwrap();
                 let title = term.title().trim();
@@ -2006,6 +2052,185 @@ impl App {
             notify::post(pane.id, &title, &attention.reason.message());
             self.banners.push((pane.id, attention.since));
         }
+    }
+
+    /// Shows, takes back and lists the banners `pane`'s program asked
+    /// for (OSC 99).
+    fn notification_requests(&mut self, pane: PaneId) {
+        let Some(p) = self.mux.pane(pane) else {
+            return;
+        };
+        for request in p.take_notification_requests() {
+            match request {
+                NotificationRequest::Show(n) => {
+                    let Some(details) = n.rich else { continue };
+                    let wanted = match details.occasion {
+                        Occasion::Always => true,
+                        Occasion::Unfocused => !p.is_focused(),
+                        Occasion::Invisible => !p.is_visible(),
+                    };
+                    if wanted && self.rich_allowed(pane) {
+                        self.show_rich(pane, &n.title, &n.body, &details);
+                    }
+                }
+                NotificationRequest::Close(id) => {
+                    if let Some(at) = self
+                        .rich_banners
+                        .iter()
+                        .position(|r| r.banner.pane == pane && r.banner.id.as_deref() == Some(&*id))
+                    {
+                        let r = self.rich_banners.remove(at);
+                        notify::remove_rich(&r.banner);
+                        self.banner_closed(&r.banner);
+                    }
+                }
+                NotificationRequest::Alive(id) => {
+                    let alive: Vec<&str> = self
+                        .rich_banners
+                        .iter()
+                        .filter(|r| r.banner.pane == pane)
+                        .filter_map(|r| r.banner.id.as_deref())
+                        .collect();
+                    let _ = p.write(&alive_reply(&id, &alive));
+                }
+            }
+        }
+    }
+
+    /// Whether `pane` may show another banner now, counting it if so.
+    fn rich_allowed(&mut self, pane: PaneId) -> bool {
+        let now = Instant::now();
+        self.rich_rate
+            .retain(|&(_, since, _)| now.duration_since(since) < RICH_RATE_SPAN);
+        match self.rich_rate.iter_mut().find(|r| r.0 == pane) {
+            Some((_, _, count)) if *count >= RICH_RATE => false,
+            Some((_, _, count)) => {
+                *count += 1;
+                true
+            }
+            None => {
+                self.rich_rate.push((pane, now, 1));
+                true
+            }
+        }
+    }
+
+    fn show_rich(&mut self, pane: PaneId, title: &str, body: &str, details: &mightty_term::Rich) {
+        // Made-up keys start with `#`, which identifiers can't have.
+        let key = details.id.clone().unwrap_or_else(|| {
+            self.rich_count += 1;
+            format!("#{}", self.rich_count)
+        });
+        let banner = notify::Rich {
+            pane,
+            key,
+            id: details.id.clone(),
+            focus: details.focus,
+            report: details.report,
+            report_close: details.report_close,
+        };
+        // One with the same identifier is replaced, without saying it closed.
+        self.rich_banners
+            .retain(|r| !(r.banner.pane == pane && r.banner.key == banner.key));
+        let own: Vec<usize> = (0..self.rich_banners.len())
+            .filter(|&i| self.rich_banners[i].banner.pane == pane)
+            .collect();
+        if own.len() >= MAX_RICH_BANNERS_PER_PANE {
+            let old = self.rich_banners.remove(own[0]);
+            notify::remove_rich(&old.banner);
+        } else if self.rich_banners.len() >= MAX_RICH_BANNERS {
+            // Other panes' banners stay.
+            return;
+        }
+        let in_use: Vec<&str> = self
+            .rich_banners
+            .iter()
+            .map(|r| r.category.as_str())
+            .collect();
+        notify::use_category(&details.buttons, &in_use);
+        notify::post_rich(&banner, title, body, details);
+        let deadline = details.expire.map(|after| Instant::now() + after);
+        self.rich_banners.push(RichBanner {
+            banner,
+            deadline,
+            category: notify::category_name(&details.buttons),
+        });
+        self.arm_expiry();
+    }
+
+    /// Makes sure a check for expired banners runs when the next is due.
+    fn arm_expiry(&mut self) {
+        let Some(next) = self.rich_banners.iter().filter_map(|r| r.deadline).min() else {
+            return;
+        };
+        if self.expiry_due.is_some_and(|due| due <= next) {
+            return;
+        }
+        self.expiry_due = Some(next);
+        run_on_main_after(
+            next.saturating_duration_since(Instant::now()),
+            on_banner_expiry,
+        );
+    }
+
+    /// Tells the program a banner it asked for closed, if it wants to know.
+    fn banner_closed(&self, banner: &notify::Rich) {
+        if banner.report_close
+            && let Some(p) = self.mux.pane(banner.pane)
+        {
+            let _ = p.write(&closed_reply(banner.id.as_deref()));
+        }
+    }
+
+    /// Takes back banners whose time is up, and waits for the next.
+    fn expire_banners(&mut self) {
+        let now = Instant::now();
+        // A check due later is still to come.
+        if self.expiry_due.is_some_and(|due| due <= now) {
+            self.expiry_due = None;
+        }
+        let (done, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.rich_banners)
+            .into_iter()
+            .partition(|r| r.deadline.is_some_and(|at| at <= now));
+        self.rich_banners = kept;
+        for r in done {
+            notify::remove_rich(&r.banner);
+            self.banner_closed(&r.banner);
+        }
+        self.arm_expiry();
+    }
+
+    /// A banner a program asked for was clicked, or one of its buttons,
+    /// or it was dismissed.
+    fn rich_banner_response(&mut self, banner: notify::Rich, response: notify::Response) {
+        self.rich_banners
+            .retain(|r| !(r.banner.pane == banner.pane && r.banner.key == banner.key));
+        let pane = self.mux.pane(banner.pane);
+        match response {
+            notify::Response::Clicked => {
+                if banner.focus && self.focus_pane(banner.pane) {
+                    // SAFETY: main thread; documented signatures.
+                    unsafe {
+                        let ns_app: Id = msg!(class(c"NSApplication"), c"sharedApplication");
+                        call!(ns_app, c"activateIgnoringOtherApps:", YES);
+                    }
+                }
+                if banner.report
+                    && let Some(p) = &pane
+                {
+                    let _ = p.write(&activated_reply(banner.id.as_deref(), None));
+                }
+            }
+            notify::Response::Button(n) => {
+                if banner.report
+                    && let Some(p) = &pane
+                {
+                    let _ = p.write(&activated_reply(banner.id.as_deref(), Some(n)));
+                }
+            }
+            notify::Response::Dismissed => {}
+        }
+        self.banner_closed(&banner);
     }
 
     /// ⌘⇧A: the pane that has needed the user longest.
@@ -2617,7 +2842,7 @@ impl App {
     }
 
     /// Ends `closed`'s pane unless another surface shows it.
-    fn release_pane(&self, closed: &Surface) {
+    fn release_pane(&mut self, closed: &Surface) {
         let held = self
             .closed
             .iter()
@@ -2625,6 +2850,10 @@ impl App {
         if !held && !self.surfaces.iter().any(|s| s.pane.id == closed.pane.id) {
             closed.pane.set_visible(false);
             self.mux.close(closed.pane.id);
+            // Its banners stay up, but there's no one to tell about them.
+            let id = closed.pane.id;
+            self.rich_banners.retain(|r| r.banner.pane != id);
+            self.rich_rate.retain(|r| r.0 != id);
         }
     }
 
@@ -6696,7 +6925,9 @@ unsafe fn register_delegate_class() -> Id {
     }
     /// A banner was clicked: show its pane.
     extern "C" fn notification_clicked(_: Id, _: Sel, _center: Id, response: Id, done: Id) {
-        if let Some(pane) = notify::pane_of(response) {
+        if let Some((banner, what)) = notify::rich_of(response) {
+            with_app(|app| app.rich_banner_response(banner, what));
+        } else if let Some(pane) = notify::pane_of(response) {
             with_app(|app| app.focus_pane(pane));
             // SAFETY: main thread; documented signatures.
             unsafe {
@@ -6706,6 +6937,14 @@ unsafe fn register_delegate_class() -> Id {
         }
         // SAFETY: the completion handler AppKit passed, taking no arguments.
         unsafe { call_block(done) };
+    }
+    /// A banner is due while mightty is in front: shown all the same,
+    /// since programs ask for theirs whether or not it is (OSC 99's
+    /// `o=`), and mightty's own come only when it's in the background.
+    extern "C" fn notification_will_present(_: Id, _: Sel, _center: Id, _note: Id, done: Id) {
+        // UNNotificationPresentationOptionBanner | List | Sound.
+        // SAFETY: the completion handler AppKit passed, taking the options.
+        unsafe { call_block_with(done, 16 | 8 | 2) };
     }
     extern "C" fn did_become_key(_: Id, _: Sel, notification: Id) {
         set_key(notification, true);
@@ -6928,6 +7167,12 @@ unsafe fn register_delegate_class() -> Id {
                 (
                     c"userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:",
                     notification_clicked as extern "C" fn(Id, Sel, Id, Id, Id) as *const c_void,
+                    c"v@:@@@?",
+                ),
+                (
+                    c"userNotificationCenter:willPresentNotification:withCompletionHandler:",
+                    notification_will_present as extern "C" fn(Id, Sel, Id, Id, Id)
+                        as *const c_void,
                     c"v@:@@@?",
                 ),
                 (c"windowDidResignKey:", action(did_resign_key), c"v@:@"),
