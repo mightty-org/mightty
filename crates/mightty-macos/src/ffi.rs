@@ -247,6 +247,22 @@ pub unsafe fn call_block(block: Id) {
     }
 }
 
+/// Calls `block`, a `void (^)(NSUInteger)` handed to us.
+///
+/// # Safety
+/// `block` must be a live block taking one NSUInteger.
+pub unsafe fn call_block_with(block: Id, value: usize) {
+    if block.is_null() {
+        return;
+    }
+    // SAFETY: every block starts with the layout of `Block`.
+    unsafe {
+        let invoke: unsafe extern "C" fn(Id, usize) =
+            std::mem::transmute((*block.cast::<Block>()).invoke);
+        invoke(block, value);
+    }
+}
+
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     pub fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;

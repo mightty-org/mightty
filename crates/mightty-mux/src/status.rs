@@ -405,6 +405,7 @@ mod tests {
         let note = Notification {
             title: "Build".into(),
             body: "done".into(),
+            rich: None,
         };
         assert!(a.output(at(t, 100), 1, vec![note], false));
         let attention = a.attention.clone().unwrap();

@@ -23,7 +23,6 @@ Larger features, or ones fewer people need.
 
 **Terminal**
 
-- Rich desktop notifications (OSC 99): a title, urgency and buttons, where OSC 9 and OSC 777 carry only text.
 - Unicode 18 character widths.
 - Compress idle scrollback in memory.
 
