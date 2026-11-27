@@ -5759,6 +5759,10 @@ unsafe fn register_view_class() -> Id {
             if kind != KEY_DOWN || responder != view {
                 return NO;
             }
+            // Keys composing text are the input method's, as in key_down.
+            if with_surface(view, |w| w.preedit.is_empty()) != Some(true) {
+                return NO;
+            }
             match binding_for(event) {
                 Outcome::Run(actions) => {
                     perform_all(view, &actions);

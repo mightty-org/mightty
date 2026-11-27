@@ -12,10 +12,6 @@ now: the next items come from Later.
 
 Larger features, or ones fewer people need.
 
-**Keys**
-
-- A catch-all binding for keys that are otherwise unbound.
-
 **Windows, tabs and splits**
 
 - Drag a split to rearrange it, or into another tab or window.
